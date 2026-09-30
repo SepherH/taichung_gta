@@ -5,3 +5,4 @@ dist/
 # cc 啟動時自動重建的本機指引，不入庫
 CLAUDE.md
 .claude/
+var/
