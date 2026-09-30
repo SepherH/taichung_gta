@@ -161,6 +161,24 @@ for (const [label, r, terrain] of [['flat', A, flatTerrain], ['tilt', T, tiltTer
   check('退台建築總高 = OSM 高度', A.facade.bodies.size === fs1.setbacks && bad === 0, `bodies=${A.facade.bodies.size} setbacks=${fs1.setbacks} bad=${bad}`);
 }
 
+// 首層店面帶：寫進退台共用材質群組（不新增 draw call）；店面格 UV 只在貼圖最上一列（v ≥ 0.875），退台牆只用最下兩列（v ≤ 0.25）
+{
+  const sm = A.facade.group.getObjectByName('facade-setbacks');
+  const am = A.facade.group.getObjectByName('facade-arcades');
+  const uv = sm.geometry.attributes.uv.array;
+  let shop = 0;
+  let tierV = 0;
+  let bad = 0;
+  for (let i = 1; i < uv.length; i += 2) {
+    if (uv[i] >= 0.875) shop++;
+    else if (uv[i] <= 0.25 + 1e-6) tierV++;
+    else bad++;
+  }
+  const lit = sm.material.emissiveMap;
+  check('首層店面帶與退台共用材質（有 emissiveMap 夜間微亮）、店面 / 退台 UV 列互不重疊、facade mesh 數維持 6',
+    shop > 0 && tierV > 0 && bad === 0 && !!lit && A.facade.stats.meshes === 6 && !!am, `店面頂點 ${shop}、退台頂點 ${tierV}、越界 ${bad}、meshes ${A.facade.stats.meshes}`);
+}
+
 // 同一 seed 兩次產生：頂點數完全相同
 check('同 seed 兩次頂點數相同（facade）', vertexCounts(A.facade.group) === vertexCounts(B.facade.group) && A.facade.stats.vertices === B.facade.stats.vertices, `vertices=${A.facade.stats.vertices}/${B.facade.stats.vertices}`);
 check('同 seed 兩次頂點數相同（street）', vertexCounts(A.street.group) === vertexCounts(B.street.group) && A.street.stats.vertices === B.street.stats.vertices, `vertices=${A.street.stats.vertices}/${B.street.stats.vertices}`);

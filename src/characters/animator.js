@@ -5,16 +5,21 @@
 //   狀態        進入方式                        可被打斷            結束後
 //   idle/walk/run  update 依速度自動切換         jump punch hit knockdown enter_car（一律可觸發）
 //   jump        trigger('jump')                 hit、knockdown      回移動狀態
-//   punch       trigger('punch')                hit、knockdown      回移動狀態
-//   hit         trigger('hit')                  hit（重播）、knockdown  回移動狀態
+//   punch       trigger('punch')，移動狀態或 hit 中  hit、knockdown      回移動狀態
+//   hit         trigger('hit')                  hit（重播）、punch、knockdown  回移動狀態
+//   （hit 可被 punch 打斷：受擊硬直由 combat.js HIT_STUN 管，硬直結束後出拳不必等受擊動作播完）
 //   knockdown   trigger('knockdown')            （不可再被打斷）    停在最後一格，直到 trigger('getup')
 //   getup       trigger('getup')，僅限 knockdown 播完後   knockdown  回移動狀態
 //   enter_car   trigger('enter_car')，僅限移動狀態        knockdown  進入 drive
 //   drive       只能由 enter_car 播完進入        knockdown           update 的 driving 變 false → 回移動狀態
 // knockdown 可打斷一切（knockdown 本身除外）；一次性動作期間鎖住移動狀態（不因速度切換）。
+// idle_pose（選用，只有帶該 clip 的模型才有，例如主角 hero 單手插腰）：idle 且速度 < IDLE_POSE_SPEED 連續 IDLE_POSE_AFTER 秒後
+//   循環播放；一有移動或任何 trigger 立即淡出回正常狀態機（視同移動狀態，一次性動作可直接觸發）。沒有 clip 時略過、不警告。
+// hitStop(sec)：命中頓幀，期間狀態計時與 mixer 都停住（combat.js 命中時對攻守雙方呼叫）。
 //
 // 播放速率：walk / run 依實際水平速度 ÷ 參考速度縮放，夾在 RATE_MIN–RATE_MAX（經理裁決 0.6–1.8）；
-//   walk 需超過上限時改用 run clip（RUN_ABOVE = WALK_REF_SPEED × RATE_MAX），移動速度常數不因動畫而改
+//   walk 狀態上限放寬到 WALK_RATE_MAX（2.2），玩家步行 4.2 m/s 播 walk、跑步 8.5 m/s 與行人逃跑 4.5 m/s 播 run
+//   （門檻 RUN_ABOVE 夾在兩者之間），移動速度常數不因動畫而改
 // 事件：on('punchHitWindow', cb(phase, clipTime))，phase 為 'open' / 'close'，clipTime 為命中窗邊界在 clip 內的秒數
 //       （事件在跨過邊界的那一幀發出，實際幀時間最多晚一個 dt；punch 被打斷時若窗仍開著會補發 close，clipTime 為打斷時刻）；
 //       on('finished', cb(name))：一次性動作播完（knockdown 播完也會發，之後停住）。
@@ -34,10 +39,13 @@ const RUN_REF_SPEED = 5;
 const REF_SPEED = { walk: WALK_REF_SPEED, run: RUN_REF_SPEED };
 export const RATE_MIN = 0.6;
 export const RATE_MAX = 1.8;
+export const WALK_RATE_MAX = 2.2; // 只放寬 walk 狀態（其餘狀態仍 RATE_MIN–RATE_MAX）
 
-// 移動狀態切換門檻（m/s）：walk 播放速率到上限就改 run（1.4 × 1.8 = 2.52 m/s），另加遲滯避免在門檻附近來回切
+// 移動狀態切換門檻（m/s），另加遲滯避免在門檻附近來回切：
+// 玩家步行 4.2 m/s（player.js WALK_SPEED）以下播 walk；行人逃跑 4.5 m/s（traffic.js PED_RUN_SPEED）以上播 run；
+// RUN_ABOVE 取 4.4，run → walk 在 4.4 − 0.15 = 4.25 m/s，仍高於步行 4.2，跑步減速到步行時能回 walk
 const IDLE_BELOW = 0.2;
-const RUN_ABOVE = WALK_REF_SPEED * RATE_MAX;
+export const RUN_ABOVE = 4.4;
 const HYSTERESIS = 0.15;
 
 // punch 命中窗退路：manifest 沒有 events.punch.hitWindow（秒）時，改用 punch clip 長度的 35%–55%
@@ -45,6 +53,11 @@ export const PUNCH_HIT_WINDOW = [0.35, 0.55];
 
 // 無 clip 也無 manifest 長度時一次性動作的計時秒數（僅方塊人退路用，非美術數值）
 const FALLBACK_ONE_SHOT_SEC = 0.5;
+
+// 站立待機姿勢：idle 且速度低於此值（m/s）連續 IDLE_POSE_AFTER 秒後播 idle_pose
+export const IDLE_POSE = 'idle_pose';
+export const IDLE_POSE_AFTER = 6;
+export const IDLE_POSE_SPEED = 0.1;
 
 export const LOCOMOTION = ['idle', 'walk', 'run'];
 export const ONE_SHOTS = ['jump', 'punch', 'hit', 'knockdown', 'getup', 'enter_car'];
@@ -64,11 +77,11 @@ const CLIP_FALLBACK = {
   drive: ['enter_car', 'idle'],
 };
 
-// 各一次性動作可從哪些狀態觸發
-const MOVE = new Set(LOCOMOTION);
+// 各一次性動作可從哪些狀態觸發（idle_pose 視同移動狀態）
+const MOVE = new Set([...LOCOMOTION, IDLE_POSE]);
 const CAN_TRIGGER = {
   jump: (s) => MOVE.has(s),
-  punch: (s) => MOVE.has(s),
+  punch: (s) => MOVE.has(s) || s === 'hit',
   hit: (s) => MOVE.has(s) || s === 'jump' || s === 'punch' || s === 'hit',
   knockdown: (s) => s !== 'knockdown',
   getup: (s, a) => s === 'knockdown' && a.done,
@@ -91,6 +104,8 @@ export class CharacterAnimator {
     this._info = new Map(); // state → { action, duration, source }
     const meta = new Map((manifestClips || []).map((c) => [c.name, c]));
     for (const st of STATES) this._setupState(st, character.clips, meta);
+    this.hasIdlePose = character.clips.has(IDLE_POSE);
+    if (this.hasIdlePose) this._setupState(IDLE_POSE, character.clips, meta);
     const win = hitWindow ?? getCharacterManifest()?.events?.punch?.hitWindow;
     const punchDur = this._info.get('punch').duration;
     this.hitWindow = validWindow(win)
@@ -103,7 +118,23 @@ export class CharacterAnimator {
     this._windowOpen = false;
     this._speed = 0;
     this._phase = 0;
+    this._idleT = 0; // idle 且幾乎靜止的累計秒數（idle_pose 用）
+    this._stop = 0; // hitStop 剩餘秒數
     this._enter('idle');
+  }
+
+  // 物件池重用：停掉全部動作、回 idle（事件訂閱保留）
+  reset() {
+    if (this.mixer) this.mixer.stopAllAction();
+    this._state = null;
+    this._windowOpen = false;
+    this._stop = 0;
+    this._enter('idle');
+  }
+
+  // 命中頓幀：sec 秒內 update 不推進（取剩餘較長者）
+  hitStop(sec) {
+    this._stop = Math.max(this._stop, sec);
   }
 
   _setupState(st, clips, meta) {
@@ -168,6 +199,7 @@ export class CharacterAnimator {
     this._state = st;
     this._t = 0;
     this._done = false;
+    this._idleT = 0;
     if (!next) return;
     next.reset();
     next.setEffectiveTimeScale(1);
@@ -179,17 +211,17 @@ export class CharacterAnimator {
   // 依速度挑移動狀態（含遲滯）
   _locomotionFor(speed) {
     const cur = this._state;
-    const idleEdge = cur === 'idle' ? IDLE_BELOW + HYSTERESIS : IDLE_BELOW;
+    const idleEdge = cur === 'idle' || cur === IDLE_POSE ? IDLE_BELOW + HYSTERESIS : IDLE_BELOW;
     const runEdge = cur === 'run' ? RUN_ABOVE - HYSTERESIS : RUN_ABOVE;
     if (speed < idleEdge) return 'idle';
     return speed > runEdge ? 'run' : 'walk';
   }
 
-  // walk / run 播放速率依實際速度 ÷ 來源 clip 的參考速度縮放
+  // walk / run 播放速率依實際速度 ÷ 來源 clip 的參考速度縮放（walk 狀態上限 WALK_RATE_MAX）
   _rateFor(st, speed) {
     const ref = REF_SPEED[this._info.get(st).source];
     if (!ref) return 1;
-    return Math.min(RATE_MAX, Math.max(RATE_MIN, speed / ref));
+    return Math.min(st === 'walk' ? WALK_RATE_MAX : RATE_MAX, Math.max(RATE_MIN, speed / ref));
   }
 
   // 播放一次性動作；回傳是否被接受（依轉換表）
@@ -203,6 +235,13 @@ export class CharacterAnimator {
   // ctx：{ speed（水平速度 m/s）, grounded, driving, animate }；animate = false 時只跑狀態與事件、不推進 mixer
   //（遠距省效能：姿勢停在上一格，命中窗 / finished 等事件照常發出）
   update(dt, { speed = 0, grounded = true, driving = false, animate = true } = {}) {
+    if (this._stop > 0) {
+      // 頓幀：吃掉本幀時間（超過剩餘頓幀的部分照常推進）
+      const used = Math.min(this._stop, dt);
+      this._stop -= used;
+      dt -= used;
+      if (dt <= 0) return;
+    }
     this._speed = speed;
     const st = this._state;
     const info = this._info.get(st);
@@ -219,9 +258,16 @@ export class CharacterAnimator {
       }
     } else if (st === 'drive') {
       if (!driving) this._enter(this._locomotionFor(speed));
+    } else if (st === IDLE_POSE) {
+      // 一有移動立即回移動狀態
+      if (speed >= IDLE_POSE_SPEED || !grounded) this._enter(this._locomotionFor(speed));
     } else if (grounded) {
       const want = this._locomotionFor(speed);
       if (want !== st) this._enter(want);
+      else if (st === 'idle' && this.hasIdlePose) {
+        this._idleT = speed < IDLE_POSE_SPEED ? this._idleT + dt : 0;
+        if (this._idleT >= IDLE_POSE_AFTER) this._enter(IDLE_POSE);
+      }
     }
 
     const cur = this._info.get(this._state);

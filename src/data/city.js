@@ -25,7 +25,10 @@ export const PARKED_TYPES = [
 export const PARKED_RADIUS = 150;
 
 export const TRAFFIC_CAR_COUNT = 8;
-export const PEDESTRIAN_COUNT = 15;
+// 行人密度：以玩家（鏡頭焦點）為中心半徑 80 m 內維持的目標人數，依效能分級（mobile.js qualityTier：high 桌機 / low 手機）
+export const PED_TARGET = { high: 50, low: 30 };
+// 行人生成加權的百貨門口（OSM way id）：新光三越、老虎城購物中心、Top City 台中大遠百
+export const CROWD_MALL_IDS = [148849083, 150999799, 224955652];
 
 // 地面物件（角色、車輛）的顯示高度偏移：道路面在 y≈0.1，避免腳陷進路面
 export const SURFACE_OFFSET = 0.1;

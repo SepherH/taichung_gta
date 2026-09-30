@@ -4,7 +4,8 @@
 // 主迴圈 = 每幀讀輸入 → PhysicsWorld.step(dt)（固定 1/60 s 子步：子步前角色 move / 車輛 preStep / 車流 kinematic pose，
 // 子步後 contacts router.drain 與停放 / wrecked / 倒地狀態）→ combat.update（命中窗 / 倒地 / 起身）→ 以插值結果同步網格 → 鏡頭 / HUD → 渲染
 // 角色 / 車輛外觀：載入 public/models/characters 與 vehicles 的 manifest + glb（失敗時各自退回方塊人 / 程序化車）
-// 對抗（combat.js）：玩家 Actor 在 player.js、行人 Actor + NpcBrain 在 traffic.js；攻擊鍵 KeyE / pointer lock 中滑鼠左鍵 / 觸控「揮拳」
+// 對抗（combat.js）：玩家 Actor 在 player.js、行人 Actor + NpcBrain 在 traffic.js；攻擊鍵 KeyE / 滑鼠左鍵（未鎖定時同一下也觸發鎖定）/ 觸控「揮拳」
+// 行人密度：traffic.js 以玩家（駕駛時為車）為中心維持目標人數（依 qualityTier），每幀以鏡頭位置 / 朝向 setView 讓補生成避開視野
 // 上車：enter_car 動作播完（animator 自動進 drive）才真正進駕駛，期間鎖輸入；下車直接站起（首版）
 import * as THREE from 'three';
 import './style.css';
@@ -19,11 +20,10 @@ import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
 import { buildingAt, getTerrain, surfaceFootways } from './citymodel.js';
-import { closestOnSegment } from './geom.js';
 import { loadCharacterModels } from './characters/index.js';
 import { loadVehicleModels } from './vehicle-model.js';
 import { CombatSystem } from './combat.js';
-import { Player } from './player.js';
+import { Player, PLAYER_RADIUS, mousePunchListener } from './player.js';
 import { VehicleManager, driveControls } from './vehicle.js';
 import { Traffic } from './traffic.js';
 import { CameraRig } from './camera.js';
@@ -38,33 +38,17 @@ import { GROUPS } from './physics/groups.js';
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
 import { setActiveByDistance, ACTIVE_RADIUS } from './physics/npc-bodies.js';
-import { upOf } from './physics/vehicle-body.js';
+import { OVERTURN_PROMPT_SEC } from './physics/vehicle-body.js';
 
 const MAX_FRAME_DT = 0.1; // 單幀時間上限（s）；物理另有子步上限（world.js DEFAULT_MAX_SUBSTEPS）
 const FLIP_KEY = 'KeyR'; // 翻車自救（未被既有按鍵占用）
-const UPSIDE_DOWN_Y = 0.3; // 車身 up.y 低於此值視為翻車，提示按 R
 const ENTER_DIST = 2.6; // 上車距離（m，距車身圓）
-const ATTACK_KEY = 'KeyE'; // 揮拳（未被既有按鍵占用）；pointer lock 中滑鼠左鍵同義
-const PLAYER_KO_SEC = 3; // 玩家 hp 歸零倒地後多久在最近人行道起身（首版不做死亡懲罰）
+const ATTACK_KEY = 'KeyE'; // 揮拳（未被既有按鍵占用）；滑鼠左鍵同義
+const PLAYER_KO_SEC = 3; // 玩家 hp 歸零倒地後多久起身（原地 3 m 內空位優先，player.recoverAfterKnockout；首版不做死亡懲罰）
 
 // 觸控：駕駛時右上第二顆小鈕 = 翻正（top1 已是喇叭）；步行 sec3 = 揮拳（駕駛模式不顯示）
 registerTouchButton({ id: 'tb-flip', label: '翻正', code: FLIP_KEY, mode: 'tap', slot: 'top2', showWhen: 'drive' });
 registerTouchButton({ id: 'tb-punch', label: '揮拳', code: ATTACK_KEY, mode: 'tap', slot: 'sec3', showWhen: 'walk' });
-
-// 最近的地面步道點（玩家被打倒後的起身點）；沒有步道資料回傳 null
-function nearestFootway(x, z) {
-  const seg = { x: 0, z: 0, d2: 0, t: 0 };
-  let best = null;
-  for (const r of surfaceFootways) {
-    for (let i = 0; i < r.pts.length - 1; i++) {
-      const a = r.pts[i];
-      const b = r.pts[i + 1];
-      closestOnSegment(x, z, a.x, a.z, b.x, b.z, seg);
-      if (!best || seg.d2 < best.d2) best = { x: seg.x, z: seg.z, d2: seg.d2 };
-    }
-  }
-  return best;
-}
 
 const loading = new LoadingScreen(TRIVIA);
 
@@ -133,23 +117,22 @@ async function init() {
   const combat = new CombatSystem({ now: () => gameTime });
 
   await progress('放出行人與車流…');
-  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat });
+  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat, crowd: qualityTier() });
 
   await progress('準備角色與鏡頭…');
   const player = new Player(scene, spawn);
-  const character = new CharacterBody(RAPIER, pw, { x: spawn.x, y: spawn.y, z: spawn.z });
+  // 膠囊依主角身高（manifest height）換算，半徑維持 PLAYER_RADIUS
+  const character = new CharacterBody(RAPIER, pw, { x: spawn.x, y: spawn.y, z: spawn.z, radius: PLAYER_RADIUS, halfHeight: player.capsuleHalfHeight });
   player.attachPhysics(character);
   player.attachCombat(combat);
   player.placeAt(spawn.x, spawn.z, spawn.yaw, terrain);
   const input = new Input(renderer.domElement);
-  // 滑鼠左鍵揮拳：只在 pointer lock 中（未鎖定時的第一下點擊是鎖定滑鼠，input.js 處理）
-  let mousePunch = false;
-  renderer.domElement.addEventListener('mousedown', (e) => {
-    if (input.enabled && e.button === 0 && document.pointerLockElement === renderer.domElement) mousePunch = true;
-  });
+  // 滑鼠左鍵揮拳：鎖定中直接出拳；未鎖定時同一下點擊由 input.js 要求 pointer lock、同時出拳（player.js mousePunchListener）
+  const consumeMousePunch = mousePunchListener(renderer.domElement, input);
   const occluder = new PhysicsOccluder(pw, colliderStats);
   const rig = new CameraRig(camera, occluder, terrain);
   rig.yaw = spawn.yaw;
+  rig.playerHeight = player.height; // 步行目標點依主角身高
 
   await progress('繪製小地圖…');
   const hud = new HUD();
@@ -211,7 +194,7 @@ async function init() {
     return true;
   };
 
-  // 玩家 hp 歸零：播倒地，PLAYER_KO_SEC 後在最近人行道起身、hp 回滿
+  // 玩家 hp 歸零：播倒地，PLAYER_KO_SEC 後就近起身（原地 → 道路邊 → 步道）、hp 回滿
   combat.on('knockdown', ({ target }) => {
     if (target !== player.actor || player.actor.hp > 0) return;
     state.koTimer = PLAYER_KO_SEC;
@@ -221,8 +204,7 @@ async function init() {
     if (state.koTimer <= 0) return;
     state.koTimer -= dt;
     if (state.koTimer > 0) return;
-    const spot = nearestFootway(player.pos.x, player.pos.z);
-    if (spot) player.respawnAt(spot.x, player.pos.y, spot.z);
+    player.recoverAfterKnockout(terrain);
     combat.revive(player.actor);
   };
 
@@ -252,11 +234,21 @@ async function init() {
     return blockers;
   };
 
+  // 行人補生成的視野：鏡頭位置、水平朝向、水平視角半角（上一幀的鏡頭）
+  const viewDir = new THREE.Vector3();
+  const updateTrafficView = () => {
+    camera.getWorldDirection(viewDir);
+    const h = Math.hypot(viewDir.x, viewDir.z) || 1;
+    const halfH = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * camera.aspect);
+    traffic.setView(camera.position.x, camera.position.z, viewDir.x / h, viewDir.z / h, halfH);
+  };
+
   // 物理一幀：step（內含固定子步）→ 插值同步 → 遠距簡化（半徑 ACTIVE_RADIUS）
   const entities = [];
   const stepWorld = (dt, center) => {
     traffic.setBlockers(collectBlockers());
     updateTrafficContext();
+    updateTrafficView();
     pw.step(dt);
     gameTime += dt;
     combat.update(dt);
@@ -285,8 +277,8 @@ async function init() {
       hud.toast(fast ? '時間快轉中（再按 N 恢復）' : '時間恢復正常', 2.5);
     }
 
+    const mousePunch = consumeMousePunch(); // 每幀都讀（清除），駕駛中按的左鍵不留到下車
     const punchPressed = input.wasPressed(ATTACK_KEY) || mousePunch;
-    mousePunch = false;
     if (state.mode === 'drive') {
       const v = state.vehicle;
       v.setControls(driveControls(input.moveAxis(), input.down('Space')));
@@ -309,7 +301,8 @@ async function init() {
     } else {
       const v = state.vehicle;
       player.sitOn(v, dt);
-      const flipped = upOf(v.body.body.rotation()).y < UPSIDE_DOWN_Y;
+      // 翻覆（四輪離地或 |roll| ≥ 60°，汽車此時不自動回正）持續 1.5 s 才提示
+      const flipped = v.body.overturnedTime >= OVERTURN_PROMPT_SEC;
       hud.setPrompt(flipped ? '翻車了！按 R 翻正' : null);
       if (input.wasPressed('KeyF')) exitVehicle();
     }
@@ -323,6 +316,8 @@ async function init() {
       vehicleYaw: driving ? state.vehicle.yaw : 0,
       speed: driving ? state.vehicle.speed : 0,
       distScale: driving ? state.vehicle.spec.camScale : 1,
+      clearRadius: driving ? Math.hypot(state.vehicle.spec.length, state.vehicle.spec.width) / 2 : 0,
+      clearHeight: driving ? state.vehicle.spec.height + 0.3 : 0,
     });
 
     const loc = describeLocation(focus.x, focus.z);

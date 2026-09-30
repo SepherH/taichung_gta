@@ -114,10 +114,23 @@ for (const id of ['start-btn', 'fs-back', 'swipe-up']) {
   e.id = id;
   if (id !== 'start-btn') e.classList.add('hidden');
 }
+// localStorage mock（靈敏度設定）；throwStore = true 時模擬無痕模式存取丟例外
+const store = new Map();
+let throwStore = false;
+window.localStorage = {
+  getItem(k) {
+    if (throwStore) throw new Error('SecurityError');
+    return store.has(k) ? store.get(k) : null;
+  },
+  setItem(k, v) {
+    if (throwStore) throw new Error('SecurityError');
+    store.set(k, String(v));
+  },
+};
 globalThis.window = window;
 globalThis.document = document;
 
-const { Input } = await import('../../src/input.js');
+const { Input, LOOK_RAD_PER_UNIT, SENS_LEVELS, SENS_KEY, onSensitivityChange } = await import('../../src/input.js');
 const touch = await import('../../src/touch.js');
 const mobile = await import('../../src/mobile.js');
 
@@ -168,10 +181,9 @@ look.dispatch('pointerdown', pe(2, 700, 250));
 look.dispatch('pointermove', pe(2, 800, 270));
 pad.dispatch('pointermove', pe(3, 100, 100)); // 別的指標在搖桿區移動不影響
 a = input.moveAxis();
-const k = Math.PI / (0.0045 * window.innerWidth);
+const k = Math.PI / (LOOK_RAD_PER_UNIT * window.innerWidth * 0.5);
 check('雙指：搖桿維持 x≈1', near(a.x, 1, 1e-3));
 check('雙指：鏡頭 dx/dy 累加', near(input.dx, 100 * k, 1e-6) && near(input.dy, 20 * k, 1e-6), `dx=${input.dx.toFixed(2)} dy=${input.dy.toFixed(2)}`);
-check('拖一個螢幕寬 ≈ 180°', near(window.innerWidth * k * 0.0045, Math.PI, 1e-9));
 const m = input.consumeMouse();
 check('consumeMouse 取出後歸零', m.dx > 0 && input.dx === 0);
 // 捏合
@@ -245,6 +257,83 @@ const el = touch.registerTouchButton({ id: 'tb-attack', label: 'Punch', code: 'K
 check('registerTouchButton 新增後出現在 DOM', $('tb-attack') === el && el.classList.contains('slot-sec3') && el.attrs['data-show'] === 'walk');
 el.dispatch('pointerdown', pe(12, 800, 300));
 check('新按鈕 tap → pressed 含 KeyJ', input.wasPressed('KeyJ'));
+input.endFrame();
+
+// 7b. 鏡頭靈敏度 / 拖曳係數（yaw 變化 = dx × LOOK_RAD_PER_UNIT，與 camera.js 相同換算）
+input.consumeMouse();
+const yawOfDrag = (id, px, W = window.innerWidth) => {
+  window.innerWidth = W;
+  look.dispatch('pointerdown', pe(id, 520, 250));
+  look.dispatch('pointermove', pe(id, 520 + px * 0.5, 250));
+  look.dispatch('pointermove', pe(id, 520 + px, 250));
+  look.dispatch('pointerup', pe(id, 520 + px, 250));
+  const mm = input.consumeMouse();
+  window.innerWidth = 1000;
+  return mm.dx * LOOK_RAD_PER_UNIT;
+};
+check('預設觸控靈敏度 = 中', input.sensLevel('touch').id === 'mid' && input.sensLevel('mouse').id === 'mid');
+let yaw = yawOfDrag(20, 500);
+check('拖半個螢幕寬（1000px 寬）→ yaw ≈ π ±10%', Math.abs(yaw - Math.PI) <= Math.PI * 0.1, `yaw=${((yaw * 180) / Math.PI).toFixed(1)}°`);
+yaw = yawOfDrag(21, 400, 800);
+check('換算依實際螢幕寬（800px 寬拖 400px）→ ≈ π', Math.abs(yaw - Math.PI) <= Math.PI * 0.1, `yaw=${((yaw * 180) / Math.PI).toFixed(1)}°`);
+check('滑鼠中檔：800 px ≈ 360°', near(800 * LOOK_RAD_PER_UNIT, 2 * Math.PI, 1e-9));
+check('三段倍率 0.6 / 1.0 / 1.6', SENS_LEVELS.map((l) => l.mul).join('/') === '0.6/1/1.6');
+const events = [];
+const off = onSensitivityChange((ev) => events.push(`${ev.kind}:${ev.level.id}`));
+const sensBtn = $('tb-sens');
+check('右上「靈敏度」鈕存在（top3、步行 / 駕駛皆顯示）', !!sensBtn && sensBtn.classList.contains('slot-top3') && sensBtn.attrs['data-show'] === 'always');
+const got = [];
+for (let i = 0; i < 3; i++) {
+  sensBtn.dispatch('pointerdown', pe(30 + i, 850, 30));
+  sensBtn.dispatch('pointerup', pe(30 + i, 850, 30));
+  got.push([input.sensLevel('touch').id, yawOfDrag(40 + i, 500)]);
+}
+check('靈敏度鈕循環 中→高→低→中', got.map((g) => g[0]).join('→') === 'high→low→mid', got.map((g) => g[0]).join('→'));
+check(
+  '三段倍率套用到觸控 yaw（高 1.6π / 低 0.6π / 中 π）',
+  near(got[0][1], 1.6 * Math.PI, 1e-6) && near(got[1][1], 0.6 * Math.PI, 1e-6) && near(got[2][1], Math.PI, 1e-6),
+  got.map((g) => `${((g[1] * 180) / Math.PI).toFixed(0)}°`).join(' / '),
+);
+check('靈敏度鈕不寫入按鍵', input.keys.size === 0 && !input.wasPressed('undefined'));
+sensBtn.dispatch('pointerdown', pe(33, 850, 30));
+sensBtn.dispatch('pointerup', pe(33, 850, 30));
+check('觸控檔位存 localStorage', store.get('tcgta.lookSens.touch') === 'high' && !store.has('tcgta.lookSens.mouse'));
+// 桌機：O 鍵循環滑鼠靈敏度、mousemove 套倍率
+window.dispatch('keydown', { code: SENS_KEY, repeat: false });
+window.dispatch('keyup', { code: SENS_KEY });
+check('O 鍵 → 滑鼠 高、存 localStorage', input.sensLevel('mouse').id === 'high' && store.get('tcgta.lookSens.mouse') === 'high');
+window.dispatch('keydown', { code: SENS_KEY, repeat: true });
+check('按住重複不連跳', input.sensLevel('mouse').id === 'high');
+input.consumeMouse();
+input.dragging = true;
+window.dispatch('mousemove', { movementX: 100, movementY: -50 });
+input.dragging = false;
+let mm = input.consumeMouse();
+check('滑鼠高檔 ×1.6', near(mm.dx, 160, 1e-9) && near(mm.dy, -80, 1e-9), `dx=${mm.dx} dy=${mm.dy}`);
+check('切換通知訂閱者（hud toast）', events.join(',') === 'touch:high,touch:low,touch:mid,touch:high,mouse:high', events.join(','));
+off();
+const input2 = new Input(new El('canvas'));
+check('新 Input 讀回 localStorage 檔位', input2.sensLevel('mouse').id === 'high' && input2.sensLevel('touch').id === 'high');
+throwStore = true;
+const input3 = new Input(new El('canvas'));
+input3.cycleSensitivity('touch');
+throwStore = false;
+check('localStorage 丟例外 → 中檔且切換不拋錯', input3.sensLevel('mouse').id === 'mid' && input3.sensLevel('touch').id === 'high');
+// 從按鈕上開始的拖曳不轉鏡頭（按鈕 capture 該指標；#touch-look 不認得此 pointerId）
+input.consumeMouse();
+jump.dispatch('pointerdown', pe(50, 900, 400));
+jump.dispatch('pointermove', pe(50, 700, 350));
+look.dispatch('pointermove', pe(50, 600, 300));
+jump.dispatch('pointerup', pe(50, 600, 300));
+mm = input.consumeMouse();
+check('從按鈕開始拖曳 → 不轉鏡頭', mm.dx === 0 && mm.dy === 0);
+input.endFrame();
+// 攻擊鈕：main.js 以 sec3 註冊「揮拳」→ 自動改放大號 attack slot
+const punch = touch.registerTouchButton({ id: 'tb-punch', label: '揮拳', code: 'KeyE', mode: 'tap', slot: 'sec3', showWhen: 'walk' });
+check('揮拳鈕套用 attack slot', punch.classList.contains('slot-attack') && !punch.classList.contains('slot-sec3') && touch.SLOTS.includes('attack'));
+punch.dispatch('pointerdown', pe(51, 800, 300));
+check('揮拳鈕 tap → pressed 含 KeyE', input.wasPressed('KeyE'));
+punch.dispatch('pointerup', pe(51, 800, 300));
 input.endFrame();
 
 // 8. 開始遊戲手勢 → body.playing + 全螢幕；直向遮罩期間輸入封鎖（駕駛中拉手煞車）

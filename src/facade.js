@@ -2,7 +2,10 @@
 //   女兒牆（沿輪廓，凹多邊形正確）、高樓屋頂退台量體 + 機房 / 水塔、中低層住商首層騎樓、
 //   高樓挑高雨棚、住宅陽台板 + 欄杆帶。
 // 固定種子（seed 與建築 id 混合）：同一棟每次載入相同；共用材質、同類細節合併成單一 BufferGeometry，draw call 數固定。
-// 只疊加、不修改原牆：騎樓以「牆外柱列 + 首層深色陰影帶 + 上方樓板外挑」表現（首層不內縮：碰撞沿用 OSM 輪廓，內縮會出現看得到卻走不進的空間）。
+// 只疊加、不修改原牆：騎樓以「牆外柱列 + 首層店面帶 + 上方樓板外挑」表現（首層不內縮：碰撞沿用 OSM 輪廓，內縮會出現看得到卻走不進的空間）。
+// 首層店面帶：柱與柱之間各貼一格店面（深灰框 + 玻璃 + 招牌帶，白天有輕微明暗、夜間微亮店面光），
+//   與退台量體共用同一張窗格貼圖 / 材質（寫進 setbacks 群組，不新增 draw call）：退台牆只用貼圖最下兩列（v ≤ 0.25），
+//   店面格畫在最上一列（v 0.875–1），兩者互不取樣。
 // 高樓屋頂退台採「真實性優先」：總高維持 OSM 高度——主體降 tierH、退台量體補在主體頂到 OSM 高度之間；
 //   回傳 bodies（id → 主體高度），buildings.js 依此擠出主體（colliders 仍用 OSM 高度，退台頂 = OSM 頂）。
 // 高度基準一律取 terrain.buildingBase(id)（平地 = 0）；各尺寸比例依 reference §3–§5 的七期街景調性，數字皆為推測預設值。
@@ -58,7 +61,7 @@ const ARCADE_H_MIN = 3.6;
 const ARCADE_H_MAX = 4.5;
 const ARCADE_SLAB_OUT = 0.7;
 const ARCADE_SLAB_T = 0.3;
-const BAND_OFFSET = 0.03; // 首層深色帶離牆距離（避免與原牆 z-fighting）
+const BAND_OFFSET = 0.03; // 首層店面帶離牆距離（避免與原牆 z-fighting）
 const CANOPY_Y = 5.5; // 高樓挑高雨棚高度（推測）
 const CANOPY_OUT = 1.5;
 const CANOPY_T = 0.2;
@@ -72,12 +75,13 @@ const BALCONY_MIN_W = 2.5;
 const BALCONY_MAX_W = 7;
 const BALCONY_PAIR_EDGE = 28; // 邊長 ≥ 此值時一層放兩座
 const BALCONY_MAX = 20; // 每棟上限
+const SHOP_SEED = 0x5a0f7e11; // 店面格挑選亂數的種子混合值
 
 const COLORS = {
   parapet: new THREE.Color(0xcfccc5),
   room: new THREE.Color(0xbdbab3),
   tank: new THREE.Color(0xd8d8d4),
-  band: new THREE.Color(0x2e2f32),
+  band: new THREE.Color(0xe0e0e0), // 店面帶乘在貼圖店面格上（深灰框 / 玻璃的明暗由貼圖提供）
   column: new THREE.Color(0xe4e2dd),
   slab: new THREE.Color(0xd3d0ca),
   canopy: new THREE.Color(0x8e959b),
@@ -93,6 +97,11 @@ const TIER_TINTS = {
 // 退台窗格貼圖：一張 = 8 開間 × 8 層（與 buildings.js 相同慣例），左上角保留純牆格
 const TIER_BAY = 3.6;
 const SOLID_UV = [0.06, 0.06];
+// 店面格：貼圖最上一列（canvas 第 0 列）的 8 格；V 範圍內縮半個像素，避免與相鄰列 / 包裹邊雙線性混色
+const TEX_SIZE = 256;
+const SHOP_ROW_V0 = 7 / 8 + 0.5 / TEX_SIZE;
+const SHOP_ROW_V1 = 1 - 0.5 / TEX_SIZE;
+const SHOP_FRAME_U = 1.5 / TEX_SIZE; // 店面格左框中央（柱列兩端的短段取此處的框色）
 const UP = [0, 1, 0];
 
 function heightOf(b) {
@@ -359,11 +368,9 @@ function clearOutside(e, s0, s1, depth, ctx) {
   return true;
 }
 
-// 騎樓：首層深色帶（貼牆外）+ 柱列（間距 4–6 m）+ 上方外挑樓板
-function arcade(w, e, base, arcH) {
-  const bx = e.nx * BAND_OFFSET;
-  const bz = e.nz * BAND_OFFSET;
-  wall(w, e.ax + bx, e.az + bz, e.bx + bx, e.bz + bz, base, base + arcH, e.nx, e.nz, COLORS.band);
+// 騎樓：首層店面帶（貼牆外，寫進 wShop = 退台共用材質群組）+ 柱列（間距 4–6 m）+ 上方外挑樓板；
+// 店面帶依柱位切段，每段一格店面（shopRng 挑 8 種店面格之一），柱列兩端的短段取店面框色
+function arcade(w, wShop, e, base, arcH, shopRng) {
   const mx = (e.ax + e.bx) / 2;
   const mz = (e.az + e.bz) / 2;
   const so = ARCADE_SLAB_OUT / 2;
@@ -379,6 +386,25 @@ function arcade(w, e, base, arcH) {
     const s = COL_END_INSET + (span * k) / m;
     box(w, e.ax + e.tx * s + e.nx * co, e.az + e.tz * s + e.nz * co, e.tx, e.tz, COL_SIZE / 2, COL_SIZE / 2, base, base + arcH, COLORS.column);
   }
+  const bx = e.nx * BAND_OFFSET;
+  const bz = e.nz * BAND_OFFSET;
+  const seg = (s0, s1, uv) => {
+    wall(wShop, e.ax + e.tx * s0 + bx, e.az + e.tz * s0 + bz, e.ax + e.tx * s1 + bx, e.az + e.tz * s1 + bz, base, base + arcH, e.nx, e.nz, COLORS.band, uv);
+  };
+  const frameU = (i) => i / 8 + SHOP_FRAME_U;
+  const frame = (i) => {
+    const u = frameU(i);
+    return [u, SHOP_ROW_V0, u, SHOP_ROW_V0, u, SHOP_ROW_V1, u, SHOP_ROW_V1];
+  };
+  const first = Math.floor(shopRng() * 8) % 8;
+  seg(0, COL_END_INSET, frame(first));
+  for (let k = 0; k < m; k++) {
+    const i = k === 0 ? first : Math.floor(shopRng() * 8) % 8;
+    const u0 = i / 8 + 0.5 / TEX_SIZE;
+    const u1 = (i + 1) / 8 - 0.5 / TEX_SIZE;
+    seg(COL_END_INSET + (span * k) / m, COL_END_INSET + (span * (k + 1)) / m, [u0, SHOP_ROW_V0, u1, SHOP_ROW_V0, u1, SHOP_ROW_V1, u0, SHOP_ROW_V1]);
+  }
+  seg(e.L - COL_END_INSET, e.L, frame(first));
   return m + 1;
 }
 
@@ -412,8 +438,9 @@ function balcony(w, e, s, width, y) {
 }
 
 // ---------- 貼圖 / 材質 ----------
+// 窗格貼圖 8 × 8 格：退台牆取樣最下兩列（第 6、7 列；第 7 列左下角為純牆格），第 0 列畫首層店面格（drawShopCell）
 function makeTierTextures(anisotropy, rng) {
-  const S = 256;
+  const S = TEX_SIZE;
   const cell = S / 8;
   const wallC = makeCanvas(S, S);
   const wctx = wallC.getContext('2d');
@@ -424,8 +451,9 @@ function makeTierTextures(anisotropy, rng) {
   lctx.fillStyle = '#000000';
   lctx.fillRect(0, 0, S, S);
   const warm = ['#ffd9a0', '#ffe8c0', '#fff2d8'];
+  for (let i = 0; i < 8; i++) drawShopCell(wctx, lctx, i * cell, cell, rng);
   for (let i = 0; i < 8; i++) {
-    for (let j = 0; j < 8; j++) {
+    for (let j = 1; j < 8; j++) {
       if (i === 0 && j === 7) continue; // 純牆格（頂面取樣）
       const x = i * cell + 4;
       const y = j * cell + 6;
@@ -446,6 +474,40 @@ function makeTierTextures(anisotropy, rng) {
     return t;
   };
   return { map: toTex(wallC), emissiveMap: toTex(litC) };
+}
+
+// 首層店面格（canvas 第 0 列，x0 起 cell 寬）：由下而上 = 踢腳板、玻璃（上亮下暗的反光漸層 + 中央門框）、招牌帶、頂框；
+// 顏色是乘上 COLORS.band 前的值：整體深灰、玻璃偏藍灰，白天看得出框與玻璃的明暗。
+// 夜間：emissiveMap 在玻璃與招牌處放暗暖色（材質 emissiveIntensity 上限 1.2，約為亮窗的 1/5～1/3 →「微亮店面光」），每格亮度略有差異
+function drawShopCell(wctx, lctx, x0, cell, rng) {
+  const frameW = 2;
+  const kick = 3; // 踢腳板（px，canvas 由上往下畫：店面格底 = 本格 y 最大處）
+  const sign = 7; // 招牌帶
+  const top = 2; // 頂框（與上方列包裹相鄰，保持淺色以免退台牆底緣混出深線）
+  const glassY0 = top + sign;
+  const glassY1 = cell - kick;
+  wctx.fillStyle = '#6e7276'; // 框
+  wctx.fillRect(x0, 0, cell, cell);
+  wctx.fillStyle = '#c8c8c6';
+  wctx.fillRect(x0, 0, cell, top);
+  wctx.fillStyle = ['#7d8186', '#6a7078', '#858078'][Math.floor(rng() * 3) % 3]; // 招牌帶
+  wctx.fillRect(x0 + frameW, top, cell - frameW * 2, sign - 1);
+  wctx.fillStyle = '#505356'; // 踢腳板
+  wctx.fillRect(x0, glassY1, cell, kick);
+  // 玻璃反光：上亮下暗分 4 段（不用 createLinearGradient，node 測試的 canvas 替身只有 fillRect）
+  const glassH = glassY1 - glassY0;
+  const shades = ['#5e6a76', '#4e5964', '#414b56', '#343c46'];
+  shades.forEach((c, k) => {
+    wctx.fillStyle = c;
+    const y = glassY0 + Math.round((glassH * k) / shades.length);
+    wctx.fillRect(x0 + frameW, y, cell - frameW * 2, glassY0 + Math.round((glassH * (k + 1)) / shades.length) - y);
+  });
+  wctx.fillStyle = '#6e7276'; // 中央門框
+  wctx.fillRect(x0 + cell / 2 - 0.5, glassY0, 1, glassY1 - glassY0);
+  lctx.fillStyle = ['#3a3024', '#5e4c34', '#7a6444', '#8c7450'][Math.floor(rng() * 4) % 4];
+  lctx.fillRect(x0 + frameW, glassY0, cell - frameW * 2, glassY1 - glassY0);
+  lctx.fillStyle = '#6a5a40';
+  lctx.fillRect(x0 + frameW, top, cell - frameW * 2, sign - 1);
 }
 
 function defaultMaterials(anisotropy, seed) {
@@ -478,7 +540,7 @@ export function buildFacadeDetails(buildingList, {
 
   const W = {
     parapets: new DetailWriter(),
-    setbacks: new DetailWriter(),
+    setbacks: new DetailWriter(), // 退台量體 + 首層店面帶（共用窗格貼圖材質）
     roofUnits: new DetailWriter(),
     arcades: new DetailWriter(),
     canopies: new DetailWriter(),
@@ -543,7 +605,8 @@ export function buildFacadeDetails(buildingList, {
         stats.canopyEdges += facing.length;
       } else if (ARCADE_TYPES.has(b.type) && h >= ARCADE_H_MIN * 1.6) {
         const arcH = Math.min(clamp(floorH * 1.2, ARCADE_H_MIN, ARCADE_H_MAX), h * 0.5);
-        for (const e of facing) stats.arcadeColumns += arcade(W.arcades, e, base, arcH);
+        const shopRng = mulberry32((b.id ^ SHOP_SEED) >>> 0); // 獨立亂數：不影響後續陽台等配置
+        for (const e of facing) stats.arcadeColumns += arcade(W.arcades, W.setbacks, e, base, arcH, shopRng);
         stats.arcadeBuildings++;
         stats.arcadeEdges += facing.length;
       }

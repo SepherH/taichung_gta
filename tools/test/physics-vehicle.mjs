@@ -10,10 +10,11 @@ import { fileURLToPath } from 'node:url';
 import {
   VehicleBody, deriveVehicleSpec, chassisLayout, suspensionFor, frictionSlipFor, engineAccel, driveCommand, steerLimit,
   rotateVec, yawQuat, yawOf, rollOf, upOf, wheelRayGroups, membershipOf, filterOf, makeGroups, HANDLING, SUSPENSION, COM_DROP, GRAVITY,
+  ROLL_ASSIST_MAX_ROLL, OVERTURN_PROMPT_SEC,
 } from '../../src/physics/vehicle-body.js';
 import {
   createNpcCar, createPedestrianBody, setActiveByDistance, attachNpcReactions,
-  NPC_WRECK_IMPULSE, NPC_WRECK_MIN_SEC, PED_MASS, PED_SETTLE_SEC,
+  NPC_WRECK_IMPULSE, NPC_WRECK_MIN_SEC, PED_MASS, PED_SETTLE_SEC, pedLaunch, pedLaunchFlight,
 } from '../../src/physics/npc-bodies.js';
 import { createContactRouter, HIT_THRESHOLDS, REARM_SEC } from '../../src/physics/contacts.js';
 
@@ -272,6 +273,7 @@ class MockVehicleController {
     this._fwd = 0;
     this._up = 1;
     this._updates = [];
+    this._contact = true; // 測試可設 false 模擬四輪離地
   }
   set setIndexForwardAxis(axis) { this._fwd = axis; }
   get indexForwardAxis() { return this._fwd; }
@@ -300,7 +302,7 @@ class MockVehicleController {
   wheelSuspensionLength(i) { return this._wheels[i].rest; }
   wheelRotation() { return 0; }
   wheelSteering(i) { return this._wheels[i].steer; }
-  wheelIsInContact() { return true; }
+  wheelIsInContact() { return this._contact; }
 }
 
 class MockWorld {
@@ -539,6 +541,64 @@ function runPureTests(dts) {
     const tq = vb.body._torques.at(-1);
     check('機車防傾：右傾 10° 時施加繞前進軸的反向力矩衝量', tq && tq.z < 0 && Math.abs(tq.x) < 1e-9, `τ·dt = ${f3(tq.z)} N·m·s`);
   }
+  {
+    // 汽車翻覆：只在有輪接地且 |roll| < 60° 時回正；翻覆持續 OVERTURN_PROMPT_SEC 後才該提示按 R
+    const w = new MockWorld();
+    const vb = new VehicleBody(R, w, VT.sedan, { groups: G });
+    const vc = [...w._controllers][0];
+    const rollQ = (deg) => ({ x: 0, y: 0, z: Math.sin((deg * DEG) / 2), w: Math.cos((deg * DEG) / 2) });
+    vb.body._q = rollQ(30);
+    vb.preStep(DT);
+    const t30 = vb.body._torques.length;
+    vb.body._q = rollQ(ROLL_ASSIST_MAX_ROLL / DEG + 1);
+    const n0 = vb.body._torques.length;
+    const steps = Math.ceil(OVERTURN_PROMPT_SEC / DT);
+    for (let i = 0; i < steps - 1; i++) vb.preStep(DT);
+    const early = vb.overturnedTime < OVERTURN_PROMPT_SEC;
+    vb.preStep(DT);
+    const noTorque61 = vb.body._torques.length === n0;
+    const due = vb.overturnedTime >= OVERTURN_PROMPT_SEC - 1e-9;
+    check(`汽車回正輔助：roll 30° 接地 → 施力；roll ${f2(ROLL_ASSIST_MAX_ROLL / DEG + 1)}° → 不施力、${steps} 步後 overturnedTime ${f2(vb.overturnedTime)} s ≥ ${OVERTURN_PROMPT_SEC}（前一步未達）`,
+      t30 === 1 && noTorque61 && due && early);
+    vb.body._q = rollQ(180);
+    vb.overturnedTime = 0;
+    for (let i = 0; i < 30; i++) vb.preStep(DT);
+    check('汽車倒扣（roll 180°）：0.5 s 內不施加回正力矩', vb.body._torques.length === n0);
+    vb.body._q = rollQ(20);
+    vc._contact = false;
+    vb.preStep(DT);
+    check('汽車四輪離地（roll 20°）：不施力、overturnedTime 累計', vb.body._torques.length === n0 && vb.overturnedTime > 0);
+    vc._contact = true;
+    vb.preStep(DT);
+    check('重新接地且 roll < 60°：恢復施力、overturnedTime 歸零', vb.body._torques.length === n0 + 1 && vb.overturnedTime === 0);
+    vb.body._q = rollQ(180);
+    vb.preStep(DT);
+    vb.flip();
+    check('flip() 後 overturnedTime 歸零', vb.overturnedTime === 0);
+    const sc = new VehicleBody(R, new MockWorld(), VT.scooter, { groups: G });
+    sc.body._q = rollQ(70);
+    sc.preStep(DT);
+    check('機車 roll 70° 仍維持防傾力矩', sc.body._torques.length === 1 && sc.body._torques[0].z < 0);
+  }
+  {
+    // 手煞車偏航率上限：超出 handbrakeMaxYawRate 才施加反向偏航力矩
+    const w = new MockWorld();
+    const vb = new VehicleBody(R, w, VT.sedan, { groups: G });
+    vb.setControls({ handbrake: true, steer: 1 });
+    vb.body._av = { x: 0, y: HANDLING.handbrakeMaxYawRate - 0.1, z: 0 };
+    vb.preStep(DT);
+    const below = vb.body._torques.filter((t) => Math.abs(t.y) > 1e-9).length;
+    vb.body._av = { x: 0, y: HANDLING.handbrakeMaxYawRate + 1, z: 0 };
+    vb.preStep(DT);
+    const tq = vb.body._torques.at(-1);
+    const expect = -vb.inertia.y * 1 * Math.min(1, HANDLING.handbrakeYawDamping * DT);
+    vb.setControls({ steer: 1 });
+    const n1 = vb.body._torques.length;
+    vb.preStep(DT);
+    const released = vb.body._torques.slice(n1).filter((t) => Math.abs(t.y) > 1e-9).length;
+    check(`手煞車偏航阻尼：${HANDLING.handbrakeMaxYawRate} rad/s 以下不施力、超出 1 rad/s → τ·dt ${f2(tq.y)}（預期 ${f2(expect)}）、放開手煞車不施力`,
+      below === 0 && near(tq.y, expect, 1e-6) && released === 0);
+  }
 
   console.log('\n[純邏輯] NPC 車 / 行人（mock Rapier）');
   {
@@ -602,6 +662,24 @@ function runPureTests(dts) {
       threw = true;
     }
     check('rotationMode free 允許三軸旋轉；未知模式丟錯', free.body._rot.join() === 'true,true,true' && threw);
+  }
+  {
+    // 被車撞上拋分級：30 km/h 拋高 0.6–1.0 m、落地前水平飛 5–9 m（平地拋體近似；修正前一律 lift 0.25）
+    const KMH30 = 30 / 3.6;
+    const fl = pedLaunchFlight(PED_MASS * KMH30);
+    const old = { apex: (0.25 * KMH30) ** 2 / (2 * GRAVITY), distance: (KMH30 * 2 * 0.25 * KMH30) / GRAVITY };
+    check(`30 km/h 撞行人：拋高 ${f2(fl.apex)} m（0.6–1.0）、水平飛 ${f2(fl.distance)} m（5–9）；修正前 ${f2(old.apex)} m / ${f2(old.distance)} m`,
+      fl.apex >= 0.6 && fl.apex <= 1.0 && fl.distance >= 5 && fl.distance <= 9);
+    const tiers = [20, 40, 60].map((k) => pedLaunchFlight((PED_MASS * k) / 3.6));
+    check(`上拋隨車速遞增：20 / 40 / 60 km/h 拋高 ${tiers.map((t) => f2(t.apex)).join(' / ')} m、飛 ${tiers.map((t) => f2(t.distance)).join(' / ')} m`,
+      tiers[0].apex < fl.apex && fl.apex < tiers[1].apex && tiers[1].apex <= tiers[2].apex);
+    const punch = pedLaunch(120);
+    check(`拳擊擊倒（120 N·s）上拋維持 0.25 倍：${f3(punch.vertical)} m/s`, near(punch.vertical, (120 / PED_MASS) * 0.25, 1e-9));
+    const w = new MockWorld();
+    const ped = createPedestrianBody(R, w, { x: 0, y: 0, z: 0, yaw: 0 }, { groups: G });
+    ped.hit({ impulse: PED_MASS * KMH30, dir: { x: 0, y: 0, z: 1 } });
+    const l30 = pedLaunch(PED_MASS * KMH30);
+    check(`hit(30 km/h) 初速：水平 ${f2(ped.body._lv.z)}、向上 ${f2(ped.body._lv.y)} m/s`, near(ped.body._lv.z, l30.horizontal, 1e-9) && near(ped.body._lv.y, l30.vertical, 1e-9));
   }
   {
     const w = new MockWorld();
@@ -871,6 +949,44 @@ async function runRapierTests() {
     }
   }
 
+  // 6b. 70 km/h 手煞車 + 滿舵 2 s 的轉向角（目標 90–150°；修正前約 230°）、倒扣不自動翻回、側傾仍回正
+  for (const t of ['sedan', 'taxi', 'suv']) {
+    const { env, vb } = fresh(t, { x: LANE_X.flat, z: -300 });
+    stepAll(env, [vb], 30);
+    setForwardSpeed(vb, 70 / 3.6);
+    vb.setControls({ throttle: 0, steer: 1, handbrake: true });
+    let prev = yawOf(vb.body.rotation());
+    let turned = 0;
+    stepAll(env, [vb], 120, () => {
+      const y = yawOf(vb.body.rotation());
+      turned += Math.atan2(Math.sin(y - prev), Math.cos(y - prev));
+      prev = y;
+    });
+    const deg = Math.abs(turned) / DEG;
+    check(`${t} 70 km/h 手煞車 + 滿舵 2 s：轉 ${f2(deg)}°（90–150°）、末速 ${f2(Math.abs(vb.forwardSpeed()) * 3.6)} km/h`, deg >= 90 && deg <= 150);
+  }
+  {
+    const { env, vb } = fresh('sedan', { x: LANE_X.flat, z: -250, y: 1.5 });
+    vb.body.setRotation({ x: 0, y: 0, z: 1, w: 0 }, true); // 繞前進軸 180°：倒扣
+    let dueAt = null;
+    stepAll(env, [vb], 180, (i) => {
+      if (dueAt === null && vb.overturnedTime >= OVERTURN_PROMPT_SEC - 1e-9) dueAt = (i + 1) * DT;
+    });
+    const upEnd = upOf(vb.body.rotation()).y;
+    check(`sedan 倒扣 3 s：不自動翻回（最終 up.y ${f3(upEnd)} < 0）、${dueAt === null ? '未達提示' : f2(dueAt) + ' s 起可提示按 R'}（≥ ${OVERTURN_PROMPT_SEC} s）`,
+      upEnd < 0 && dueAt !== null && dueAt >= OVERTURN_PROMPT_SEC - 1e-9);
+    vb.flip();
+    stepAll(env, [vb], 120);
+    check(`按 R（flip）後轉正：up.y ${f3(upOf(vb.body.rotation()).y)} > 0.95、overturnedTime ${f2(vb.overturnedTime)}`, upOf(vb.body.rotation()).y > 0.95 && vb.overturnedTime === 0);
+  }
+  {
+    const { env, vb } = fresh('sedan', { x: LANE_X.flat, z: -200, y: 0.6 });
+    vb.body.setRotation({ x: 0, y: 0, z: Math.sin(20 * DEG), w: Math.cos(20 * DEG) }, true); // 側傾 40°
+    stepAll(env, [vb], 180);
+    const upEnd = upOf(vb.body.rotation()).y;
+    check(`sedan 側傾 40° 放下 3 s：回正 up.y ${f3(upEnd)} > 0.95`, upEnd > 0.95);
+  }
+
   // 7. 車撞 NPC 車、車撞行人
   {
     const env = buildWorld(RAPIER, G);
@@ -921,6 +1037,40 @@ async function runRapierTests() {
     check(`車撞行人（12 m/s，${mode}）：onVehicleHitPedestrian ${pedHits.length} 次（衝量 ${pedHits[0] ? pedHits[0].impulse.toFixed(0) : '-'} N·s）、行人切 dynamic、`
       + `${tSettle === null ? '未落穩' : `${f2(tSettle)} s 落穩`}、clearToStand=${settle.clearToStand}、停在 z=${f2(p.z)}`,
       pedHits.length === 1 && ped.isDown && settle.settled && settle.clearToStand);
+  }
+
+  // 7b. 30 km/h 撞行人：實際拋高與落地前水平距離（目標 0.6–1.0 m、5–9 m；修正前拋高 0.17–0.28 m）
+  {
+    const env = buildWorld(RAPIER, G);
+    env.router = createContactRouter(RAPIER, env.world, env.eventQueue);
+    attachNpcReactions(env.router);
+    const car = new VehicleBody(RAPIER, env.world, VT.sedan, { x: 0, z: -40, groups: G, ccd: true });
+    env.router.register(car.collider, car);
+    const ped = createPedestrianBody(RAPIER, env.world, { x: 0, y: 0, z: -12, yaw: 0 }, { groups: G, router: env.router });
+    stepAll(env, [car], 20);
+    setForwardSpeed(car, 30 / 3.6);
+    car.setControls({ throttle: 0.3 });
+    let y0 = null;
+    let z0 = null;
+    let apex = 0;
+    let flight = null;
+    stepAll(env, [car], 300, () => {
+      const p = ped.body.translation();
+      if (!ped.isDown) {
+        ped.setPose(0, 0, -12, 0);
+        return true;
+      }
+      car.setControls({ brake: 1 });
+      if (y0 === null) {
+        y0 = p.y;
+        z0 = p.z;
+      }
+      apex = Math.max(apex, p.y - y0);
+      if (flight === null && apex > 0.05 && p.y <= y0 + 0.02) flight = Math.abs(p.z - z0);
+      return flight === null;
+    });
+    check(`車撞行人 30 km/h（真物理）：拋高 ${f2(apex)} m（0.6–1.0）、落地前水平飛 ${flight === null ? '未落地' : f2(flight) + ' m'}（5–9）`,
+      apex >= 0.6 && apex <= 1.0 && flight !== null && flight >= 5 && flight <= 9);
   }
 
   // 8. 1000 步平均耗時（10 台車 + 20 行人）

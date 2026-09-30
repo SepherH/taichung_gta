@@ -1,13 +1,16 @@
 // 角色模型：依 public/models/characters/manifest.json 載入骨架人形 glb，快取後以 SkeletonUtils.clone 複製、依材質槽換色。
 //
 // manifest 欄位（美術線產出）：skeleton（骨名）、materialSlots（skin / shirt / pants / hair / shoes）、fps、
-//   clips [{ name, duration, loop }]、variants [{ id, file, height, colors }]、events.punch.hitWindow、poses
-// glb 契約：身高 1.75 m、原點在兩腳底中心（地面）、+Y 上、面向 glTF +Z；材質名稱 = 材質槽名稱。
+//   clips [{ name, duration, loop }]、variants [{ id, file, height, colors, role? }]、events.punch.hitWindow、poses
+// glb 契約：身高依 variant.height（缺省 DEFAULT_HEIGHT 1.75 m）、原點在兩腳底中心（地面）、+Y 上、面向 glTF +Z；材質名稱 = 材質槽名稱。
+// 主角：role 為 "player" 的 variant（hero，保留模型原材質、不換色；多一個循環 clip idle_pose）；
+//   manifest 沒有、檔案缺失或載入失敗 → playerVariant() 退回 DEFAULT_VARIANT（console.warn 一次，不丟例外）。
 //
 // 面向換算：遊戲 yaw 定義為前進方向 = (sin(yaw), cos(yaw))（player.js / vehicle.js），即 yaw = 0 面向世界 +Z；
 //   既有 humanoid.js 的方塊人前方也是本地 +Z，與 glTF +Z 相同 → root.rotation.y = yaw，不需額外偏移（MODEL_YAW_OFFSET = 0）。
 //
-// 共用：同 variant 的所有複本共用幾何（clone 只複製節點與骨架）；材質依「variant + 槽 + 顏色」快取，同色共用。
+// 共用：同 variant 的所有複本共用幾何（clone 只複製節點與骨架）；材質依「variant + 槽 + 顏色」快取，同色共用；
+//   repaintCharacter 供行人物件池重用骨架時換色（不重新 clone）。
 // 缺檔 / 載入失敗 → createCharacter 退回 humanoid.js 的方塊人形並標記 fallback: true（只 console.warn 一次，不丟例外）。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -18,6 +21,8 @@ import { createHumanoid } from '../humanoid.js';
 const BASE_URL = import.meta.env?.BASE_URL ?? './';
 export const DEFAULT_CHARACTER_MANIFEST = `${BASE_URL}models/characters/manifest.json`;
 export const DEFAULT_VARIANT = 'pedestrian';
+export const PLAYER_ROLE = 'player';
+export const DEFAULT_HEIGHT = 1.75; // manifest variant 沒有 height 欄位時的身高（m，glb 契約）
 // glTF 前方 +Z 與遊戲 yaw = 0 的前方相同（見檔頭說明）
 export const MODEL_YAW_OFFSET = 0;
 
@@ -28,6 +33,7 @@ const cache = {
 };
 const paintCache = new Map(); // `${variant}|${slot}|${hex}` → Material
 let warned = false;
+let playerWarned = false;
 
 function warnOnce(msg, err) {
   if (warned) return;
@@ -61,8 +67,16 @@ async function loadVariant(loader, fetchImpl, dir, entry) {
 }
 
 // 載入全部變體（重複呼叫共用同一次載入）；回傳 { manifest, variants: [已載入 id], fallback }
-// opts.fetch：可替換 fetch（無頭測試用 fs 實作）
+// opts.fetch：可替換 fetch（無頭測試用 fs 實作）；opts.reload：捨棄快取重新載入（無頭測試換 manifest 用）
 export function loadCharacterModels(manifestUrl = DEFAULT_CHARACTER_MANIFEST, opts = {}) {
+  if (opts.reload) {
+    cache.loading = null;
+    cache.manifest = null;
+    cache.variants.clear();
+    paintCache.clear();
+    warned = false;
+    playerWarned = false;
+  }
   if (!cache.loading) cache.loading = doLoad(manifestUrl, opts.fetch || globalThis.fetch.bind(globalThis));
   return cache.loading;
 }
@@ -82,13 +96,16 @@ async function doLoad(manifestUrl, fetchImpl) {
       try {
         cache.variants.set(e.id, await loadVariant(loader, fetchImpl, dir, e));
       } catch (err) {
-        warnOnce(`${e.id}（${e.file}）載入失敗`, err);
+        // 主角載入失敗不退方塊人：playerVariant() 退回行人模型並自行警告一次
+        if (e.role !== PLAYER_ROLE) warnOnce(`${e.id}（${e.file}）載入失敗`, err);
       }
     }),
   );
-  // 三個變體共用同一副骨架與動作（manifest notes）：某檔缺的 clip 由其他變體補上
+  // 各變體共用同一副骨架與動作（manifest notes）：某檔缺的 clip 由其他變體補上；
+  // 主角專屬 clip（idle_pose 等）不外借給行人
   for (const v of cache.variants.values()) {
     for (const other of cache.variants.values()) {
+      if (other.entry.role === PLAYER_ROLE && v !== other) continue;
       for (const [name, clip] of other.clips) if (!v.clips.has(name)) v.clips.set(name, clip);
     }
   }
@@ -97,6 +114,23 @@ async function doLoad(manifestUrl, fetchImpl) {
 
 export function getCharacterManifest() {
   return cache.manifest;
+}
+
+// 玩家用的 variant：manifest 中 role 為 "player" 且已載入者；否則退回 DEFAULT_VARIANT（只 warn 一次）
+export function playerVariant() {
+  const entry = cache.manifest && Array.isArray(cache.manifest.variants) ? cache.manifest.variants.find((e) => e && e.role === PLAYER_ROLE) : null;
+  if (entry && cache.variants.has(entry.id)) return entry.id;
+  if (cache.manifest && !playerWarned) {
+    playerWarned = true;
+    console.warn(`[characters] ${entry ? `主角模型 ${entry.id}（${entry.file}）未載入` : 'manifest 沒有 role 為 player 的模型'}，玩家改用 ${DEFAULT_VARIANT}`);
+  }
+  return DEFAULT_VARIANT;
+}
+
+// variant 身高（m）：manifest 的 height，缺欄位 / 未知 variant 時 DEFAULT_HEIGHT
+export function variantHeight(variant) {
+  const entry = cache.manifest && Array.isArray(cache.manifest.variants) ? cache.manifest.variants.find((e) => e && e.id === variant) : null;
+  return entry && Number.isFinite(entry.height) && entry.height > 0 ? entry.height : DEFAULT_HEIGHT;
 }
 
 // 換色材質：以原材質複製後改顏色，依 variant + 槽 + 顏色快取
@@ -117,15 +151,13 @@ function fallbackCharacter(variant, colors) {
 }
 
 // 建立角色；回傳 { root, mixer, clips: Map<name, AnimationClip>, bones: Map<name, Bone>, variant, fallback }
-// colors 未給的槽沿用 manifest 該變體的預設色
+// colors 未給的槽沿用 manifest 該變體的預設色（variant 沒有 colors 且未傳 colors → 保留模型原材質）
 export function createCharacter({ variant = DEFAULT_VARIANT, colors = {} } = {}) {
   const tpl = cache.variants.get(variant);
   if (!tpl) {
     warnOnce(`變體 ${variant} 未載入`);
     return fallbackCharacter(variant, colors);
   }
-  const slots = new Set(cache.manifest.materialSlots || []);
-  const want = { ...(tpl.entry.colors || {}), ...colors };
   const root = SkeletonUtils.clone(tpl.scene);
   const bones = new Map();
   root.traverse((o) => {
@@ -133,11 +165,26 @@ export function createCharacter({ variant = DEFAULT_VARIANT, colors = {} } = {})
     if (!o.isMesh) return;
     o.castShadow = true;
     o.receiveShadow = false;
-    const paint = (mat) => (mat && slots.has(mat.name) && want[mat.name] ? paintedMaterial(variant, mat.name, want[mat.name], mat) : mat);
-    o.material = Array.isArray(o.material) ? o.material.map(paint) : paint(o.material);
+    o.userData.srcMaterial = o.material; // 模板原材質：repaintCharacter 以它為換色來源
   });
   root.name = `character-${variant}`;
-  return { root, mixer: new THREE.AnimationMixer(root), clips: new Map(tpl.clips), bones, variant, fallback: false };
+  const character = { root, mixer: new THREE.AnimationMixer(root), clips: new Map(tpl.clips), bones, variant, fallback: false };
+  repaintCharacter(character, colors);
+  return character;
+}
+
+// 換色（物件池重用骨架時呼叫）：依 variant 預設色 + colors 換上快取材質；方塊人不處理
+export function repaintCharacter(character, colors = {}) {
+  const tpl = cache.variants.get(character.variant);
+  if (character.fallback || !tpl) return;
+  const slots = new Set(cache.manifest.materialSlots || []);
+  const want = { ...(tpl.entry.colors || {}), ...colors };
+  const paint = (mat) => (mat && slots.has(mat.name) && want[mat.name] ? paintedMaterial(character.variant, mat.name, want[mat.name], mat) : mat);
+  character.root.traverse((o) => {
+    if (!o.isMesh) return;
+    const src = o.userData.srcMaterial;
+    o.material = Array.isArray(src) ? src.map(paint) : paint(src);
+  });
 }
 
 // 移除角色：停止動作、釋放 mixer 綁定快取、從場景拿掉；共用幾何與材質留在快取不 dispose

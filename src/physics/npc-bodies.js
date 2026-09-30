@@ -4,7 +4,7 @@
 // - 行人：被車撞 → dynamic 膠囊 + 衝量；settleCheck() 供 D5 倒地起身狀態機判斷何時可起身
 // 遠距簡化：setActiveByDistance 停用半徑外的剛體，回到半徑內再啟用（狀態保留）
 // 依賴以參數注入（RAPIER、原生 World 或 { world }、collision groups、contacts.js 的 router）；pose 的 y 為地面高度
-import { COM_DROP, chassisLayout, deriveVehicleSpec, boxInertia, yawQuat, yawOf, nativeWorld, membershipOf, filterOf, makeGroups } from './vehicle-body.js';
+import { GRAVITY, COM_DROP, chassisLayout, deriveVehicleSpec, boxInertia, yawQuat, yawOf, nativeWorld, membershipOf, filterOf, makeGroups } from './vehicle-body.js';
 
 // NPC 車被撞成 wrecked 的接觸衝量門檻（N·s）：約 1400 kg 車輛瞬間 3 m/s 的速度變化，輕碰、推擠不會觸發
 export const NPC_WRECK_IMPULSE = 4000;
@@ -27,9 +27,26 @@ const PED_FRICTION = 0.8;
 // 被撞後起身判定：速度低於此值持續指定秒數
 export const PED_SETTLE_SPEED = 0.3;
 export const PED_SETTLE_SEC = 0.5;
-// 被撞飛的速度上限（m/s）與上拋比例：避免高速撞擊把人射出畫面，同時讓人離地翻滾而非貼地滑
-const PED_MAX_LAUNCH_SPEED = 12;
-const PED_LIFT_RATIO = 0.25;
+// 被撞飛的水平速度上限（m/s）：避免高速撞擊把人射出畫面
+export const PED_MAX_LAUNCH_SPEED = 12;
+// 上拋分級（依撞擊相對速度 = 衝量 ÷ 行人質量，m/s）：由低到高第一個 maxSpeed 大於相對速度者，
+// 水平速度 = min(相對速度 × carry, PED_MAX_LAUNCH_SPEED)、向上速度 = 水平速度 × lift（carry 同時縮放上拋與水平）。
+// 車撞分級依宿主真物理（sedan 30 km/h、tools/test/physics-vehicle.mjs 7b）實測掃描定案，實測與拋體估算差異大、不可線性外推：
+//   F2 carry 1 / lift 0.47 → 拋高 1.53 m、飛 13.15 m；F3b carry 0.65 / lift 0.47 → 拋高 0.07 m、飛 2.75 m
+//   （水平初速低於車速，車頭追上再撞、壓掉上拋；carry 0.8 以下同 lift 時拋高急降）。
+//   掃描 carry 0.66–0.88 × lift 0.47–0.74：拋高 ≥ 0.6 m 時飛距幾乎都 ≥ 8 m（車頭推送加長水平），可行區很窄；
+//   取 carry 0.74 / lift 0.62 → 實測拋高 0.67 m、飛 8.45 m（兩者都在 0.6–1.0 / 5–9 內且離邊界最遠）。
+//   高速級 carry 同步 0.74 以維持「上拋隨車速遞增」（carry 0.65 時 60 km/h 的上拋低於 40 km/h）
+// 拳擊擊倒（< 4 m/s）維持 carry 1、lift 0.25（手感值，推測，非實測）
+export const PED_LIFT_TIERS = [
+  { maxSpeed: 4, carry: 1, lift: 0.25 }, // 拳擊擊倒（120 N·s ≈ 1.7 m/s）、推擠：稍微離地即可
+  { maxSpeed: 6, carry: 0.74, lift: 0.35 }, // 慢速碰撞（< 22 km/h）
+  { maxSpeed: 12, carry: 0.74, lift: 0.62 }, // 市區慢行～一般車速（22–43 km/h）
+  { maxSpeed: Infinity, carry: 0.74, lift: 0.45 }, // 高速：水平上限 12 m/s
+];
+// pedLaunchFlight 拋體估算用的有效初速倍率（不影響施加的衝量）。30 km/h 實測對指令初速：垂直約 ×0.95、水平約 ×1.85
+// （車頭持續推送），單一倍率無法同時重現；取 1.1 使估算（拋高 0.90 m、飛 5.8 m）與實測（0.67 m、8.45 m）同落目標區
+export const PED_CONTACT_GAIN = 1.1;
 // 站立檢查時膠囊離地的餘隙與向下找地面的距離
 const PED_STAND_EPS = 0.02;
 const PED_GROUND_PROBE = 3;
@@ -180,6 +197,23 @@ function ghostSolverGroups(groups) {
   return makeGroups(membershipOf(groups.PEDESTRIAN), filterOf(groups.PEDESTRIAN) & ~veh);
 }
 
+// 衝量（N·s）→ 行人飛出初速 { horizontal, vertical }（m/s）
+export function pedLaunch(impulse) {
+  const rel = impulse / PED_MASS;
+  const tier = PED_LIFT_TIERS.find((t) => rel < t.maxSpeed);
+  const horizontal = Math.min(rel * tier.carry, PED_MAX_LAUNCH_SPEED);
+  return { horizontal, vertical: horizontal * tier.lift };
+}
+
+// 平地拋體近似（無空氣阻力、落回原高度）：{ apex 拋高（m）, distance 落地前水平距離（m）}；供調參與測試
+// gain：有效初速倍率；車撞（相對速度 ≥ 拳擊分級上限）預設 PED_CONTACT_GAIN 以對齊真物理，拳擊為 1
+export function pedLaunchFlight(impulse, gain = impulse / PED_MASS >= PED_LIFT_TIERS[0].maxSpeed ? PED_CONTACT_GAIN : 1) {
+  const l = pedLaunch(impulse);
+  const horizontal = l.horizontal * gain;
+  const vertical = l.vertical * gain;
+  return { apex: (vertical * vertical) / (2 * GRAVITY), distance: (horizontal * 2 * vertical) / GRAVITY };
+}
+
 class PedestrianBody {
   constructor(RAPIER, world, pose, { groups = null, router = null, rotationMode = 'yawOnly' } = {}) {
     if (!PED_ROTATION_MODES.includes(rotationMode)) throw new Error(`未知的 rotationMode：${rotationMode}`);
@@ -243,9 +277,10 @@ class PedestrianBody {
       if (this.groups) this.collider.setSolverGroups(this.groups.PEDESTRIAN);
       this.body.setLinvel(ZERO, true);
     }
-    const j = Math.min(impulse, PED_MASS * PED_MAX_LAUNCH_SPEED);
+    const { horizontal, vertical } = pedLaunch(impulse);
+    const j = PED_MASS * horizontal;
     const h = Math.hypot(dir.x, dir.z) || 1;
-    this.body.applyImpulse({ x: (dir.x / h) * j, y: j * PED_LIFT_RATIO, z: (dir.z / h) * j }, true);
+    this.body.applyImpulse({ x: (dir.x / h) * j, y: PED_MASS * vertical, z: (dir.z / h) * j }, true);
     return first;
   }
 

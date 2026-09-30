@@ -38,12 +38,13 @@ const { default: osm } = await import('../../src/data/osm-city.json');
 const { getTerrain, surfaceFootways, buildingAt } = await import('../../src/citymodel.js');
 const { samplePolyline } = await import('../../src/geom.js');
 const { computeSpawn, computeParkedVehicles } = await import('../../src/places.js');
-const { Player } = await import('../../src/player.js');
+const { Player, nearestFootway, nearestRoadEdge, mousePunchListener } = await import('../../src/player.js');
 const { Vehicle, VehicleManager, VEHICLE_TYPES, wheelMeshMap } = await import('../../src/vehicle.js');
 const { Traffic } = await import('../../src/traffic.js');
 const { loadCharacterModels, createCharacter, getCharacterManifest, CharacterAnimator } = await import('../../src/characters/index.js');
 const { loadVehicleModels, createVehicleModel, SEAT_HIPS_HEIGHT } = await import('../../src/vehicle-model.js');
-const { CombatSystem, PUNCH_DAMAGE } = await import('../../src/combat.js');
+const { CombatSystem, PUNCH_DAMAGE, ASSIST_TURN_SEC, HIT_RADIUS } = await import('../../src/combat.js');
+const { angleDelta } = await import('../../src/utils.js');
 const { NpcBrain, wireCombatToBrains } = await import('../../src/npc-ai.js');
 const { PhysicsWorld, initPhysics } = await import('../../src/physics/world.js');
 const { GROUPS } = await import('../../src/physics/groups.js');
@@ -93,7 +94,10 @@ const parked = computeParkedVehicles(spawn);
 const q = {};
 
 // ======================= 1. vehicle-model：真 glb 五種車 =======================
-{
+// 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此段標 SKIP 不計入（宿主有 glb 時照常檢查）
+const vehGlbPresent = vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
+if (!vehGlbPresent) console.log('SKIP  vehicle-model 真 glb 檢查（工作區缺 public/models/vehicles/*.glb）');
+else {
   const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2 };
   let nodesOk = true;
   let specOk = true;
@@ -482,6 +486,16 @@ async function runScenarios(RAPIER, label, real) {
   check(`[${label}] 玩家對面前行人出拳 → 命中一次、扣 ${PUNCH_DAMAGE}、行人播 hit`, accepted && hitsOnVictim === 1 && victim.actor.hp === hp0 - PUNCH_DAMAGE && sawHitAnim, `命中 ${hitsOnVictim} 次、hp ${hp0} → ${victim.actor.hp}`);
   const mode = brainOf(victim).state;
   check(`[${label}] 被打的行人進入 flee（或 fight），ped.state = react`, (mode === 'flee' || mode === 'fight') && victim.state === 'react', `brain ${mode}、ped ${victim.state}`);
+  // 大腦意圖確實套用到行人移動與朝向：再跑 1 秒，逃跑者離玩家更遠、面向跑的方向
+  const dBefore = Math.hypot(victim.x - player.pos.x, victim.z - player.pos.z);
+  const vx0 = victim.x;
+  const vz0 = victim.z;
+  for (let i = 0; i < 60; i++) frame();
+  const dAfter = Math.hypot(victim.x - player.pos.x, victim.z - player.pos.z);
+  const runYaw = Math.atan2(victim.x - vx0, victim.z - vz0);
+  const faceErr = Math.abs(angleDelta(victim.yaw, runYaw));
+  check(`[${label}] NpcBrain 每幀呼叫、意圖套用到移動與朝向：${mode === 'flee' ? '逃跑者遠離' : '還手者逼近'}玩家`,
+    mode === 'flee' ? dAfter > dBefore + 2 && faceErr < 0.5 : dAfter <= dBefore, `距離 ${f2(dBefore)} → ${f2(dAfter)} m、朝向誤差 ${f2(faceErr)} rad`);
   const witnesses = peds.filter((p) => p !== victim && brainOf(p).state === 'flee').length;
   check(`[${label}] 同一拳只計一次（命中窗期間持續重疊不重複計傷）`, hitsOnVictim === 1, `目擊逃跑 ${witnesses} 人`);
 
@@ -490,6 +504,7 @@ async function runScenarios(RAPIER, label, real) {
   faceOff(game, fighter, 0.8);
   player.actor.hp = player.actor.maxHp;
   let playerHitBy = 0;
+  let playerHitAnim = false;
   const offHit = combat.on('hit', (e) => e.target === player.actor && e.attacker === fighter.actor && playerHitBy++);
   let punches = 0;
   let downed = false;
@@ -499,23 +514,29 @@ async function runScenarios(RAPIER, label, real) {
     if (Math.hypot(fighter.x - player.pos.x, fighter.z - player.pos.z) > 0.9) faceOff(game, fighter, 0.8);
     if (player.punch()) punches++;
     frame();
+    if (playerHitBy && player.anim.state === 'hit') playerHitAnim = true;
     downed = combat.stateOf(fighter.actor) === 'knockdown';
   }
   offHit();
   const fighterHits = game.hits.filter((h) => h.target === fighter.actor).length;
   check(`[${label}] 還手的行人被連打 → knockdown（剛體切 dynamic、倒地動畫）`, downed && fighter.state === 'down' && fighter.body.isDown && fighter.anim.state === 'knockdown', `出拳 ${punches}、命中 ${fighterHits}、hp ${fighter.actor.hp}`);
   check(`[${label}] NPC 還手打到玩家扣血`, playerHitBy >= 1 && player.actor.hp < player.actor.maxHp, `被打 ${playerHitBy} 次、玩家 hp ${player.actor.hp}`);
+  check(`[${label}] 玩家被 NPC 打中播 hit 動畫`, playerHitAnim);
   // 倒地 → 落穩 → 起身 → 回 wander（玩家走遠讓對方不再逃）
   let getup = false;
   let settledOk = false;
   let wander = false;
+  let downSec = null;
+  const downAt = game.clock;
   player.placeAt(player.pos.x + 60, player.pos.z, 0, terrain);
   for (let i = 0; i < 60 * 25 && !wander; i++) {
     frame();
     if (fighter.settle.settled) settledOk = true;
+    if (fighter.anim.state === 'getup' && !getup) downSec = game.clock - downAt;
     if (fighter.anim.state === 'getup') getup = true;
     wander = getup && brainOf(fighter).state === 'wander' && (fighter.state === 'return' || fighter.state === 'walk');
   }
+  check(`[${label}] 拳擊 knockdown → ${f2(downSec)} s 後起身（1.5–3 s）`, downSec !== null && downSec >= 1.5 - 1e-9 && downSec <= 3);
   check(`[${label}] knockdown → settle → getup（standUp 回 kinematic）→ 回 wander 走回人行道`, settledOk && getup && wander && !fighter.body.isDown && combat.stateOf(fighter.actor) === 'normal', `settled=${settledOk} getup=${getup} wander=${wander} state=${fighter.state}`);
 
   // ---- C. 擊退不穿牆：行人貼著建築、往建築方向擊退 ----
@@ -551,8 +572,30 @@ async function runScenarios(RAPIER, label, real) {
 
   // ---- D. 車撞行人（30 km/h）→ knockdown ----
   {
-    const ped = nearest(peds.filter((p) => p !== fighter && p.state === 'walk' && !p.body.isDown));
     const car = game.vehicles.vehicles[1];
+    // 真物理接近路線：從車道側（行人路線偏移 off 的反方向）車頭距行人 3 m、橫越路緣朝行人衝過去
+    const approach = (p) => {
+      const tg = { x: 0, z: 0, dx: 0, dz: 1 };
+      samplePolyline(p.road, p.s, tg);
+      const side = Math.sign(p.off) || 1;
+      const fx = -tg.dz * side; // 道路右側單位向量 (−dz, dx) × off 的正負 = 由道路中心指向行人
+      const fz = tg.dx * side;
+      const back = car.spec.length / 2 + 3;
+      return { fx, fz, back, cx: p.x - fx * back, cz: p.z - fz * back };
+    };
+    // 路線上（車身起點 → 行人）不得有其他車（路邊停車 / 車流）或建築，否則車先撞上別的東西停下、永遠碰不到行人
+    const others = [...game.vehicles.vehicles.filter((v) => v !== car).map((v) => v.pos), ...traffic.cars.map((c) => c.v.pos)];
+    const clear = (p) => {
+      const a = approach(p);
+      for (let d = -car.spec.length / 2; d <= a.back; d += 0.5) {
+        const x = a.cx + a.fx * d;
+        const z = a.cz + a.fz * d;
+        if (buildingAt(x, z, 0.5) || others.some((o) => Math.hypot(o.x - x, o.z - z) < 3.5)) return false;
+      }
+      return true;
+    };
+    const cands = peds.filter((p) => p !== fighter && p.state === 'walk' && !p.body.isDown);
+    const ped = real ? nearest(cands.filter(clear)) : nearest(cands);
     game.knockdowns.length = 0;
     if (!real) {
       // mock：碰撞開始事件注入（相對速度 30 km/h）
@@ -561,16 +604,9 @@ async function runScenarios(RAPIER, label, real) {
       game.step();
       car.body.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     } else {
-      // 真物理：從車道側（行人路線偏移 off 的反方向）車頭距行人 3 m、橫越路緣朝行人 30 km/h 衝過去（油門維持車速）
-      const tg = { x: 0, z: 0, dx: 0, dz: 1 };
-      samplePolyline(ped.road, ped.s, tg);
-      const side = Math.sign(ped.off) || 1;
-      const fx = -tg.dz * side; // 道路右側單位向量 (−dz, dx) × off 的正負 = 由道路中心指向行人
-      const fz = tg.dx * side;
+      // 真物理：沿 approach 路線以 30 km/h 衝向行人（油門維持車速）
+      const { fx, fz, cx, cz } = approach(ped);
       const dirYaw = Math.atan2(fx, fz);
-      const back = car.spec.length / 2 + 3;
-      const cx = ped.x - fx * back;
-      const cz = ped.z - fz * back;
       const y = terrain.querySurface(cx, cz, Infinity, q).y;
       game.vehicles.drive(car, true);
       const b = car.body.body;
@@ -642,8 +678,10 @@ async function runScenarios(RAPIER, label, real) {
     check(`[${label}] 下車：站到車旁、動畫離開 drive 回移動狀態`, exited && game.character.enabled && ['idle', 'walk', 'run'].includes(player.anim.state), player.anim.state);
   }
 
-  // ---- F. 玩家 hp 歸零 → 倒地 → revive（main.js 3 s 後在人行道起身）----
+  // ---- F. 玩家在出生點 hp 歸零 → 倒地 → recoverAfterKnockout 就近起身 → revive（同 main.js updateKnockout）----
   {
+    player.placeAt(spawn.x, spawn.z, spawn.yaw, terrain);
+    for (let i = 0; i < 10; i++) frame();
     const attacker = peds.find((p) => !p.body.isDown);
     player.actor.hp = PUNCH_DAMAGE;
     attacker.actor.pos.x = player.pos.x;
@@ -659,6 +697,13 @@ async function runScenarios(RAPIER, label, real) {
     for (let i = 0; i < 30; i++) frame();
     const lockedMove = player.pos.distanceTo(p0);
     input.keys.delete('KeyW');
+    const downAt = player.pos.clone();
+    const oldSpot = nearestFootway(downAt.x, downAt.z);
+    const source = player.recoverAfterKnockout(terrain);
+    const moved = Math.hypot(player.pos.x - downAt.x, player.pos.z - downAt.z);
+    check(`[${label}] 出生點 KO → 起身位置距倒地點 ≤ 3 m（原地找空位）`, source === 'local' && moved <= 3, `來源 ${source}、距倒地點 ${f2(moved)} m（舊版最近步道 ${f2(oldSpot ? Math.sqrt(oldSpot.d2) : NaN)} m）`);
+    const edge = nearestRoadEdge(downAt.x, downAt.z, 30);
+    check(`[${label}] 出生點 30 m 內有道路邊備援起身點`, !!edge, edge ? `距 ${f2(Math.hypot(edge.x - downAt.x, edge.z - downAt.z))} m` : 'null');
     combat.revive(player.actor);
     let up = false;
     for (let i = 0; i < 240 && !up; i++) {
@@ -666,6 +711,91 @@ async function runScenarios(RAPIER, label, real) {
       up = combat.stateOf(player.actor) === 'normal';
     }
     check(`[${label}] 玩家 hp 0 → knockdown（倒地期間鎖移動）→ revive → getup 回 normal、hp 回滿`, ok && down && lockedMove < 0.05 && up && player.actor.hp === player.actor.maxHp, `倒地位移 ${f2(lockedMove)} m、hp ${player.actor.hp}`);
+  }
+  // ---- G. 滑鼠左鍵：未鎖定 pointer 時點畫面也出拳（main.js 用的同一個監聽器）----
+  {
+    player.placeAt(spawn.x, spawn.z, spawn.yaw, terrain);
+    combat.revive(player.actor);
+    for (let i = 0; i < 240 && combat.stateOf(player.actor) !== 'normal'; i++) frame();
+    for (let i = 0; i < 60; i++) frame();
+    const listeners = [];
+    const dom = { addEventListener: (type, cb) => type === 'mousedown' && listeners.push(cb) };
+    const consume = mousePunchListener(dom, { enabled: true });
+    globalThis.document.pointerLockElement = null; // 未鎖定
+    for (const cb of listeners) cb({ button: 2 });
+    const right = consume();
+    for (const cb of listeners) cb({ button: 0 });
+    const left = consume();
+    const again = consume();
+    const accepted = left && player.punch();
+    const st = player.anim.state;
+    for (let i = 0; i < 60; i++) frame();
+    check(`[${label}] 未鎖定 pointer：左鍵點擊 → 出拳（右鍵不算、讀一次即清除）`, !right && left && !again && accepted && st === 'punch', `left=${left} punch=${accepted} anim=${st}`);
+  }
+
+  // ---- H. 輔助瞄準：2.0 m、偏 70° 的行人 → 0.15 s 內轉向面對、小衝步後命中 ----
+  {
+    const tgt = nearest(peds.filter((p) => p.state === 'walk' && combat.stateOf(p.actor) === 'normal' && !p.body.isDown));
+    const ang = Math.atan2(tgt.x - spawn.x, tgt.z - spawn.z);
+    const px = tgt.x - Math.sin(ang) * 2;
+    const pz = tgt.z - Math.cos(ang) * 2;
+    player.placeAt(px, pz, ang + (70 * Math.PI) / 180, terrain);
+    for (let i = 0; i < 3; i++) frame();
+    player.yaw = Math.atan2(tgt.x - player.pos.x, tgt.z - player.pos.z) + (70 * Math.PI) / 180;
+    game.hits.length = 0;
+    const ok = player.punch();
+    const assisted = player._assist && player._assist.target === tgt.actor;
+    let tFace = null;
+    let t = 0;
+    for (let i = 0; i < 40; i++) {
+      frame();
+      t += DT;
+      const err = Math.abs(angleDelta(player.yaw, Math.atan2(tgt.x - player.pos.x, tgt.z - player.pos.z)));
+      if (tFace === null && err < 0.02) tFace = t;
+    }
+    const hit = game.hits.some((h) => h.target === tgt.actor && h.attacker === player.actor);
+    check(`[${label}] 輔助瞄準：2 m、偏 70° 的行人 → ${ASSIST_TURN_SEC} s 內轉向面對、小衝步進 ${HIT_RADIUS} m 命中`,
+      ok && assisted && tFace !== null && tFace <= ASSIST_TURN_SEC + DT + 1e-9 && hit, `轉正 ${f2(tFace)} s、命中 ${hit}`);
+  }
+
+  // ---- I. 反擊比例：逐一打場上行人一拳，看大腦反應（fight / flee）----
+  {
+    let fight = 0;
+    let flee = 0;
+    let tried = 0;
+    for (const p of peds.slice()) {
+      if (!p.alive || p.state === 'down' || combat.stateOf(p.actor) !== 'normal' || brainOf(p).state === 'fight') continue;
+      player.actor.hp = player.actor.maxHp;
+      if (combat.stateOf(player.actor) !== 'normal') combat.revive(player.actor);
+      for (let i = 0; i < 240 && combat.stateOf(player.actor) !== 'normal'; i++) frame();
+      // 等出拳冷卻 / 上一拳動作結束（每幀重新擺到對方面前）
+      let ok = false;
+      for (let i = 0; i < 90 && !ok; i++) {
+        faceOff(game, p, 0.8);
+        player.yaw = Math.atan2(p.x - player.pos.x, p.z - player.pos.z);
+        ok = player.punch();
+        if (!ok) frame();
+      }
+      if (!ok) continue;
+      tried++;
+      let mode = null;
+      for (let i = 0; i < 30 && !mode; i++) {
+        frame();
+        const m = brainOf(p).state;
+        if (m === 'fight' || m === 'flee') mode = m;
+      }
+      if (mode === 'fight') fight++;
+      else if (mode === 'flee') flee++;
+      // 讓對方回漫步，避免追打影響下一位
+      const b = brainOf(p);
+      if (b) {
+        b.target = null;
+        b.fleeFrom = null;
+        b._enter('wander');
+      }
+    }
+    const ratio = fight / Math.max(1, fight + flee);
+    check(`[${label}] 反擊比例：打 ${tried} 人，還手 ${fight}、逃跑 ${flee}（還手 20–40%）`, fight + flee >= 30 && ratio >= 0.2 && ratio <= 0.4, `${(ratio * 100).toFixed(1)}%`);
   }
   return game;
 }

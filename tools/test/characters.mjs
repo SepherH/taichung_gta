@@ -1,16 +1,34 @@
-// 無頭驗證：角色 glb 契約、換色材質共用、動畫狀態機、車輛載入器（缺檔退路 + 真實 manifest / glb）
+// 無頭驗證：角色 glb 契約、換色材質共用、動畫狀態機、主角 hero（role player 退路 / idle_pose / 身高換算）、
+// 車輛載入器（缺檔退路 + 真實 manifest / glb；工作區缺車輛 glb 時該項 SKIP）
 // 用法：node tools/test/characters.mjs（任何一項失敗 → exit 1）
+import { register } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { loadCharacterModels, createCharacter, disposeCharacter, CharacterAnimator, RATE_MAX } from '../../src/characters/index.js';
+import { loadCharacterModels, createCharacter, disposeCharacter, CharacterAnimator, RATE_MAX, playerVariant, variantHeight, repaintCharacter } from '../../src/characters/index.js';
+import { WALK_RATE_MAX, RUN_ABOVE, IDLE_POSE, IDLE_POSE_AFTER } from '../../src/characters/animator.js';
+
+// player.js → citymodel.js 會 import osm-city.json：以 loader hook 讓 node 讀 JSON（player / camera 於主角段落才動態 import）
+const JSON_HOOK = `
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+export async function load(url, context, next) {
+  if (url.endsWith('.json')) {
+    return { format: 'module', shortCircuit: true, source: 'export default ' + readFileSync(fileURLToPath(url), 'utf8') + ';' };
+  }
+  return next(url, context);
+}`;
+register(`data:text/javascript,${encodeURIComponent(JSON_HOOK)}`, import.meta.url);
 import { loadVehicleModels, createVehicleModel } from '../../src/vehicle-model.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const PUBLIC = path.join(ROOT, 'public');
 const DT = 1 / 60;
+// hero.glb 內嵌貼圖（face / pants）：GLTFLoader.loadImageSource 同步讀 self.URL，node 沒有 self → 整個 parse 失敗、
+// 主角被判「未載入」。補 self 後貼圖改由 loader 的 catch 降級成無貼圖（node 無 Image 解碼），幾何 / 骨架 / clip 照常。
+globalThis.self ??= globalThis;
 
 let failures = 0;
 let passes = 0;
@@ -74,7 +92,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/characters
 
 // ---- 2. 載入器與換色 ----
 const loaded = await loadCharacterModels('./models/characters/manifest.json', { fetch: fsFetch });
-check('loadCharacterModels 載入 3 個變體', loaded.variants.length === 3 && !loaded.fallback, loaded.variants.join(','));
+check(`loadCharacterModels 載入 manifest 全部 ${manifest.variants.length} 個變體`, loaded.variants.length === manifest.variants.length && !loaded.fallback, loaded.variants.join(','));
 const colorsA = { skin: '#d6a27c', shirt: '#ff0000', pants: '#222222', hair: '#111111', shoes: '#eeeeee' };
 const colorsB = { ...colorsA, shirt: '#0000ff' };
 const matsOf = (ch) => {
@@ -133,6 +151,18 @@ function run(anim, sec, ctx) {
   check('速度 5 → run、速率 1.0', anim.state === 'run' && Math.abs(runRate - 1) < 1e-6, `${anim.state} × ${runRate.toFixed(3)}`);
   run(anim, 0.3, { speed: 7.5 });
   check('速度 7.5 → run 速率 1.5', Math.abs(anim._info.get('run').action.getEffectiveTimeScale() - 1.5) < 1e-6);
+  // 玩家步行 4.2 m/s 播 walk（walk 速率上限放寬到 2.2）、跑步 8.5 m/s 與行人逃跑 4.5 m/s 播 run
+  run(anim, 0.5, { speed: 8.5 });
+  const run85 = anim._info.get('run').action.getEffectiveTimeScale();
+  check('速度 8.5（玩家跑步）→ run、速率 1.7', anim.state === 'run' && Math.abs(run85 - 1.7) < 1e-6, `${anim.state} × ${run85.toFixed(3)}`);
+  run(anim, 0.5, { speed: 4.2 });
+  const walk42 = anim._info.get('walk').action.getEffectiveTimeScale();
+  check(`跑步減速到 4.2（玩家步行）→ 回 walk、速率夾到 ${WALK_RATE_MAX}`, anim.state === 'walk' && Math.abs(walk42 - WALK_RATE_MAX) < 1e-6, `${anim.state} × ${walk42.toFixed(3)}`);
+  run(anim, 0.5, { speed: 3 });
+  const walk3 = anim._info.get('walk').action.getEffectiveTimeScale();
+  check('速度 3 → walk、速率 3/1.4（未達 2.2 不夾）', anim.state === 'walk' && Math.abs(walk3 - 3 / 1.4) < 1e-6, `${anim.state} × ${walk3.toFixed(3)}`);
+  run(anim, 0.5, { speed: 4.5 });
+  check(`速度 4.5（行人逃跑）→ run（門檻 ${RUN_ABOVE}）`, anim.state === 'run', anim.state);
   const idleW = anim._info.get('idle').action;
   check('交叉淡化後 idle 權重歸 0', idleW.getEffectiveWeight() === 0 || !idleW.isRunning());
 
@@ -173,9 +203,14 @@ function run(anim, sec, ctx) {
   const hitOk = anim.trigger('hit');
   check('punch 中 trigger hit 打斷成功', hitOk && anim.state === 'hit', anim.state);
   check('被打斷時補發 close', openedBefore && events.map((e) => e[0]).join() === 'open,close' && !anim.hitWindowOpen);
-  check('hit 中不能 punch', anim.trigger('punch') === false);
+  check('hit 中不能 jump / enter_car', anim.trigger('jump') === false && anim.trigger('enter_car') === false && anim.state === 'hit');
   run(anim, 1, { speed: 0 });
   check('hit 結束回 idle', anim.state === 'idle', anim.state);
+  // hit 可被 punch 打斷（受擊硬直由 combat HIT_STUN 管，硬直結束後出拳不必等受擊動作播完）
+  anim.trigger('hit');
+  run(anim, 0.2, { speed: 0 });
+  check('hit 中 trigger punch 打斷 → punch', anim.trigger('punch') && anim.state === 'punch', anim.state);
+  run(anim, 1, { speed: 0 });
 
   // knockdown 停住、getup 後回 idle
   anim.trigger('knockdown');
@@ -233,6 +268,111 @@ function run(anim, sec, ctx) {
   check('方塊人退路：walk / punch 命中窗 / 回 idle', s1 === 'walk' && opened === 1 && fa.state === 'idle', `${s1} open ${opened} ${fa.state}`);
 }
 
+// ---- 3b. 主角 hero：manifest role player / 退路 / idle_pose / 身高換算 ----
+{
+  const { Player, capsuleHalfHeight, PLAYER_RADIUS } = await import('../../src/player.js');
+  const { CameraRig } = await import('../../src/camera.js');
+  const { SEAT_HIPS_HEIGHT } = await import('../../src/vehicle-model.js');
+  const scene = new THREE.Scene();
+  const spawn = { x: 0, z: 0, yaw: 0 };
+  const capsuleTotal = (p) => 2 * (p.capsuleHalfHeight + PLAYER_RADIUS);
+  // 鏡頭目標點：平地、無遮擋，預設俯角（無仰視抬高）時 target.y = 腳底 + 步行目標高度
+  const eyeOf = (height) => {
+    const rig = new CameraRig(new THREE.PerspectiveCamera(), { sweep: () => 1 }, { querySurface: (x, z, y, out) => Object.assign(out, { y: 0, waterY: null }) });
+    rig.playerHeight = height;
+    rig.update(DT, { consumeMouse: () => ({ dx: 0, dy: 0, wheel: 0 }) }, new THREE.Vector3(0, 0, 0), {});
+    return rig._target.y;
+  };
+  // (a) 真實 manifest（目前沒有 role player）→ 玩家退回 pedestrian，只警告一次
+  const hasHero = manifest.variants.some((v) => v.role === 'player');
+  const w0 = warnings.length;
+  const pv = playerVariant();
+  playerVariant();
+  const p0 = new Player(scene, spawn);
+  const heroWarn = warnings.slice(w0).filter((w) => w.includes('玩家改用')).length;
+  if (!hasHero) {
+    check('manifest 無 hero → 玩家退回 pedestrian（console.warn 一次）', pv === 'pedestrian' && p0.character.variant === 'pedestrian' && !p0.character.fallback && heroWarn === 1, `${pv}、警告 ${heroWarn} 次`);
+    check('無 height 欄位的身高 = 1.75；膠囊總高 ≈ 身高', p0.height === 1.75 && Math.abs(capsuleTotal(p0) - 1.75) < 1e-9 && p0.seatDrop === 0, `${p0.height} m / 膠囊 ${capsuleTotal(p0).toFixed(3)} m`);
+  } else {
+    console.log('SKIP  manifest 已有 role player：退回 pedestrian 的情境改由下方「hero 檔案缺失」涵蓋');
+  }
+  // (b) mock manifest：加一筆 hero（role player、height 1.86；檔案 = 真 hero.glb，沒有就借 pedestrian.glb）
+  const realHero = fs.existsSync(path.join(PUBLIC, 'models/characters/hero.glb'));
+  const mockManifest = (heroFile) => ({
+    ...manifest,
+    variants: [...manifest.variants.filter((v) => v.role !== 'player'), { id: 'hero', name: '主角', file: heroFile, height: 1.86, role: 'player' }],
+  });
+  const mockFetch = (heroFile, heroSrc) => (url) => {
+    if (url.endsWith('manifest.json')) {
+      const body = mockManifest(heroFile);
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body });
+    }
+    return fsFetch(url.endsWith(heroFile) && heroSrc ? url.replace(heroFile, heroSrc) : url);
+  };
+  const heroSrc = realHero ? 'hero.glb' : 'pedestrian.glb';
+  await loadCharacterModels('./models/characters/manifest.json', { fetch: mockFetch('hero.glb', heroSrc), reload: true });
+  const ph = new Player(scene, spawn);
+  const heroMatsKept = (() => {
+    let ok = true;
+    ph.character.root.traverse((o) => {
+      if (o.isMesh && o.material !== o.userData.srcMaterial) ok = false;
+    });
+    return ok;
+  })();
+  check('mock manifest 有 hero（role player）→ 玩家載入 hero、保留模型原材質（不換色）', playerVariant() === 'hero' && ph.character.variant === 'hero' && !ph.character.fallback && heroMatsKept);
+  check('hero height 1.86 → 膠囊總高 ≈ 1.86（半徑 0.35）', ph.height === 1.86 && Math.abs(capsuleTotal(ph) - 1.86) < 1e-9 && PLAYER_RADIUS === 0.35 && Math.abs(capsuleHalfHeight(1.86) - 0.58) < 1e-9, `halfHeight ${ph.capsuleHalfHeight.toFixed(3)}`);
+  const eye75 = eyeOf(1.75);
+  const eye86 = eyeOf(ph.height);
+  check('鏡頭目標點：1.86 比 1.75 高 0.11 m', Math.abs(eye86 - eye75 - 0.11) < 1e-9 && Math.abs(eye75 - 1.5) < 1e-9, `${eye75.toFixed(3)} → ${eye86.toFixed(3)} m`);
+  check('駕駛座位：原點依身高比例多降 seatDrop', Math.abs(ph.seatDrop - SEAT_HIPS_HEIGHT * (1.86 / 1.75 - 1)) < 1e-12 && ph.seatDrop > 0, `${(ph.seatDrop * 100).toFixed(2)} cm`);
+  // idle_pose：hero 帶 idle_pose 時 6 秒靜止後循環播放，一移動立即回移動狀態；行人不會拿到主角專屬 clip
+  const hc = createCharacter({ variant: 'hero' });
+  if (!hc.clips.has(IDLE_POSE)) {
+    const pose = hc.clips.get('idle').clone();
+    pose.name = IDLE_POSE;
+    hc.clips.set(IDLE_POSE, pose);
+  }
+  const ha = new CharacterAnimator(hc, manifest.clips);
+  run(ha, IDLE_POSE_AFTER - 0.2, { speed: 0 });
+  const before = ha.state;
+  run(ha, 0.4, { speed: 0.05 });
+  const posed = ha.state;
+  const poseLoop = ha._info.get(IDLE_POSE).action.loop === THREE.LoopRepeat;
+  ha.update(DT, { speed: 1.2 });
+  const moved = ha.state;
+  run(ha, 1, { speed: 0 });
+  run(ha, IDLE_POSE_AFTER + 0.1, { speed: 0 });
+  const punchOk = ha.state === IDLE_POSE && ha.trigger('punch') && ha.state === 'punch';
+  check(`hero 有 idle_pose：靜止 ${IDLE_POSE_AFTER} s 後播 idle_pose（循環）、移動立即退出、可直接出拳`, before === 'idle' && posed === IDLE_POSE && poseLoop && moved === 'walk' && punchOk, `${before} → ${posed} → ${moved}`);
+  const pa = new CharacterAnimator(createCharacter({ variant: 'pedestrian' }), manifest.clips);
+  run(pa, IDLE_POSE_AFTER + 1, { speed: 0 });
+  check('沒有 idle_pose clip 的角色：靜止再久也停在 idle（略過）', !pa.hasIdlePose && pa.state === 'idle');
+  if (realHero) {
+    const heroClips = [...createCharacter({ variant: 'hero' }).clips.keys()];
+    const ownIdle = hc.clips.get(IDLE_POSE);
+    check('真 hero.glb：載入、clip 數 = 11（10 + idle_pose）', heroClips.length === 11 && heroClips.includes(IDLE_POSE) && !!ownIdle, heroClips.join(','));
+    check('主角專屬 idle_pose 不外借給行人', !createCharacter({ variant: 'pedestrian' }).clips.has(IDLE_POSE));
+  } else {
+    console.log('SKIP  真 hero.glb 載入 / clip 數（工作區沒有 public/models/characters/hero.glb）');
+  }
+  // (c) hero 檔案缺失 → 退回 pedestrian、行人照常載入、只警告一次
+  const w1 = warnings.length;
+  const r = await loadCharacterModels('./models/characters/manifest.json', { fetch: mockFetch('no_such_hero.glb', null), reload: true });
+  const pm = new Player(scene, spawn);
+  playerVariant();
+  const missWarn = warnings.slice(w1).filter((w) => w.includes('hero')).length;
+  check('hero 檔案缺失 → 玩家退回 pedestrian、身高 1.75、行人 3 變體照常（warn 一次）', pm.character.variant === 'pedestrian' && !pm.character.fallback && pm.height === 1.75 && r.variants.length === 3 && missWarn === 1, `警告 ${missWarn} 次`);
+  // 物件池換色：重用骨架換 shirt 色、材質仍走快取
+  const rp = createCharacter({ variant: 'pedestrian', colors: { shirt: '#ff0000' } });
+  repaintCharacter(rp, { shirt: '#00ff00' });
+  const rs = matsOf(rp).get('shirt');
+  const same = matsOf(createCharacter({ variant: 'pedestrian', colors: { shirt: '#00ff00' } })).get('shirt');
+  check('repaintCharacter：重用骨架換色、同色共用快取材質', rs.color.getHexString() === '00ff00' && rs === same);
+  check('variantHeight：未知 variant → 1.75', variantHeight('no_such') === 1.75);
+  // 還原真實 manifest
+  await loadCharacterModels('./models/characters/manifest.json', { fetch: fsFetch, reload: true });
+}
+
 // ---- 4. 車輛載入器：缺檔退路（先跑，模板尚未載入）→ 真實 manifest ----
 {
   let threw = false;
@@ -248,7 +388,12 @@ function run(anim, sec, ctx) {
   check('createVehicleModel 回 null 且不丟例外', !threw && model === null);
   const real = await loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch });
   const vm = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/vehicles/manifest.json'), 'utf8'));
-  check('真實 vehicle manifest → 全部車型載入', real.size === vm.vehicles.length, `${[...real.keys()].join(',')}`);
+  // 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此項 SKIP 不計入（宿主有 glb 時照常檢查）
+  if (vm.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)))) {
+    check('真實 vehicle manifest → 全部車型載入', real.size === vm.vehicles.length, `${[...real.keys()].join(',')}`);
+  } else {
+    console.log('SKIP  真實 vehicle manifest → 全部車型載入（工作區缺 public/models/vehicles/*.glb）');
+  }
 }
 
 console.warn = origWarn;

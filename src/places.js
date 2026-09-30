@@ -1,8 +1,13 @@
-// 依 OSM 資料計算出生點與路邊停放車輛的位置（不寫死座標）
+// 依 OSM 資料計算出生點、路邊停放車輛與行人生成路線的位置（不寫死座標）
 // y 一律取 querySurface（唯一高度場）；出生點 / 停車點不落在湖面，坡度 > PLACE_MAX_SLOPE 的點不用
-import { TIGER_CITY_ID, SPAWN_ROAD_NAME, PARKED_TYPES, PARKED_RADIUS } from './data/city.js';
-import { buildingById, surfaceRoads, buildingAt, onRoadSurface, junctionClearance, inBounds, inWater, querySurface } from './citymodel.js';
-import { closestOnSegment, distanceToPolygon, polygonCentroid } from './geom.js';
+// 行人路線（pedestrianRoutes）：人行道（道路緣外）、步道（OSM footway / pedestrian / path）、廣場（L 地表分區 pedestrian 內的弦）、
+//   秋紅谷湖邊步道與坡道（terrain.lakesides / rampPaths，y 取 terrain）、百貨門口（CROWD_MALL_IDS 輪廓臨路側外緣）；
+//   每條路線只保留連續「不在建築 / 水域 / 車道 / 陡坡、在界內」的區段，沿線每 PED_SPOT_STEP 一個生成點，依 PED_SPOT_WEIGHTS 加權
+import { TIGER_CITY_ID, SPAWN_ROAD_NAME, PARKED_TYPES, PARKED_RADIUS, CITY_SEED, CROWD_MALL_IDS } from './data/city.js';
+import { buildingById, surfaceRoads, surfaceFootways, buildingAt, onRoadSurface, junctionClearance, inBounds, inWater, querySurface, getTerrain } from './citymodel.js';
+import osm from './data/osm-city.json';
+import { closestOnSegment, distanceToPolygon, polygonCentroid, polylineInfo, samplePolyline, pointInPolygon, polygonBBox, polygonArea } from './geom.js';
+import { mulberry32 } from './utils.js';
 import { VEHICLE_TYPES } from './vehicle.js';
 
 const PLACE_MAX_SLOPE = 12; // 出生 / 停車允許的最大地面坡度（°）
@@ -133,4 +138,168 @@ export function computeParkedVehicles(spawn) {
     }
   }
   return out;
+}
+
+// ---------- 行人生成路線 ----------
+// 權重：人流較多的地方（百貨門口、廣場、秋紅谷）抽中機率較高（手感值，推測，非人流實測）
+export const PED_SPOT_WEIGHTS = { sidewalk: 1, footway: 1, plaza: 2, qiuhonggu: 2, mall: 4 };
+export const PED_SPOT_STEP = 2.5; // 生成點沿線間距（m）：80 m 半徑內常見 200–400 點，約為目標人數的 4–8 倍（補生成還要避開視野與人）
+const PED_ROUTE_ROAD_TYPES = new Set(['primary', 'secondary', 'tertiary', 'residential', 'unclassified']);
+// 人行道行走線：路緣（半寬）外多少（m）；內外兩條（七期人行道含騎樓約 3–4 m 寬，推測），人不會全排成一列
+const SIDEWALK_GAPS = [1.3, 2.6];
+const ROUTE_CHECK_STEP = 2; // 路線可行走檢查的取樣間距（m）
+const ROUTE_MIN_LEN = 10; // 可行走區段最短長度（m），太短的不用
+const ROUTE_CLEAR_PAD = 0.5; // 與建築 / 水域保持的距離（m）
+const ROUTE_ROAD_PAD = 0.3; // 與車道邊保持的距離（m）
+const ROUTE_MAX_SLOPE = 30; // 行走線最大坡度（°）：秋紅谷坡道（估）可走，邊坡草地不走
+const ROUTE_MIN_NY = Math.cos((ROUTE_MAX_SLOPE * Math.PI) / 180);
+const PLAZA_CHORD_AREA = 300; // 廣場每多少 m² 一條弦
+const PLAZA_CHORDS_MAX = 16;
+const PLAZA_CHORD_LEN = [8, 24]; // 弦長範圍（m）
+const LAKESIDE_GAP = 4; // 湖邊步道相鄰 piece 中心相距超過此值（m）就斷開
+const MALL_GAP = 3; // 百貨門口行走線：輪廓外多少（m）
+const MALL_EDGE_MIN = 8; // 輪廓邊最短長度（m）
+const MALL_ROAD_REACH = 35; // 臨路側：行走線中點距地面車道（中心線 − 半寬）在此距離內
+const _pq = {};
+
+// 行走點可用：界內、不在建築 / 水域 / 車道、非陡坡
+export function pedWalkable(x, z) {
+  if (!inBounds(x, z, 3) || buildingAt(x, z, ROUTE_CLEAR_PAD) || inWater(x, z, ROUTE_CLEAR_PAD)) return false;
+  if (onRoadSurface(x, z, ROUTE_ROAD_PAD, false)) return false;
+  querySurface(x, z, Infinity, _pq);
+  return _pq.ny >= ROUTE_MIN_NY && !(_pq.waterY !== null && !_pq.walkable);
+}
+
+// 折線 line 在偏移 off 處的點（off > 0 = 前進方向右側，同 traffic.js 的人行道偏移）
+function offsetPoint(line, off, s, tmp) {
+  samplePolyline(line, s, tmp);
+  tmp.px = tmp.x - tmp.dz * off;
+  tmp.pz = tmp.z + tmp.dx * off;
+  return tmp;
+}
+
+// 可行走的連續區段 → routes.push({ road: line, off, s0, s1, kind })
+function addRoute(routes, line, off, kind, kindAt = null) {
+  const tmp = {};
+  let start = null;
+  let last = 0;
+  const flush = () => {
+    if (start !== null && last - start >= ROUTE_MIN_LEN) {
+      const mid = offsetPoint(line, off, (start + last) / 2, tmp);
+      routes.push({ road: line, off, s0: start, s1: last, kind: kindAt ? kindAt(mid.px, mid.pz) : kind });
+    }
+    start = null;
+  };
+  for (let s = 0; s <= line.length + 1e-6; s += ROUTE_CHECK_STEP) {
+    const p = offsetPoint(line, off, Math.min(s, line.length), tmp);
+    if (pedWalkable(p.px, p.pz)) {
+      if (start === null) start = s;
+      last = Math.min(s, line.length);
+    } else flush();
+  }
+  flush();
+}
+
+let pedRoutesCache = null;
+
+// 全部行人路線與生成點（固定種子、只算一次）：{ routes, spots: [{ x, z, route, s, w }] }
+export function pedestrianRoutes() {
+  if (pedRoutesCache) return pedRoutesCache;
+  const routes = [];
+  const terrain = getTerrain();
+  const basins = terrain.patches.filter((p) => p.kind === 'basin' && p.feature && p.feature.src).map((p) => p.feature.src.p);
+  const inBasin = (x, z) => basins.some((poly) => pointInPolygon(x, z, poly));
+  // 人行道：道路兩側路緣外
+  for (const r of surfaceRoads) {
+    if (!PED_ROUTE_ROAD_TYPES.has(r.type) || r.length < ROUTE_MIN_LEN) continue;
+    for (const side of [1, -1]) for (const gap of SIDEWALK_GAPS) addRoute(routes, r, side * (r.hw + gap), 'sidewalk');
+  }
+  // 步道（天橋 / 高架與階梯不走）；秋紅谷範圍內的歸 qiuhonggu
+  for (const r of surfaceFootways) {
+    if (r.bridge || r.layer > 0 || r.type === 'steps' || r.length < ROUTE_MIN_LEN) continue;
+    addRoute(routes, r, 0, 'footway', (x, z) => (inBasin(x, z) ? 'qiuhonggu' : 'footway'));
+  }
+  // 秋紅谷：湖邊步道（lakeside piece 中心連線）與北端坡道
+  for (const ls of terrain.lakesides) {
+    let flat = [];
+    const flushLake = () => {
+      if (flat.length >= 4) addRoute(routes, polylineInfo(flat), 0, 'qiuhonggu');
+      flat = [];
+    };
+    for (const pc of ls.pieces) {
+      const q = pc.quad;
+      const cx = (q[0] + q[2] + q[4] + q[6]) / 4;
+      const cz = (q[1] + q[3] + q[5] + q[7]) / 4;
+      const n = flat.length;
+      if (n && Math.hypot(cx - flat[n - 2], cz - flat[n - 1]) > LAKESIDE_GAP) flushLake();
+      flat.push(cx, cz);
+    }
+    flushLake();
+  }
+  for (const rp of terrain.rampPaths) addRoute(routes, polylineInfo(rp.pts.flatMap((p) => [p.x, p.z])), 0, 'qiuhonggu');
+  // 廣場：L 地表分區 pedestrian 內的隨機弦（固定種子）
+  const rng = mulberry32(CITY_SEED + 21);
+  for (const l of osm.L || []) {
+    if (l.k !== 'pedestrian') continue;
+    const bb = polygonBBox(l.p);
+    const n = Math.min(PLAZA_CHORDS_MAX, Math.max(2, Math.round(polygonArea(l.p) / PLAZA_CHORD_AREA)));
+    for (let k = 0; k < n; k++) {
+      let ax = 0;
+      let az = 0;
+      let ok = false;
+      for (let tries = 0; tries < 30 && !ok; tries++) {
+        ax = bb.x0 + rng() * (bb.x1 - bb.x0);
+        az = bb.z0 + rng() * (bb.z1 - bb.z0);
+        ok = pointInPolygon(ax, az, l.p);
+      }
+      if (!ok) continue;
+      const ang = rng() * Math.PI * 2;
+      const len = PLAZA_CHORD_LEN[0] + rng() * (PLAZA_CHORD_LEN[1] - PLAZA_CHORD_LEN[0]);
+      const bx = ax + Math.cos(ang) * len;
+      const bz = az + Math.sin(ang) * len;
+      if (!pointInPolygon(bx, bz, l.p)) continue;
+      addRoute(routes, polylineInfo([ax, az, bx, bz]), 0, 'plaza');
+    }
+  }
+  // 百貨門口：輪廓各邊外 MALL_GAP 的平行線，只取臨路側
+  for (const id of CROWD_MALL_IDS) {
+    const b = buildingById(id);
+    if (!b) continue;
+    const p = b.poly;
+    const n = p.length / 2;
+    for (let i = 0; i < n; i++) {
+      const ax = p[i * 2];
+      const az = p[i * 2 + 1];
+      const bx = p[((i + 1) % n) * 2];
+      const bz = p[((i + 1) % n) * 2 + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      if (L < MALL_EDGE_MIN) continue;
+      const tx = (bx - ax) / L;
+      const tz = (bz - az) / L;
+      // 外法線：邊中點往法線 1 m 不在輪廓內的那一側
+      let nx = tz;
+      let nz = -tx;
+      if (pointInPolygon((ax + bx) / 2 + nx, (az + bz) / 2 + nz, p)) {
+        nx = -nx;
+        nz = -nz;
+      }
+      const mx = (ax + bx) / 2 + nx * MALL_GAP;
+      const mz = (az + bz) / 2 + nz * MALL_GAP;
+      if (!onRoadSurface(mx, mz, MALL_ROAD_REACH, false)) continue;
+      const line = polylineInfo([ax + nx * MALL_GAP + tx, az + nz * MALL_GAP + tz, bx + nx * MALL_GAP - tx, bz + nz * MALL_GAP - tz]);
+      addRoute(routes, line, 0, 'mall');
+    }
+  }
+  // 生成點
+  const spots = [];
+  const tmp = {};
+  for (const route of routes) {
+    const w = PED_SPOT_WEIGHTS[route.kind];
+    for (let s = route.s0 + 1; s <= route.s1 - 1; s += PED_SPOT_STEP) {
+      offsetPoint(route.road, route.off, s, tmp);
+      spots.push({ x: tmp.px, z: tmp.pz, route, s, w });
+    }
+  }
+  pedRoutesCache = { routes, spots };
+  return pedRoutesCache;
 }

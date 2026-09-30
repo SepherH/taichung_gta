@@ -11,6 +11,11 @@
 //   patch 是唯一高度資料：heightAt / querySurface / buildPatchMesh / 物理 heightfield 全部由它取樣，不另算。
 // 甲板端點落地平台 landings、湖邊木棧板帶 lakesides（固定高度平板，其下高度場集中壓平）、北端坡道 rampPaths（鋪面帶格 kind = 'ramp'）、
 // 退台白色邊線 terracePaths / terraceLines（等高線平滑折線）也在建立時一併算出，渲染端只照畫。
+// 折線貼合切分（秋紅谷 patch.creases，只影響 buildPatchMesh 的渲染網格）：1.5 m 格下退台 / 邊坡的上下緣與湖邊步道材質邊界
+//   原本沿網格三角形呈鋸齒；改為沿平滑折線把所在三角形切開——切分點在原三角形邊上、子三角形與原三角形共平面，
+//   所以網格高度與 heightAt / 物理 heightfield 完全一致（高度差 0，不需要「≤ 0.1 m」的視覺修飾空間）；
+//   折線平台側的頂點法線朝正上、邊坡側沿用節點法線，明暗分界與材質分界都落在平滑折線上。
+//   取捨：幾何折角仍在規則格上（物理與 heightAt 共用），平台邊緣一格內的微小下垂（≤ 平台等高線內縮 0.05 m）只由法線抹平。
 // 可行走覆蓋面 walkables（跨湖紅橋甲板、Z 字湖上步道、下沉廣場大階梯斜面）：
 //   { id, kind: 'bridge' | 'boardwalk' | 'stairs', poly: [x, z, …], bbox, plane: [a, b, c]（y = a x + b z + c）, heightAt(x, z) }
 //   querySurface 取「高度場」與「footprint 含該點且高度 ≤ yHint + WALKABLE_STEP 的 walkable」兩者最高者。
@@ -57,6 +62,10 @@ const EMBED_RANGE = 1; // 谷內建築輪廓頂點高差 > 此值（m）視為�
 const FLAT_EPS = 0.01; // 建築輪廓內高差小於此值視為已平，不處理（避免把貼齊建築的下沉廣場牆邊抹平）
 const WALKABLE_STEP = 0.6; // walkable 高於 yHint 多少以內仍可站上（m，跨步高度）
 const TERRACE_LINE_DROP = 0.05; // 退台白色邊線取「平台高度再低多少」的等高線（m）
+// 折線貼合切分（渲染用，見檔頭）：平台上緣取「平台高度 − CREASE_DROP」、下緣取「平台高度 + CREASE_DROP」的等高線（平滑同白色邊線）
+const CREASE_DROP = TERRACE_LINE_DROP;
+const CREASE_FLAT_NY = Math.cos((5 * Math.PI) / 180); // 三頂點法線都在 5° 內的三角形不做折線切分（緩坡，明暗差不明顯）
+const CREASE_RANGE = 3; // 節點到折線此距離內才算有號距離（m，> 1.5 m 格對角線 2.12 m）；更遠者只取正負號
 
 // 每格地表代碼
 const K_GROUND = 0;
@@ -78,6 +87,9 @@ export const SURFACES = ['ground', 'grass', 'concrete'];
 export const SURFACE_OF = ['ground', 'grass', 'grass', 'grass', 'grass', 'grass', 'concrete', 'ground', 'concrete', 'concrete', 'grass'];
 // 代碼 → 細分種類（cellKindAt 用：區分退台平台 / 退台間陡坡、廣場地面 / 矮牆 / 大階梯，供車輛判斷可否行駛）
 export const CELL_KIND_NAMES = ['ground', 'grass', 'terrace', 'riser', 'ramp', 'lakebed', 'walkway', 'plaza', 'plaza_wall', 'stairs', 'ramp'];
+const TERRACE_KINDS = new Set([K_TERRACE, K_RISER]);
+// 谷內邊坡 / 步道格：路面高（0）上緣、walkway 下緣折線與湖邊步道材質邊界只在這些格切分
+const SLOPE_KINDS = new Set([K_GRASS, K_TERRACE, K_RISER, K_RAMP, K_WALKWAY, K_RAMP_PAVE]);
 
 // ---------- 小工具 ----------
 function smoothstep(e0, e1, x) {
@@ -547,14 +559,18 @@ function chaikin(line, iterations) {
 }
 
 function marchTerrace(patch, walkway, out) {
-  const { x0, z0, cell, cols, rows, heights, kinds } = patch;
   const levels = [];
   for (let k = 0; k < TERRACE_STEPS; k++) levels.push((walkway * k) / TERRACE_STEPS - TERRACE_LINE_DROP);
+  marchLevels(patch, levels, TERRACE_KINDS, out);
+}
+
+// marching squares：kindSet 內的格，各 level 的等高線線段（每段 6 個數，y = level）追加到 out
+function marchLevels(patch, levels, kindSet, out) {
+  const { x0, z0, cell, cols, rows, heights, kinds } = patch;
   const pts = [];
   for (let r = 0; r < rows - 1; r++) {
     for (let c = 0; c < cols - 1; c++) {
-      const kc = kinds[r * (cols - 1) + c];
-      if (kc !== K_TERRACE && kc !== K_RISER) continue;
+      if (!kindSet.has(kinds[r * (cols - 1) + c])) continue;
       const i = r * cols + c;
       // 角點順序：左上、右上、右下、左下（沿格邊一圈）
       const hs = [heights[i], heights[i + 1], heights[i + cols + 1], heights[i + cols]];
@@ -574,6 +590,75 @@ function marchTerrace(patch, walkway, out) {
       }
     }
   }
+}
+
+// ---------- 折線貼合切分資料（渲染用；見檔頭） ----------
+// 每條折線一個有號距離場（節點上的值，平台側為正）：上緣 = 各平台高度 − CREASE_DROP（平台在上方），
+// 下緣 = 各平台高度 + CREASE_DROP（平台在下方）；中間各層只在退台格取，路面高上緣與 walkway 下緣取所有谷內邊坡格。
+// 正負號取節點高度在等高線哪一側、大小取到平滑折線（同白色邊線的 Chaikin 平滑）的距離：距離場近似線性，
+// buildPatchMesh 沿三角形邊線性內插的零點就落在平滑折線上。
+// 另有湖邊步道材質場 walk = 到湖岸距離 − LAKE_WALKWAY（< 0 為步道鋪面）。
+// 寫進 patch.creases = { fields: [{ level, flatAbove, phi }], walk, flatNode, paths: [{ level, flatAbove, pts: [x, y, z, …] }] }
+function prepareCreases(patch) {
+  const B = patch.feature;
+  const walkway = B.lv.walkway;
+  const { x0, z0, cell, cols, rows, heights } = patch;
+  const n = cols * rows;
+  const specs = [];
+  for (let k = 0; k < TERRACE_STEPS; k++) {
+    const P = (walkway * k) / TERRACE_STEPS;
+    specs.push({ level: P - CREASE_DROP, flatAbove: true, kinds: k === 0 ? SLOPE_KINDS : TERRACE_KINDS });
+    const Q = (walkway * (k + 1)) / TERRACE_STEPS;
+    specs.push({ level: Q + CREASE_DROP, flatAbove: false, kinds: k === TERRACE_STEPS - 1 ? SLOPE_KINDS : TERRACE_KINDS });
+  }
+  const fields = [];
+  const paths = [];
+  const q = [];
+  for (const sp of specs) {
+    const raw = [];
+    marchLevels(patch, [sp.level], sp.kinds, raw);
+    if (!raw.length) continue;
+    const grid = new SpatialGrid(4);
+    for (const line of chainSegments(raw)) {
+      const sm = chaikin(line, TERRACE_SMOOTH);
+      paths.push({ level: sp.level, flatAbove: sp.flatAbove, pts: sm });
+      for (let i = 0; i + 5 < sm.length; i += 3) {
+        const sg = { ax: sm[i], az: sm[i + 2], bx: sm[i + 3], bz: sm[i + 5] };
+        grid.insert(sg, Math.min(sg.ax, sg.bx), Math.min(sg.az, sg.bz), Math.max(sg.ax, sg.bx), Math.max(sg.az, sg.bz));
+      }
+    }
+    const phi = new Float32Array(n);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const x = x0 + c * cell;
+        const z = z0 + r * cell;
+        let d = CREASE_RANGE;
+        for (const sg of grid.query(x - CREASE_RANGE, z - CREASE_RANGE, x + CREASE_RANGE, z + CREASE_RANGE, q)) d = Math.min(d, segDist(x, z, sg));
+        const above = heights[i] > sp.level;
+        phi[i] = (above === sp.flatAbove ? 1 : -1) * d;
+      }
+    }
+    fields.push({ level: sp.level, flatAbove: sp.flatAbove, phi });
+  }
+  let walk = null;
+  if (B.lake) {
+    walk = new Float32Array(n);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) walk[r * cols + c] = polyDist(x0 + c * cell, z0 + r * cell, B.lake) - LAKE_WALKWAY;
+  }
+  // 平台節點：最近的折線（CREASE_RANGE 內）在其平台側 → 渲染法線朝正上
+  const flatNode = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    let best = CREASE_RANGE;
+    for (const f of fields) {
+      const a = Math.abs(f.phi[i]);
+      if (a < best) {
+        best = a;
+        flatNode[i] = f.phi[i] > 0 ? 1 : 0;
+      }
+    }
+  }
+  patch.creases = { fields, walk, flatNode, paths };
 }
 
 // ---------- walkables ----------
@@ -912,55 +997,176 @@ export function drapeRibbon(surface, pts, hw, yOff, out, maxSeg = 1) {
 }
 
 // patch 轉渲染網格（純數學）：頂點 = 高度場節點；法線 = 節點中央差分；索引依 SURFACES 分組
-// 回傳 { positions, normals, uvs, indices, groups: [{ surface, start, count }] }（uv = (x, -z) / uvScale）
+// 有 patch.creases（秋紅谷）時：跨折線的三角形沿折線切開（切分點在原三角形邊上，子三角形與原三角形共平面、高度不變），
+//   平台側子三角形與平台節點法線朝正上；湖邊步道材質場跨零的三角形依子三角形所在側分鋪面 / 草地（見 prepareCreases）
+// 回傳 { positions, normals, uvs, indices, groups: [{ surface, start, count }], triCells（每個三角形所屬格 r·(cols−1)+c）, splitTriangles }
+// （uv = (x, -z) / uvScale；切分新增的頂點接在節點之後）
 export function buildPatchMesh(patch, { uvScale = 4 } = {}) {
   const { x0, z0, cell, cols, rows, heights, kinds } = patch;
+  const cr = patch.creases || null;
   const n = cols * rows;
-  const positions = new Float32Array(n * 3);
-  const normals = new Float32Array(n * 3);
-  const uvs = new Float32Array(n * 2);
+  const positions = [];
+  const normals = [];
+  const uvs = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const i = r * cols + c;
       const x = x0 + c * cell;
       const z = z0 + r * cell;
-      positions[i * 3] = x;
-      positions[i * 3 + 1] = heights[i];
-      positions[i * 3 + 2] = z;
-      const cl = Math.max(0, c - 1);
-      const cr = Math.min(cols - 1, c + 1);
-      const ru = Math.max(0, r - 1);
-      const rd = Math.min(rows - 1, r + 1);
-      const gx = (heights[r * cols + cr] - heights[r * cols + cl]) / ((cr - cl) * cell);
-      const gz = (heights[rd * cols + c] - heights[ru * cols + c]) / ((rd - ru) * cell);
-      const len = Math.hypot(gx, 1, gz);
-      normals[i * 3] = -gx / len;
-      normals[i * 3 + 1] = 1 / len;
-      normals[i * 3 + 2] = -gz / len;
-      uvs[i * 2] = x / uvScale;
-      uvs[i * 2 + 1] = -z / uvScale;
+      positions.push(x, heights[i], z);
+      if (cr && cr.flatNode[i]) {
+        normals.push(0, 1, 0);
+      } else {
+        const cl = Math.max(0, c - 1);
+        const cR = Math.min(cols - 1, c + 1);
+        const ru = Math.max(0, r - 1);
+        const rd = Math.min(rows - 1, r + 1);
+        const gx = (heights[r * cols + cR] - heights[r * cols + cl]) / ((cR - cl) * cell);
+        const gz = (heights[rd * cols + c] - heights[ru * cols + c]) / ((rd - ru) * cell);
+        const len = Math.hypot(gx, 1, gz);
+        normals.push(-gx / len, 1 / len, -gz / len);
+      }
+      uvs.push(x / uvScale, -z / uvScale);
     }
   }
   const lists = SURFACES.map(() => []);
+  const cellLists = SURFACES.map(() => []);
+  const concrete = SURFACES.indexOf('concrete');
+  const grass = SURFACES.indexOf('grass');
+  const added = new Map(); // 切分新增頂點（位置 + 是否平台側）→ 索引，相鄰三角形共用
+  let splitTriangles = 0;
+  const nodeVert = (i) => {
+    const f = cr.fields.map((fd) => fd.phi[i]);
+    return { x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2], nx: normals[i * 3], ny: normals[i * 3 + 1], nz: normals[i * 3 + 2], f, w: cr.walk ? cr.walk[i] : 1, node: i };
+  };
+  const vertexIndex = (v, flat) => {
+    if (v.node >= 0 && (!flat || cr.flatNode[v.node])) return v.node;
+    const key = `${Math.round(v.x * 1e5)},${Math.round(v.z * 1e5)},${flat ? 1 : 0}`;
+    let id = added.get(key);
+    if (id === undefined) {
+      id = positions.length / 3;
+      added.set(key, id);
+      positions.push(v.x, v.y, v.z);
+      const len = Math.hypot(v.nx, v.ny, v.nz) || 1;
+      if (flat) normals.push(0, 1, 0);
+      else normals.push(v.nx / len, v.ny / len, v.nz / len);
+      uvs.push(v.x / uvScale, -v.z / uvScale);
+    }
+    return id;
+  };
+  // (x 東, z 南) 平面上順時針（叉積 < 0）才是法線朝上；退化三角形略過
+  const pushTri = (surf, cellIdx, a, b, c) => {
+    const P = positions;
+    const crs = (P[b * 3] - P[a * 3]) * (P[c * 3 + 2] - P[a * 3 + 2]) - (P[b * 3 + 2] - P[a * 3 + 2]) * (P[c * 3] - P[a * 3]);
+    if (Math.abs(crs) < 1e-10) return;
+    if (crs > 0) lists[surf].push(a, c, b);
+    else lists[surf].push(a, b, c);
+    cellLists[surf].push(cellIdx);
+  };
+  const emitSplit = (tri, surf, cellIdx, walkSplit) => {
+    const pieces = splitByFields(tri, walkSplit);
+    splitTriangles++;
+    for (const pc of pieces) {
+      const cf = pc[0].f.map((v, k) => (v + pc[1].f[k] + pc[2].f[k]) / 3);
+      let flat = false;
+      let best = CREASE_RANGE;
+      for (const v of cf) {
+        if (Math.abs(v) < best) {
+          best = Math.abs(v);
+          flat = v > 0;
+        }
+      }
+      let sf = surf;
+      if (walkSplit) sf = (pc[0].w + pc[1].w + pc[2].w) / 3 < 0 ? concrete : surf === concrete ? grass : surf;
+      pushTri(sf, cellIdx, vertexIndex(pc[0], flat), vertexIndex(pc[1], flat), vertexIndex(pc[2], flat));
+    }
+  };
   for (let r = 0; r < rows - 1; r++) {
     for (let c = 0; c < cols - 1; c++) {
       const i00 = r * cols + c;
       const i10 = i00 + 1;
       const i01 = i00 + cols;
       const i11 = i01 + 1;
+      const cellIdx = r * (cols - 1) + c;
+      const kind = kinds[cellIdx];
+      const surf = SURFACES.indexOf(SURFACE_OF[kind]);
       // (x 東, z 南) 下 (i00, i01, i10) 法線朝上
-      lists[SURFACES.indexOf(SURFACE_OF[kinds[r * (cols - 1) + c]])].push(i00, i01, i10, i10, i01, i11);
+      for (const t of [[i00, i01, i10], [i10, i01, i11]]) {
+        const walkSplit = !!(cr && cr.walk && SLOPE_KINDS.has(kind) && mixed(cr.walk[t[0]], cr.walk[t[1]], cr.walk[t[2]]));
+        const creaseSplit = !!(cr && steepTri(normals, t) && cr.fields.some((fd) => mixed(fd.phi[t[0]], fd.phi[t[1]], fd.phi[t[2]])));
+        if (walkSplit || creaseSplit) emitSplit(t.map(nodeVert), surf, cellIdx, walkSplit);
+        else {
+          lists[surf].push(...t);
+          cellLists[surf].push(cellIdx);
+        }
+      }
     }
   }
   const indices = new Uint32Array(lists.reduce((s, l) => s + l.length, 0));
+  const triCells = new Int32Array(indices.length / 3);
   const groups = [];
   let start = 0;
   lists.forEach((l, k) => {
     indices.set(l, start);
+    triCells.set(cellLists[k], start / 3);
     if (l.length) groups.push({ surface: SURFACES[k], start, count: l.length });
     start += l.length;
   });
-  return { positions, normals, uvs, indices, groups };
+  return {
+    positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs),
+    indices, groups, triCells, splitTriangles, addedVertices: positions.length / 3 - n,
+  };
+}
+
+// 任一頂點法線偏離正上超過 CREASE_FLAT_NY 才沿折線切分：緩坡兩側明暗本來就接近，不切省三角形
+function steepTri(normals, t) {
+  return Math.min(normals[t[0] * 3 + 1], normals[t[1] * 3 + 1], normals[t[2] * 3 + 1]) < CREASE_FLAT_NY;
+}
+
+// 三值是否跨零（> 0 與 ≤ 0 並存）
+function mixed(a, b, c) {
+  const p = (a > 0) + (b > 0) + (c > 0);
+  return p > 0 && p < 3;
+}
+
+// 兩頂點沿邊內插（依 (x, z) 字典序固定起點，相鄰三角形在共用邊上算出完全相同的點）
+function lerpVert(a, b, t) {
+  if (a.x > b.x || (a.x === b.x && a.z > b.z)) return lerpVert(b, a, 1 - t);
+  const L = (u, v) => u + (v - u) * t;
+  return {
+    x: L(a.x, b.x), y: L(a.y, b.y), z: L(a.z, b.z), nx: L(a.nx, b.nx), ny: L(a.ny, b.ny), nz: L(a.nz, b.nz),
+    f: a.f.map((v, k) => L(v, b.f[k])), w: L(a.w, b.w), node: -1,
+  };
+}
+
+// 三角形依序被各跨零的場（折線距離場，walkSplit 時再加步道材質場）切開；回傳子三角形 [[v0, v1, v2], …]
+function splitByFields(tri, walkSplit) {
+  let pieces = [tri];
+  const nf = tri[0].f.length;
+  const cut = (get) => {
+    const out = [];
+    for (const pc of pieces) {
+      const s = pc.map(get);
+      if (!mixed(s[0], s[1], s[2])) {
+        out.push(pc);
+        continue;
+      }
+      // 孤立頂點 a（與另兩點不同側）→ 兩條邊上的零點 p、q：一個三角形 + 一個四邊形（拆兩個三角形）
+      const pos = s.map((v) => v > 0);
+      const k = pos[0] === pos[1] ? 2 : pos[0] === pos[2] ? 1 : 0;
+      const a = pc[k];
+      const b = pc[(k + 1) % 3];
+      const c = pc[(k + 2) % 3];
+      const sa = s[k];
+      const p = lerpVert(a, b, sa / (sa - s[(k + 1) % 3]));
+      const q = lerpVert(a, c, sa / (sa - s[(k + 2) % 3]));
+      out.push([a, p, q], [p, b, c], [p, c, q]);
+    }
+    pieces = out;
+  };
+  for (let k = 0; k < nf; k++) cut((v) => v.f[k]);
+  if (walkSplit) cut((v) => v.w);
+  return pieces;
 }
 
 // ---------- 建立地形 ----------
@@ -1055,6 +1261,13 @@ export function createTerrain(osmData) {
     if (!pts) continue;
     rampPaths.push({ id: `ramp:${B.src.i}`, pts, hw: RAMP_PAVE_HW });
     stats.rampCells += markRamp(p, pts, RAMP_PAVE_HW);
+  }
+  // 折線貼合切分資料（在坡道鋪面標記之後：切分只看最終的格種類）
+  stats.creaseLines = 0;
+  for (const p of patches) {
+    if (p.kind !== 'basin') continue;
+    prepareCreases(p);
+    stats.creaseLines += p.creases.paths.length;
   }
 
   // 湖面（水平面 y = levels.water，不是高度場）

@@ -9,12 +9,54 @@
 //   mag：0..1 的推動量；analog：本次是否含觸控搖桿的類比值（false = 純鍵盤 / 按鈕的數位 ±1）
 //   鍵盤（WASD / 方向鍵）與觸控按鈕（油門 KeyW、煞車 KeyS）為數位 ±1；觸控搖桿為類比（已套死區重映射）
 //   駕駛模式下搖桿只貢獻 x（轉向），y 只來自鍵盤與油門 / 煞車鈕
+//
+// 鏡頭轉動量 dx / dy 的單位 = 「中檔靈敏度下的滑鼠 px」，camera.js 乘 LOOK_RAD_PER_UNIT 換成弧度：
+//   滑鼠 / pointer lock：movementX × 滑鼠靈敏度倍率；觸控：touchLook() 依目前螢幕寬換算（拖半個螢幕寬 = TOUCH_HALF_TURN）× 觸控倍率
+// 靈敏度：低 / 中 / 高三段（SENS_LEVELS），滑鼠與觸控各自存 localStorage；桌機按 SENS_KEY 循環、觸控由 touch.js「靈敏度」鈕循環，
+//   切換後通知 onSensitivityChange 的訂閱者（hud.js 顯示 toast）
 import { isTouch, initMobile } from './mobile.js';
 import { initTouch } from './touch.js';
 
 const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab']);
 const STICK_KEY = 0.5; // 搖桿推過此值寫入對應方向鍵
 const STICK_RUN = 0.9; // 步行中搖桿推過此值視為跑
+export const LOOK_RAD_PER_UNIT = (2 * Math.PI) / 800; // 中檔：滑鼠移動 800 px ≈ 轉 360°
+const TOUCH_HALF_TURN = Math.PI; // 觸控中檔：橫向拖過半個螢幕寬 ≈ 轉 180°
+const MOUSE_STEP_MAX = 200; // 單次 mousemove 位移上限（px），避免 pointer lock 偶發的大跳動
+export const SENS_KEY = 'KeyO'; // 桌機循環切換滑鼠靈敏度（main.js / player.js 未占用）
+export const SENS_LEVELS = [
+  { id: 'low', label: '低', mul: 0.6 },
+  { id: 'mid', label: '中', mul: 1 },
+  { id: 'high', label: '高', mul: 1.6 },
+];
+const SENS_DEFAULT = 1; // 讀不到設定時用中檔
+const SENS_STORE_KEY = { mouse: 'tcgta.lookSens.mouse', touch: 'tcgta.lookSens.touch' };
+
+const sensListeners = new Set();
+
+// 訂閱靈敏度切換：fn({ kind: 'mouse'|'touch', level })；回傳取消訂閱函式
+export function onSensitivityChange(fn) {
+  sensListeners.add(fn);
+  return () => sensListeners.delete(fn);
+}
+
+function loadSens(kind) {
+  try {
+    const id = window.localStorage.getItem(SENS_STORE_KEY[kind]);
+    const i = SENS_LEVELS.findIndex((l) => l.id === id);
+    return i >= 0 ? i : SENS_DEFAULT;
+  } catch (err) {
+    return SENS_DEFAULT;
+  }
+}
+
+function saveSens(kind, i) {
+  try {
+    window.localStorage.setItem(SENS_STORE_KEY[kind], SENS_LEVELS[i].id);
+  } catch (err) {
+    // 無痕模式 / 停用儲存：只在本次遊戲有效
+  }
+}
 
 function clamp(v, a, b) {
   return v < a ? a : v > b ? b : v;
@@ -30,6 +72,7 @@ export class Input {
     this.wheel = 0;
     this.dragging = false;
     this.enabled = false; // 遊戲開始後才接受輸入
+    this.sens = { mouse: loadSens('mouse'), touch: loadSens('touch') }; // SENS_LEVELS 索引
 
     // 按住狀態的來源
     this.kbKeys = new Set();
@@ -44,6 +87,7 @@ export class Input {
       if (!this.enabled) return;
       if (PREVENT.has(e.code)) e.preventDefault();
       if (!e.repeat) this.pressed.add(e.code);
+      if (e.code === SENS_KEY && !e.repeat) this.cycleSensitivity('mouse');
       this.kbKeys.add(e.code);
       this._syncKeys();
     });
@@ -75,9 +119,9 @@ export class Input {
     window.addEventListener('mousemove', (e) => {
       if (!this.enabled) return;
       if (document.pointerLockElement === dom || this.dragging) {
-        // 限制單次位移，避免 pointer lock 偶發的大跳動
-        this.dx += clamp(e.movementX || 0, -200, 200);
-        this.dy += clamp(e.movementY || 0, -200, 200);
+        const k = this.sensMul('mouse');
+        this.dx += clamp(e.movementX || 0, -MOUSE_STEP_MAX, MOUSE_STEP_MAX) * k;
+        this.dy += clamp(e.movementY || 0, -MOUSE_STEP_MAX, MOUSE_STEP_MAX) * k;
       }
     });
     dom.addEventListener(
@@ -132,7 +176,34 @@ export class Input {
     return { x, y, mag: Math.min(1, len), analog: sx !== 0 || sy !== 0 };
   }
 
+  // ---------- 鏡頭靈敏度 ----------
+  sensLevel(kind) {
+    return SENS_LEVELS[this.sens[kind]];
+  }
+
+  sensMul(kind) {
+    return this.sensLevel(kind).mul;
+  }
+
+  // 低 → 中 → 高 → 低 循環；回傳新檔位
+  cycleSensitivity(kind) {
+    const i = (this.sens[kind] + 1) % SENS_LEVELS.length;
+    this.sens[kind] = i;
+    saveSens(kind, i);
+    const level = SENS_LEVELS[i];
+    for (const fn of sensListeners) fn({ kind, level });
+    return level;
+  }
+
   // ---------- 觸控介面（touch.js 呼叫） ----------
+  // 單指拖曳鏡頭：mx / my 為螢幕 px 位移，依目前螢幕寬換算（旋轉螢幕後自動跟著變）
+  touchLook(mx, my) {
+    const halfW = Math.max(1, window.innerWidth * 0.5);
+    const k = (TOUCH_HALF_TURN / (LOOK_RAD_PER_UNIT * halfW)) * this.sensMul('touch');
+    this.dx += mx * k;
+    this.dy += my * k;
+  }
+
   touchPress(code, hold) {
     if (!this.enabled) return;
     this.pressed.add(code);

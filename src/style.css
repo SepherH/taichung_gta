@@ -290,6 +290,27 @@ body {
   font-weight: bold;
 }
 
+/* 步行常駐按鍵提示（右下；駕駛時由 hud.js 隱藏，該處改顯示時速） */
+#ctrl-hint {
+  position: absolute;
+  right: 16px;
+  bottom: 24px;
+  padding: 4px 12px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+#ctrl-hint b {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 3px;
+  color: #ffd23f;
+  text-align: center;
+}
+
 #toast {
   position: absolute;
   left: 50%;
@@ -304,16 +325,28 @@ body {
   text-align: center;
 }
 
-/* ---------- 授權標示（右下角常駐小字） ---------- */
+/* ---------- 授權標示（ODbL 要求常駐；貼最邊角、小字半透明、不吃指標事件） ---------- */
+/* 桌機：右下角。左下有小地圖（left/bottom 18px 起）；右下的 #ctrl-hint / #speed 底緣在 bottom 24px，
+   本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊 */
 #attribution {
   position: fixed;
-  right: 8px;
-  bottom: 3px;
+  right: calc(8px + env(safe-area-inset-right));
+  bottom: calc(4px + env(safe-area-inset-bottom));
   z-index: 30;
+  max-width: calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
   font-size: 11px;
   line-height: 1.4;
-  color: rgba(255, 255, 255, 0.78);
+  color: #fff;
+  opacity: 0.55;
   text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* 載入 / 開始畫面顯示期間連結可點（#attribution 在 DOM 中位於 #loading 之後） */
+#loading:not(.hidden) ~ #attribution {
   pointer-events: auto;
   user-select: text;
 }
@@ -500,7 +533,8 @@ body.touch #prompt {
   font-size: 16px;
 }
 
-body.touch #help {
+body.touch #help,
+body.touch #ctrl-hint {
   display: none;
 }
 
@@ -518,12 +552,15 @@ body.touch #touch-hint {
   white-space: nowrap;
 }
 
+/* 觸控：左下角。右下是觸控按鈕群（底緣 bottom 24px 起、橫跨右側約 240px），左上是小地圖；
+   搖桿預設圈位於 top 70% ± 64px，底緣距畫面底仍有數十 px；#touch-hint 在正下方置中（bottom 8px 起），
+   本標示壓低到其下緣以下（bottom 1px、行高 11px） */
 body.touch #attribution {
   left: calc(10px + env(safe-area-inset-left));
   right: auto;
-  top: calc(136px + env(safe-area-inset-top));
-  bottom: auto;
+  bottom: calc(1px + env(safe-area-inset-bottom));
   font-size: 10px;
+  line-height: 1.1;
 }
 
 /* 觸控操作層：canvas 之上、HUD 之下（HUD 不吃指標事件） */
@@ -649,8 +686,25 @@ body.touch-drive .tbtn[data-show="walk"] {
   height: 72px;
 }
 
+/* 攻擊鈕：大號、紅底黃框，放在主鈕左上（右手拇指往內一點即可按到） */
+.tbtn.slot-attack {
+  right: calc(136px + env(safe-area-inset-right));
+  bottom: calc(120px + env(safe-area-inset-bottom));
+  width: 96px;
+  height: 96px;
+  border: 3px solid #ffd23f;
+  background: rgba(214, 48, 38, 0.72);
+  font-size: 22px;
+  box-shadow: 0 0 12px rgba(214, 48, 38, 0.6);
+}
+
+.tbtn.slot-attack.active {
+  background: rgba(255, 90, 70, 0.9);
+}
+
 .tbtn.slot-top1,
-.tbtn.slot-top2 {
+.tbtn.slot-top2,
+.tbtn.slot-top3 {
   top: calc(12px + env(safe-area-inset-top));
   width: 56px;
   height: 56px;
@@ -663,4 +717,8 @@ body.touch-drive .tbtn[data-show="walk"] {
 
 .tbtn.slot-top2 {
   right: calc(82px + env(safe-area-inset-right));
+}
+
+.tbtn.slot-top3 {
+  right: calc(148px + env(safe-area-inset-right));
 }

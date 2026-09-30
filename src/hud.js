@@ -1,14 +1,18 @@
-// HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、上車提示、地點提示
+// HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、右下步行常駐按鍵提示、上車提示、地點提示
+// 鏡頭靈敏度切換（input.js：桌機 O 鍵 / 觸控「靈敏度」鈕）由本檔訂閱並以 toast 顯示目前檔位
 // 觸控裝置（body.touch）版面由 style.css 重新配置；本檔負責依 state.driving 切換觸控按鈕配置、把鍵盤提示改成觸控用語
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
 import { setTouchMode } from './touch.js';
+import { onSensitivityChange } from './input.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
 const PLACE_TOAST = '📍 '; // main.js 進場地名 toast 的前綴：與地名 pill 同名時不重複顯示（見 toast()）
+const SENS_TOAST_SEC = 2; // 靈敏度 toast 顯示秒數
+const SENS_KIND_LABEL = { mouse: '滑鼠', touch: '觸控' };
 
 export class HUD {
   constructor() {
@@ -19,6 +23,8 @@ export class HUD {
     this.clockEl = document.getElementById('clock');
     this.helpEl = document.getElementById('help');
     this.promptEl = document.getElementById('prompt');
+    this.ctrlHintEl = document.getElementById('ctrl-hint'); // 步行常駐按鍵提示（觸控版由 style.css 隱藏，改看「揮拳」鈕）
+    this._lastDriving = null;
     this.toastEl = document.getElementById('toast');
     this.minimap = document.getElementById('minimap');
     this.mctx = this.minimap.getContext('2d');
@@ -29,6 +35,9 @@ export class HUD {
     this.touch = isTouch();
     this.enterBtn = null; // 觸控「上車」鈕：附近有車時加上 .ready 提示
     this.mapCanvas = this._buildMap();
+    onSensitivityChange(({ kind, level }) => {
+      this.toast(`鏡頭靈敏度（${SENS_KIND_LABEL[kind]}）：${level.label}（×${level.mul}）`, SENS_TOAST_SEC);
+    });
   }
 
   _buildMap() {
@@ -154,6 +163,10 @@ export class HUD {
   // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers }
   update(dt, state) {
     if (this.touch) setTouchMode(state.driving ? 'drive' : 'walk');
+    if (state.driving !== this._lastDriving) {
+      this._lastDriving = state.driving;
+      if (this.ctrlHintEl) this.ctrlHintEl.classList.toggle('hidden', state.driving);
+    }
     if (state.location !== this._lastLocation) {
       this._lastLocation = state.location;
       this.locationEl.textContent = state.location;

@@ -1,7 +1,7 @@
 // 無頭驗證 src/combat.js 與 src/npc-ai.js：mock actor / anim / body，手動推進時間
 // 用法：node tools/test/combat.mjs [-v 列出每項斷言]（任一斷言失敗 exit 1）
-import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD } from '../../src/combat.js';
-import { NpcBrain, wireCombatToBrains, FIGHT_PUNCH_MIN, FIGHT_PUNCH_MAX } from '../../src/npc-ai.js';
+import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD, HIT_RADIUS, HIT_HALF_ANGLE, HIT_MAX_DY, KNOCKBACK_DIST, ASSIST_RADIUS, HIT_STOP } from '../../src/combat.js';
+import { NpcBrain, wireCombatToBrains, FIGHT_PUNCH_MIN, FIGHT_PUNCH_MAX, WATCH_MIN_TIME, WATCH_MAX_TIME } from '../../src/npc-ai.js';
 
 let pass = 0;
 let total = 0;
@@ -23,8 +23,13 @@ function mockActor(id, x, z, yaw = 0, { kind = 'pedestrian', y = 0 } = {}) {
   const anim = {
     state: 'idle',
     triggers: [],
+    stops: [],
     trigger(name) {
       this.triggers.push(name); // state 由測試手動設定（例如 drive），模擬動畫播完已回 idle
+      return this.reject !== name; // reject：模擬動畫拒絕某個一次性動作（例如跳躍中不能出拳）
+    },
+    hitStop(sec) {
+      this.stops.push(sec);
     },
     on(evt, cb) {
       (handlers[evt] ||= []).push(cb);
@@ -104,9 +109,9 @@ function punch(sys, att, windowSec = 0.15) {
   // 扇形外
   const cases = [
     ['背後', 0, -0.8, 0],
-    ['太遠', 0, 1.3, 0],
-    ['高度差', 0, 0.8, 1.2],
-    ['側面 60°', Math.sin(Math.PI / 3) * 0.8, Math.cos(Math.PI / 3) * 0.8, 0],
+    ['太遠 1.5 m', 0, 1.5, 0],
+    ['高度差 1.2 m', 0, 0.8, 1.2],
+    ['側面 65°', Math.sin((65 * Math.PI) / 180) * 0.8, Math.cos((65 * Math.PI) / 180) * 0.8, 0],
   ];
   for (const [name, x, z, y] of cases) {
     clock += 5;
@@ -130,6 +135,72 @@ function punch(sys, att, windowSec = 0.15) {
   punch(sys, a);
   ok(b.hp === h - PUNCH_DAMAGE, '扇形內 30°、高度差 0.3 m 命中');
   ok(kb && kb.y === 0 && kb.x > 0 && kb.z > 0 && Math.hypot(kb.x, kb.z) < 1, '擊退向量為小的水平外推');
+  ok(Math.abs(Math.hypot(kb.x, kb.z) - KNOCKBACK_DIST) < 1e-9 && KNOCKBACK_DIST >= 0.4 && KNOCKBACK_DIST <= 0.8, `擊退位移 ${KNOCKBACK_DIST} m（規格 0.4–0.8）`);
+  ok(a.anim.stops.at(-1) === HIT_STOP && b.anim.stops.at(-1) === HIT_STOP && HIT_STOP === 0.05, '命中時攻守雙方 hitStop 0.05 s');
+  ok(HIT_RADIUS === 1.4 && Math.abs(HIT_HALF_ANGLE - Math.PI / 3) < 1e-12 && HIT_MAX_DY === 1.2, '命中扇形 1.4 m / 半角 60° / 垂直差 < 1.2 m');
+  // 扇形邊緣內：1.3 m 正前方、55° 側面、高度差 1.1 m 都命中
+  for (const [name, x, z, y] of [
+    ['1.3 m 正前方', 0, 1.3, 0],
+    ['側面 55°', Math.sin((55 * Math.PI) / 180) * 1.2, Math.cos((55 * Math.PI) / 180) * 1.2, 0],
+    ['高度差 1.1 m', 0, 1, 1.1],
+  ]) {
+    clock += 5;
+    sys.update(0);
+    Object.assign(b.pos, { x, y, z });
+    const h0 = b.hp;
+    punch(sys, a);
+    ok(b.hp === h0 - PUNCH_DAMAGE, `扇形內（${name}）命中`);
+  }
+  // 動畫拒絕出拳（例如跳躍中）：requestPunch 回 false、不吃冷卻
+  clock += 5;
+  sys.update(0);
+  a.anim.reject = 'punch';
+  const rejected = sys.requestPunch(a) === false;
+  a.anim.reject = null;
+  ok(rejected && sys.requestPunch(a) === true, '動畫拒絕 punch → requestPunch false，且不進冷卻');
+}
+
+// ---------- 1b. 輔助瞄準 ----------
+{
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const a = mockActor('p', 0, 0, 0, { kind: 'player' });
+  const near = mockActor('near', 1.6, 1.2); // 2.0 m、右前 53°
+  const far = mockActor('far', 0, 2.4); // 2.4 m 正前方
+  const behind = mockActor('behind', 0, -1); // 背後
+  const side = mockActor('side', -2, 0.05); // 左側 88.6°（前半圓內）
+  const out = mockActor('out', 0, ASSIST_RADIUS + 0.1);
+  for (const x of [a, near, far, behind, side, out]) sys.register(x);
+  ok(sys.assistTarget(a) === near, '輔助瞄準：前方 2.5 m 內最近的行人');
+  near.untargetable = true;
+  const t2 = sys.assistTarget(a);
+  side.pos.x = -3;
+  const t3 = sys.assistTarget(a);
+  ok(t2 === side && t3 === far, `背後不選、前半圓（±90°）內取最近（${t2 && t2.id} → ${t3 && t3.id}）`);
+  far.pos.z = 5;
+  side.pos.x = -5;
+  ok(sys.assistTarget(a) === null, '2.5 m 內沒有行人 → null');
+}
+
+// ---------- 1c. recoverOnKo：拳擊打到 hp 歸零 → 倒地後照常起身、hp 回滿、不發 dead ----------
+{
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const a = mockActor('p', 0, 0, 0, { kind: 'player' });
+  const b = mockActor('b', 0, 0.8);
+  b.recoverOnKo = true;
+  b.hp = PUNCH_DAMAGE;
+  sys.register(a);
+  sys.register(b);
+  let dead = 0;
+  sys.on('dead', () => dead++);
+  punch(sys, a);
+  const kd = sys.stateOf(b) === 'knockdown' && b.hp === 0;
+  b.body.settle = { settled: true, clearToStand: true };
+  step(sys, GETUP_MIN_DOWN + 0.1);
+  const up = sys.stateOf(b) === 'getup';
+  step(sys, DEAD_HOLD);
+  ok(kd && up && b.hp === b.maxHp && dead === 0, `hp 歸零 → knockdown → ${GETUP_MIN_DOWN}s 後起身、hp ${b.hp}、dead ${dead}`);
 }
 
 // ---------- 2. 連擊倒地 ----------
@@ -309,7 +380,7 @@ function punch(sys, att, windowSec = 0.15) {
   for (const b of brains.values()) b.update(FRAME, ctx);
   ok(fighter.state === 'fight' && fighter.target === player, `勇敢者（braveness ${fighter.braveness.toFixed(2)}）被打 → fight`);
   ok(runner.state === 'flee', `膽小者（braveness ${runner.braveness.toFixed(2)}）被打 → flee`);
-  ok(witness.state === 'flee', '8 m 內目擊 → flee');
+  ok(witness.state === (witness.watches ? 'watch' : 'flee'), `8 m 內目擊 → ${witness.watches ? '圍觀' : 'flee'}`);
   ok(farAway.state === 'wander', '8 m 外沒看到 → wander');
 
   // fight：靠近到 1 m、面向、間隔 0.9–1.4 s 出拳（combat 實際接受）
@@ -412,6 +483,47 @@ function punch(sys, att, windowSec = 0.15) {
   v.actor.anim.emit('finished', 'getup');
   iv = v.update(FRAME, { combat: sys2 });
   ok(iv.mode === 'flee', '起身完成後逃離肇事車輛');
+}
+
+// ---------- 6. 目擊者：多數逃跑、少數圍觀後離開；混合體型還手比例 ----------
+{
+  let watchers = 0;
+  let fled = 0;
+  let mixedFight = 0;
+  let watchOk = true;
+  let watchDetail = '';
+  for (let i = 0; i < 300; i++) {
+    const b = new NpcBrain({ actor: mockActor(`ped-${i}`, 3, 0), heavy: i % 3 === 2 });
+    if (b.fights) mixedFight++;
+    b.onWitness({ x: 0, z: 0 }, mockActor('attacker', 0, 0, 0, { kind: 'player' }));
+    let it = b.update(FRAME, {});
+    if (b.state === 'flee') fled++;
+    if (b.state !== 'watch') continue;
+    watchers++;
+    const faceOk = it.moveX === 0 && it.moveZ === 0 && Math.abs(it.faceYaw - Math.atan2(-3, 0)) < 1e-9;
+    let t = FRAME;
+    while (b.state === 'watch' && t < 20) {
+      it = b.update(FRAME, {});
+      t += FRAME;
+    }
+    if (!faceOk || b.state !== 'wander' || t < WATCH_MIN_TIME - FRAME || t > WATCH_MAX_TIME + 2 * FRAME) {
+      watchOk = false;
+      watchDetail = `${b.state} ${t.toFixed(2)} s face=${faceOk}`;
+    }
+  }
+  ok(watchers >= 30 && watchers <= 90 && fled === 300 - watchers, `300 個目擊者：逃跑 ${fled}、圍觀 ${watchers}（10–30%）`);
+  ok(watchOk && watchers > 0, `圍觀者原地面向事發點、${WATCH_MIN_TIME}–${WATCH_MAX_TIME} s 後回漫步 ${watchDetail}`);
+  ok(mixedFight >= 60 && mixedFight <= 120, `混合體型（1/3 壯碩）還手比例 ${((mixedFight / 300) * 100).toFixed(1)}%（20–40%）`);
+  // 圍觀中肇事者逼近 → 改逃跑
+  const w = new NpcBrain({ actor: mockActor('ped-watch', 3, 0) });
+  const th = mockActor('attacker', 0, 0, 0, { kind: 'player' });
+  w.watches = true;
+  w.onWitness({ x: 0, z: 0 }, th);
+  w.update(FRAME, {});
+  const was = w.state;
+  th.pos.x = 1.5;
+  w.update(FRAME, {});
+  ok(was === 'watch' && w.state === 'flee', `圍觀中肇事者逼近 → 逃跑（${was} → ${w.state}）`);
 }
 
 console.log(`combat.mjs：通過 ${pass} / ${total}`);

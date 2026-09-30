@@ -4,17 +4,22 @@
 // 鍵碼沿用 main.js / player.js 的既有語意：Space 跳 / 手煞車、ShiftLeft 跑、KeyF 上下車、KeyW 油門、KeyS 煞車倒車
 //
 // 之後的單元新增按鈕只需：registerTouchButton({ id, label, code, mode: 'hold'|'tap', slot, showWhen: 'walk'|'drive'|'always' })
-// slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上，步行時保留給 D5 攻擊鍵）/ top1、top2（右上小鈕）
+//   不寫入鍵碼的功能鈕改給 onPress(input)（按下時呼叫，例如「靈敏度」循環切換），此時可省略 code
+// slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（主鈕左上的大號醒目攻擊鈕）/
+//   top1、top2、top3（右上小鈕，由右往左）
+// 攻擊鈕：id 為 ATTACK_ID 或 label 為 ATTACK_LABEL 的按鈕一律改放 attack slot（main.js 以 sec3 註冊「揮拳」也會變大）
+// 鏡頭拖曳區 = 右半螢幕的 #touch-look；按鈕疊在其上並 capture 自己的指標，從按鈕上開始的拖曳不會轉鏡頭
 import { isInputBlocked } from './mobile.js';
 
 const RADIUS = 64; // 搖桿半徑（px）
 const DEAD = 0.08; // 死區；死區外重新映射到 0..1
-const LOOK_TURN = Math.PI; // 拖一個螢幕寬轉的角度
-const CAM_YAW_PER_PX = 0.0045; // camera.js 每單位 dx 的轉角，用來反推拖曳係數
 const PINCH_K = 2; // 捏合每 px 距離變化換算的 wheel 量（張開 = 拉近）
 const END_EVENTS = ['pointerup', 'pointercancel', 'lostpointercapture'];
 
-export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'top1', 'top2'];
+const ATTACK_ID = 'tb-punch';
+const ATTACK_LABEL = '揮拳';
+
+export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'top1', 'top2', 'top3'];
 
 const DEFAULT_BUTTONS = [
   // 步行
@@ -28,6 +33,8 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-handbrake', label: '手煞', code: 'Space', mode: 'hold', slot: 'sec3', showWhen: 'drive' },
   // 遊戲目前沒有喇叭邏輯；KeyG 為預留鍵碼，之後的單元讀 input.down('KeyG') 即可
   { id: 'tb-horn', label: '喇叭', code: 'KeyG', mode: 'hold', slot: 'top1', showWhen: 'drive' },
+  // 共用：鏡頭靈敏度低 / 中 / 高循環（input.js 存 localStorage，hud.js toast 顯示檔位）
+  { id: 'tb-sens', label: '靈敏度', onPress: (input) => input.cycleSensitivity('touch'), slot: 'top3', showWhen: 'always' },
 ];
 
 const registry = new Map(); // id → def
@@ -56,7 +63,7 @@ function releaseButton(b) {
   if (b.pointerId === null) return;
   b.pointerId = null;
   b.el.classList.remove('active');
-  if (b.def.mode === 'hold') ui.input.touchRelease(b.def.code);
+  if (b.def.mode === 'hold' && !b.def.onPress) ui.input.touchRelease(b.def.code);
 }
 
 function createButtonEl(def) {
@@ -73,7 +80,8 @@ function createButtonEl(def) {
     b.pointerId = e.pointerId;
     capture(el, e.pointerId);
     el.classList.add('active');
-    ui.input.touchPress(def.code, def.mode === 'hold');
+    if (def.onPress) def.onPress(ui.input);
+    else ui.input.touchPress(def.code, def.mode === 'hold');
   });
   for (const type of END_EVENTS) {
     el.addEventListener(type, (e) => {
@@ -100,7 +108,8 @@ function mountButton(def) {
 // 回傳按鈕元素（尚未 initTouch 時回傳 null，initTouch 時再建立）
 export function registerTouchButton(def) {
   const d = { mode: 'tap', slot: 'top2', showWhen: 'always', ...def };
-  if (!d.id || !d.code) throw new Error('registerTouchButton 需要 id 與 code');
+  if (!d.id || (!d.code && !d.onPress)) throw new Error('registerTouchButton 需要 id 與 code（或 onPress）');
+  if (d.id === ATTACK_ID || d.label === ATTACK_LABEL) d.slot = 'attack';
   registry.set(d.id, d);
   return ui ? mountButton(d) : null;
 }
@@ -218,9 +227,7 @@ function buildLook(root, input) {
     p.x = e.clientX;
     p.y = e.clientY;
     if (pts.size === 1) {
-      const k = LOOK_TURN / (CAM_YAW_PER_PX * Math.max(1, window.innerWidth));
-      input.dx += mx * k;
-      input.dy += my * k;
+      input.touchLook(mx, my);
     } else {
       const d = twoDist();
       input.wheel -= (d - pinchDist) * PINCH_K;

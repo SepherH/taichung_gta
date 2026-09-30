@@ -67,16 +67,24 @@ export const HANDLING = {
   handbrakeRearFriction: 0.35, // 手煞車：後輪抓地倍率，後輪先滑出產生甩尾
   handbrakeRearSide: 0.5, // 手煞車：後輪側向抓地倍率
   handbrakeDecel: 6, // 手煞車鎖後輪的減速度
+  // 手煞車甩尾的偏航率上限（rad/s）：後輪抓地降到 0.35 倍後車尾甩出過猛（70 km/h 手煞 + 滿舵 2 s 轉約 230°），
+  // 超過此值的部分以繞車身上軸的反向力矩衝量阻尼掉；1.2 rad/s ≈ 69°/s，目標 70 km/h 手煞 + 滿舵 2 s 轉 90–150°（手感值）
+  handbrakeMaxYawRate: 1.2,
+  handbrakeYawDamping: 30, // 超出上限部分的衰減速率（1/s）：每步消去 min(1, 30·dt) 的超出量
 };
 
 // 防傾（回正力矩）PD：以車身繞前進軸的傾角與角速度施加反向力矩衝量
 // 汽車：輔助懸吊抗側傾（弱），保險避免極端操作翻車；機車：兩輪沿中線排列本身沒有側向支撐，必須靠它站立
 // 取捨：鎖 roll（setEnabledRotations）鎖的是世界軸，會連帶鎖住上下坡的 pitch 且朝向改變後失效；
 // 回正力矩只作用在車身前進軸，坡道、跳台照常，被撞時也保留一點物理反應
+// 汽車只在「至少一輪接地且 |roll| < ROLL_ASSIST_MAX_ROLL」時輔助：翻覆（四輪離地 / 側躺 / 倒扣）不自己翻回來，
+// 狀態持續 OVERTURN_PROMPT_SEC 後由 main.js 顯示按 R 翻正提示；機車一律防傾（站立必需）
 export const ROLL_ASSIST = {
   car: { omega: 6, zeta: 0.8 },
   twoWheeler: { omega: 16, zeta: 1.0 },
 };
+export const ROLL_ASSIST_MAX_ROLL = (60 * Math.PI) / 180;
+export const OVERTURN_PROMPT_SEC = 1.5;
 // 翻車自救：抬高量（m）
 const FLIP_LIFT = 1;
 // 底盤碰撞材質
@@ -264,6 +272,7 @@ export class VehicleBody {
     this.kinematic = false;
     this.active = true;
     this._handbrakeApplied = false;
+    this.overturnedTime = 0; // 翻覆（四輪離地或 |roll| ≥ 60°）持續秒數；main.js 超過 OVERTURN_PROMPT_SEC 顯示按 R 提示
 
     const { half, centerY } = this.layout;
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
@@ -355,18 +364,37 @@ export class VehicleBody {
     }
 
     this._applyRollAssist(dt);
+    if (hb) this._dampHandbrakeYaw(dt);
     vc.updateVehicle(dt, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, this.rayGroups);
   }
 
+  // 回正力矩（PD）；汽車翻覆時不輔助並累計 overturnedTime（接地輪取上一次 updateVehicle 的結果）
   _applyRollAssist(dt) {
-    const pd = this.spec.twoWheeler ? ROLL_ASSIST.twoWheeler : ROLL_ASSIST.car;
+    const two = this.spec.twoWheeler;
+    const pd = two ? ROLL_ASSIST.twoWheeler : ROLL_ASSIST.car;
     const q = this.body.rotation();
+    const roll = rollOf(q);
+    let grounded = false;
+    for (let i = 0; i < this.layout.wheels.length && !grounded; i++) grounded = !!this.controller.wheelIsInContact(i);
+    const overturned = !grounded || Math.abs(roll) >= ROLL_ASSIST_MAX_ROLL;
+    this.overturnedTime = overturned ? this.overturnedTime + dt : 0;
+    if (overturned && !two) return;
     const f = rotateVec(q, AXIS_Z);
     const w = this.body.angvel();
     const rollRate = w.x * f.x + w.y * f.y + w.z * f.z;
-    const roll = rollOf(q);
     const tau = -this.inertia.z * (pd.omega * pd.omega * roll + 2 * pd.zeta * pd.omega * rollRate) * dt;
     this.body.applyTorqueImpulse({ x: f.x * tau, y: f.y * tau, z: f.z * tau }, true);
+  }
+
+  // 手煞車期間：繞車身上軸的偏航率超過 handbrakeMaxYawRate 的部分以反向力矩衝量衰減
+  _dampHandbrakeYaw(dt) {
+    const u = rotateVec(this.body.rotation(), AXIS_Y);
+    const w = this.body.angvel();
+    const yawRate = w.x * u.x + w.y * u.y + w.z * u.z;
+    const excess = Math.abs(yawRate) - HANDLING.handbrakeMaxYawRate;
+    if (excess <= 0) return;
+    const tau = -Math.sign(yawRate) * this.inertia.y * excess * Math.min(1, HANDLING.handbrakeYawDamping * dt);
+    this.body.applyTorqueImpulse({ x: u.x * tau, y: u.y * tau, z: u.z * tau }, true);
   }
 
   // 給渲染：剛體位置為底盤中心（網格原點在輪底 → 網格 y = 本值 y − layout.centerY，沿車身 up 方向）
@@ -425,6 +453,7 @@ export class VehicleBody {
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.steer = 0;
+    this.overturnedTime = 0;
   }
 
   dispose() {

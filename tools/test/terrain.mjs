@@ -170,7 +170,8 @@ const inWalkable = (x, z) => walkables.some((w) => pointInPolygon(x, z, w.poly))
   }
   check(maxMesh < MESH_TOL, `buildPatchMesh 頂點 y 與 heightAt 最大差 ${maxMesh.toExponential(2)}（共 ${tris} 三角形）`);
 
-  // heightAt 與「所在網格三角形平面」一致：由 buildPatchMesh 的索引反查每格的兩個三角形（不依賴 terrain.js 的內插程式），隨機點以重心座標求平面高度
+  // heightAt 與「所在網格三角形平面」一致：由 buildPatchMesh 的索引反查每格的三角形（不依賴 terrain.js 的內插程式），隨機點以重心座標求平面高度
+  // 所屬格取 buildPatchMesh 回傳的 triCells（秋紅谷折線切分會新增頂點，不能再由頂點編號反推格）
   {
     let maxTri = 0;
     let n = 0;
@@ -180,13 +181,10 @@ const inWalkable = (x, z) => walkables.some((w) => pointInPolygon(x, z, w.poly))
       const P = m.positions;
       const cellTris = new Map();
       for (let t = 0; t < m.indices.length; t += 3) {
-        const a = m.indices[t];
-        const b = m.indices[t + 1];
-        const c = m.indices[t + 2];
-        // 所屬格 = 三頂點的最小列、最小行
-        const key = Math.min(...[a, b, c].map((v) => Math.floor(v / p.cols))) * p.cols + Math.min(...[a, b, c].map((v) => v % p.cols));
+        const cell = m.triCells[t / 3];
+        const key = Math.floor(cell / (p.cols - 1)) * p.cols + (cell % (p.cols - 1));
         if (!cellTris.has(key)) cellTris.set(key, []);
-        cellTris.get(key).push(a, b, c);
+        cellTris.get(key).push(m.indices[t], m.indices[t + 1], m.indices[t + 2]);
       }
       const per = RANDOM_POINTS / patches.length;
       for (let k = 0; k < per; k++) {
@@ -458,6 +456,105 @@ const inWalkable = (x, z) => walkables.some((w) => pointInPolygon(x, z, w.poly))
     }
   }
   console.log(`INFO 退台白色邊線 ${terrain.terracePaths.length} 條平滑折線，相鄰線段最大轉角 ${maxTurn.toFixed(1)}°`);
+}
+
+// ---------- 6b. 折線貼合切分（秋紅谷渲染網格；高度場 / 物理不變）----------
+// 對照組 = 同一 patch 不帶 creases 的舊網格。量兩件事（修正前後數字）：
+//  (1) 退台 / 邊坡上下緣：沿平滑折線往平台側 0.3 m 取樣，渲染法線（網格重心內插）偏離正上 > 2° 的比例（沿網格鋸齒時平台邊緣被斜面法線帶歪）
+//  (2) 湖邊步道材質邊界：到湖岸 3 m（LAKE_WALKWAY）兩側 ±0.3 m 以外，渲染材質與「< 3 m 為鋪面」不符的比例（逐格判定時邊界呈 1.5 m 階梯）
+{
+  const p = basinPatch;
+  const sampler = (m) => {
+    const cellTris = new Map();
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const cell = m.triCells[t / 3];
+      if (!cellTris.has(cell)) cellTris.set(cell, []);
+      cellTris.get(cell).push(t);
+    }
+    const surfOf = new Array(m.indices.length / 3);
+    for (const g of m.groups) for (let t = g.start / 3; t < (g.start + g.count) / 3; t++) surfOf[t] = g.surface;
+    return (x, z) => {
+      const c = Math.min(p.cols - 2, Math.floor((x - p.x0) / p.cell));
+      const r = Math.min(p.rows - 2, Math.floor((z - p.z0) / p.cell));
+      for (const t of cellTris.get(r * (p.cols - 1) + c) || []) {
+        const [a, b, cc] = [m.indices[t], m.indices[t + 1], m.indices[t + 2]];
+        const P = m.positions;
+        const det = (P[b * 3 + 2] - P[cc * 3 + 2]) * (P[a * 3] - P[cc * 3]) + (P[cc * 3] - P[b * 3]) * (P[a * 3 + 2] - P[cc * 3 + 2]);
+        const l1 = ((P[b * 3 + 2] - P[cc * 3 + 2]) * (x - P[cc * 3]) + (P[cc * 3] - P[b * 3]) * (z - P[cc * 3 + 2])) / det;
+        const l2 = ((P[cc * 3 + 2] - P[a * 3 + 2]) * (x - P[cc * 3]) + (P[a * 3] - P[cc * 3]) * (z - P[cc * 3 + 2])) / det;
+        const l3 = 1 - l1 - l2;
+        if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) continue;
+        const N = m.normals;
+        const nx = l1 * N[a * 3] + l2 * N[b * 3] + l3 * N[cc * 3];
+        const ny = l1 * N[a * 3 + 1] + l2 * N[b * 3 + 1] + l3 * N[cc * 3 + 1];
+        const nz = l1 * N[a * 3 + 2] + l2 * N[b * 3 + 2] + l3 * N[cc * 3 + 2];
+        return { ny: ny / Math.hypot(nx, ny, nz), surface: surfOf[t / 3] };
+      }
+      return null;
+    };
+  };
+  const mNew = buildPatchMesh(p);
+  const mOld = buildPatchMesh({ ...p, creases: null });
+  const sNew = sampler(mNew);
+  const sOld = sampler(mOld);
+  const TILT = Math.cos((2 * Math.PI) / 180);
+  let nFlat = 0;
+  let badNew = 0;
+  let badOld = 0;
+  for (const cp of p.creases.paths) {
+    const L = cp.pts;
+    for (let i = 0; i + 5 < L.length; i += 3) {
+      const mx = (L[i] + L[i + 3]) / 2;
+      const mz = (L[i + 2] + L[i + 5]) / 2;
+      const len = Math.hypot(L[i + 3] - L[i], L[i + 5] - L[i + 2]);
+      if (len < 1e-6) continue;
+      const nx = -(L[i + 5] - L[i + 2]) / len;
+      const nz = (L[i + 3] - L[i]) / len;
+      // 平台側 = 高度場較接近平台的一側（上緣平台在上、下緣平台在下）
+      const ha = terrain.heightAt(mx + nx * 0.3, mz + nz * 0.3);
+      const hb = terrain.heightAt(mx - nx * 0.3, mz - nz * 0.3);
+      const side = (ha > hb) === cp.flatAbove ? 1 : -1;
+      const x = mx + nx * 0.3 * side;
+      const z = mz + nz * 0.3 * side;
+      const a = sNew(x, z);
+      const b = sOld(x, z);
+      if (!a || !b) continue;
+      nFlat++;
+      if (a.ny < TILT) badNew++;
+      if (b.ny < TILT) badOld++;
+    }
+  }
+  const pct = (k, n) => `${((100 * k) / Math.max(1, n)).toFixed(1)}%`;
+  check(nFlat > 1000 && badNew * 10 <= badOld,
+    `退台 / 邊坡上下緣折線 ${p.creases.paths.length} 條：平台側 0.3 m 取樣 ${nFlat} 點，法線偏離正上 > 2° 者 修正前 ${badOld}（${pct(badOld, nFlat)}）→ 修正後 ${badNew}（${pct(badNew, nFlat)}）`);
+
+  const lake = basin.lake ? basin.lake : null;
+  if (lake) {
+    const q = {};
+    let nW = 0;
+    let wrongNew = 0;
+    let wrongOld = 0;
+    for (let i = 0; i < 40000; i++) {
+      const x = p.x0 + rnd() * (p.x1 - p.x0);
+      const z = p.z0 + rnd() * (p.z1 - p.z0);
+      if (pointInPolygon(x, z, lake)) continue;
+      const d = Math.sqrt(closestOnPolygon(x, z, lake, q).d2);
+      if (d > 5 || Math.abs(d - 3) < 0.3) continue;
+      const kind = terrain.cellKindAt(x, z);
+      if (!['walkway', 'grass', 'terrace', 'riser', 'ramp'].includes(kind)) continue;
+      const a = sNew(x, z);
+      const b = sOld(x, z);
+      if (!a || !b) continue;
+      nW++;
+      const want = d < 3 ? 'concrete' : 'grass';
+      if (a.surface !== want) wrongNew++;
+      if (b.surface !== want) wrongOld++;
+    }
+    check(nW > 500 && wrongNew === 0,
+      `湖邊步道材質邊界（到湖岸 3 m）±0.3 m 外 ${nW} 點：材質不符 修正前 ${wrongOld}（${pct(wrongOld, nW)}）→ 修正後 ${wrongNew}（${pct(wrongNew, nW)}）`);
+  }
+  const rendered = patches.reduce((sum, q) => sum + (q === p ? mNew : buildPatchMesh(q)).indices.length / 3, 0);
+  check(rendered <= 100000, `折線切分：秋紅谷 ${mNew.splitTriangles} 個三角形切開、新增頂點 ${mNew.addedVertices}；渲染網格總三角形 ${rendered}（修正前 ${stats.triangles}，≤ 100000）`);
 }
 
 // ---------- 7. 效能與統計 ----------

@@ -1,7 +1,7 @@
 // 行人反應大腦（純邏輯，不 import three / rapier）：每個行人一個 NpcBrain，輸出移動意圖由呼叫端（traffic.js）套用
 // 狀態：wander（交還 traffic.js 既有的人行道漫步）/ flee（遠離威脅點跑開）/ fight（對攻擊者還手）/
-//   dodge（車輛高速逼近時側跳閃開，之後轉 flee）/ down（倒地中，由 CombatSystem 控制）
-// 刺激：被打（onAttacked）、目擊 8 m 內有人被打或被撞（onWitness）、車輛高速逼近（update 時由 ctx.vehicles 偵測）
+//   watch（目擊者圍觀：原地面向事發點，時間到走回漫步）/ dodge（車輛高速逼近時側跳閃開，之後轉 flee）/ down（倒地中，由 CombatSystem 控制）
+// 刺激：被打（onAttacked）、目擊 8 m 內有人被打或被撞（onWitness：多數逃跑、WATCH_CHANCE 的人圍觀）、車輛高速逼近（update 時由 ctx.vehicles 偵測）
 // 性格：braveness 0..1 依 id 以固定種子（mulberry32）產生；braveness 高於門檻才還手（一般約 25%，壯碩體型較高）
 // 不使用 Math.random：隨機一律來自自帶的 mulberry32
 //
@@ -23,7 +23,11 @@ export const FIGHT_PUNCH_MAX = 1.4; // 還手出拳間隔上限（秒）：比�
 export const FIGHT_FIRST_PUNCH = 0.35; // 剛決定還手到第一拳的反應時間（秒）
 export const FIGHT_GIVEUP_DIST = 12; // 攻擊者跑離超過此距離（m）就放棄追擊
 export const FIGHT_GIVEUP_TIME = 10; // 還手最長持續時間（秒）
-export const WITNESS_RADIUS = 8; // 目擊半徑（m）：看到有人被打 / 被撞就逃
+export const WITNESS_RADIUS = 8; // 目擊半徑（m）：看到有人被打 / 被撞就逃（少數圍觀）
+export const WATCH_CHANCE = 0.2; // 目擊者圍觀比例：其餘逃跑
+export const WATCH_MIN_TIME = 3; // 圍觀持續時間下限（秒）
+export const WATCH_MAX_TIME = 5; // 圍觀持續時間上限（秒）：時間到就離開（回漫步）
+export const WATCH_FLEE_DIST = 2.5; // 圍觀中肇事者逼近到此距離（m）內 → 改逃跑
 export const VEHICLE_THREAT_SPEED = 8; // 車速高於此（m/s，約 29 km/h）才會被嚇到
 export const VEHICLE_THREAT_DIST = 3; // 車輛進入此距離（m）內且正在逼近 → 閃避
 export const DODGE_TIME = 0.45; // 側跳閃避持續時間（秒），之後轉逃跑
@@ -62,6 +66,7 @@ export class NpcBrain {
     this.heavy = heavy;
     this.rng = mulberry32(seedFromId(actor.id, seed));
     this.braveness = this.rng();
+    this.watches = this.rng() < WATCH_CHANCE; // 目擊時圍觀（固定種子，同一人每次反應一致）
     this.state = 'wander';
     this.t = 0; // 目前狀態已持續時間
     this.fleeFrom = null; // 逃離的威脅：{ x, z } 固定點或 { actor }（跟著移動）
@@ -69,6 +74,9 @@ export class NpcBrain {
     this.target = null; // fight 的對象 actor
     this.punchT = 0;
     this.dodgeDir = null;
+    this.watchAt = null; // 圍觀的事發點 { x, z } 與肇事者
+    this.watchThreat = null;
+    this.watchDur = 0;
     this.pending = []; // 下一次 update 處理的刺激
     this.intent = { moveX: 0, moveZ: 0, run: false, faceYaw: null, wantPunch: false, jump: false, mode: 'wander' };
   }
@@ -101,6 +109,13 @@ export class NpcBrain {
     this._enter('flee');
   }
 
+  _startWatch(pos, threat) {
+    this.watchAt = { x: pos.x, z: pos.z };
+    this.watchThreat = threat;
+    this.watchDur = WATCH_MIN_TIME + this.rng() * (WATCH_MAX_TIME - WATCH_MIN_TIME);
+    this._enter('watch');
+  }
+
   _startFight(attacker) {
     if (this.state === 'fight' && this.target === attacker) return;
     this.target = attacker;
@@ -128,8 +143,10 @@ export class NpcBrain {
       if (s.type === 'attacked') {
         if (s.attacker && this._canFight(s.attacker, ctx)) this._startFight(s.attacker);
         else if (!(this.state === 'fight' && s.attacker === this.target)) this._startFlee(s.attacker ? { actor: s.attacker } : s.vehicle);
+      } else if (this.state === 'wander' && this.watches) {
+        this._startWatch(s.pos, s.threat);
       } else if (this.state === 'wander' || this.state === 'flee') {
-        // 目擊：正在打架的不分心；漫步 / 逃跑中則（重新）逃離事發點
+        // 目擊：正在打架 / 圍觀的不分心；漫步 / 逃跑中則（重新）逃離事發點
         this._startFlee(s.threat ? { actor: s.threat } : s.pos);
       }
     }
@@ -197,6 +214,8 @@ export class NpcBrain {
       if (this.t >= DODGE_TIME) this._startFlee(this.dodgeDir.from);
     } else if (this.state === 'fight') {
       this._fight(dt, ctx, it);
+    } else if (this.state === 'watch') {
+      this._watch(it);
     }
     if (this.state === 'flee') {
       const from = this._threatPos();
@@ -222,6 +241,25 @@ export class NpcBrain {
     }
     it.mode = this.state;
     return it;
+  }
+
+  // 圍觀：原地面向事發點；時間到回漫步，肇事者逼近就改逃跑
+  _watch(it) {
+    const p = this.actor.pos;
+    const th = this.watchThreat;
+    if (th && th.pos && dist2d(th.pos, p) < WATCH_FLEE_DIST) {
+      this._startFlee({ actor: th });
+      return;
+    }
+    if (this.t >= this.watchDur) {
+      this.watchAt = null;
+      this.watchThreat = null;
+      this._enter('wander');
+      return;
+    }
+    const dx = this.watchAt.x - p.x;
+    const dz = this.watchAt.z - p.z;
+    if (Math.hypot(dx, dz) > 1e-6) it.faceYaw = Math.atan2(dx, dz);
   }
 
   _fight(dt, ctx, it) {
