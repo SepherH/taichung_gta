@@ -20,7 +20,7 @@ import os
 from mathutils import Vector
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OSM_FILE = os.path.join(REPO, "data", "osm", "qiqi-raw.json")
+OSM_FILE = os.path.join(REPO, "data", "osm", "qiqi-raw-v2.json")   # Phase 2：範圍擴大到七期精華區（含市政府）
 BLEND_DIR = os.path.join(REPO, "assets", "blender")
 GLB_DIR = os.path.join(REPO, "public", "models")
 PREVIEW_DIR = os.path.join(REPO, "docs", "models", "previews")
@@ -58,6 +58,17 @@ def load_footprint(way_id):
     k = M_PER_DEG_LAT * math.cos(math.radians(lat0))
     pts = [((lon - lon0) * k, (lat - lat0) * M_PER_DEG_LAT) for lat, lon in ll]
     return lat0, lon0, ccw(pts)
+
+
+def project(lat, lon, lat0, lon0):
+    """經緯度 → 以 (lat0, lon0) 為原點的 (x 東, y 北) 公尺。"""
+    k = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    return ((lon - lon0) * k, (lat - lat0) * M_PER_DEG_LAT)
+
+
+def way_points(way_id, lat0, lon0):
+    """任一 OSM way（含非閉合的線，例如步道 / 橋）投影成 [(x, y), ...]，保留原點序。"""
+    return [project(p["lat"], p["lon"], lat0, lon0) for p in _osm_ways()[way_id]["geometry"]]
 
 
 def ab(b, a):
@@ -203,6 +214,23 @@ def begin(slug, way_id, name):
     ctx = Ctx()
     ctx.slug, ctx.way_id, ctx.name = slug, way_id, name
     ctx.lat0, ctx.lon0, ctx.footprint = load_footprint(way_id)
+    ctx.has_footprint = True
+    return _begin_scene(ctx)
+
+
+def begin_point(slug, ident, name, lat0, lon0, footprint):
+    """沒有 OSM 建物輪廓的物件（公園內小建物、橋）：自訂原點經緯度與概略平面 footprint（x, y 公尺，
+    只用於自動預覽取景）。manifest 的 id 用 ident（字串），footprint 欄寫 false。"""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    ctx = Ctx()
+    ctx.slug, ctx.way_id, ctx.name = slug, ident, name
+    ctx.lat0, ctx.lon0, ctx.footprint = round(lat0, 7), round(lon0, 7), ccw(footprint)
+    ctx.has_footprint = False
+    return _begin_scene(ctx)
+
+
+def _begin_scene(ctx):
+    slug = ctx.slug
     scene = bpy.context.scene
     scene.unit_settings.system = "METRIC"
     ctx.root_coll = bpy.data.collections.new(slug)
@@ -475,8 +503,8 @@ def _preview_setup(ctx):
     world.node_tree.nodes["Background"].inputs["Color"].default_value = hex_rgba("#B9C7D6")
     world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.9
     scene.world = world
-    scene.render.resolution_x = 1024
-    scene.render.resolution_y = 640
+    scene.render.resolution_x = 768   # 預覽長邊 ≤ 768（控制 repo 大小）
+    scene.render.resolution_y = 480
     scene.render.image_settings.file_format = "PNG"
     engine = os.environ.get("LANDMARK_PREVIEW_ENGINE", "BLENDER_EEVEE")
     scene.render.engine = engine
@@ -515,15 +543,21 @@ def finish(ctx, height, height_source, notes, street_dir, street=None, aerial=No
     blend = os.path.join(BLEND_DIR, f"{ctx.slug}.blend")
     glb = os.path.join(GLB_DIR, f"{ctx.slug}.glb")
 
-    # 匯出 glb：只選模型 collection 內的物件（預覽用地面 / 相機 / 燈不匯出）
+    # 匯出 glb：只選模型 collection 內的物件（預覽用地面 / 相機 / 燈不匯出）。
+    # 非招牌的網格先合併成單一 <slug>_mesh（每種材質一個 primitive）以降低 draw call；
+    # .blend 仍保留按部位分 collection 的原始物件，合併體匯出後即刪除。
+    tris = triangle_count(ctx)
+    merged = _merge_for_export(ctx)
     for o in bpy.context.scene.objects:
         o.select_set(False)
-    for o in model_objects(ctx):
+    for o in [ctx.root, merged] + [o for o in model_objects(ctx) if o.name.startswith("sign:")]:
         o.select_set(True)
     bpy.ops.export_scene.gltf(filepath=glb, export_format="GLB", use_selection=True,
                               export_apply=True, export_yup=True, export_cameras=False,
                               export_lights=False)
-    tris = triangle_count(ctx)
+    me = merged.data
+    bpy.data.objects.remove(merged)
+    bpy.data.meshes.remove(me)
 
     cam = _preview_setup(ctx)
     auto_street, auto_aerial = _auto_views(ctx, height, street_dir)
@@ -545,12 +579,44 @@ def finish(ctx, height, height_source, notes, street_dir, street=None, aerial=No
         "id": ctx.way_id, "name": ctx.name, "file": f"{ctx.slug}.glb",
         "anchorLat": ctx.lat0, "anchorLon": ctx.lon0,
         "height": round(height, 1), "heightSource": height_source,
-        "footprint": True, "notes": notes,
+        "footprint": ctx.has_footprint, "notes": notes,
     }
     _update_manifest(entry)
     size = os.path.getsize(glb)
     print(f"LANDMARK {ctx.slug} way={ctx.way_id} tris={tris} glb_bytes={size} engine={engine}")
     return tris, size
+
+
+def _merge_for_export(ctx):
+    """把模型內所有非 sign: 網格（套用修改器後、世界座標）併成一個物件，材質槽取聯集。"""
+    dg = bpy.context.evaluated_depsgraph_get()
+    mats, bm = [], bmesh.new()
+    inv = ctx.root.matrix_world.inverted()
+    for o in model_objects(ctx):
+        if o.type != "MESH" or o.name.startswith("sign:"):
+            continue
+        me = o.evaluated_get(dg).to_mesh()
+        me.transform(inv @ o.matrix_world)
+        remap = []
+        for m in me.materials:
+            if m not in mats:
+                mats.append(m)
+            remap.append(mats.index(m))
+        n0 = len(bm.faces)
+        bm.from_mesh(me)
+        bm.faces.ensure_lookup_table()
+        for f in bm.faces[n0:]:
+            f.material_index = remap[f.material_index] if remap else 0
+        o.evaluated_get(dg).to_mesh_clear()
+    me = bpy.data.meshes.new(f"{ctx.slug}_mesh")
+    bm.to_mesh(me)
+    bm.free()
+    for m in mats:
+        me.materials.append(m)
+    ob = bpy.data.objects.new(f"{ctx.slug}_mesh", me)
+    bpy.context.scene.collection.objects.link(ob)
+    ob.parent = ctx.root
+    return ob
 
 
 def _update_manifest(entry):

@@ -43,3 +43,32 @@
 - tiger-facade.jpg：貼老虎城正立面主牆（MeshBasic 或低 roughness）；側牆可用同圖 `repeat` 只取條紋區（UV offset 避開老虎頭）。
 - logo-mark.jpg：縮成 32/180 px 作 favicon 與 apple-touch-icon；UI 小圖示可圓形遮罩。
 - sky-dusk.jpg：作 `scene.background` 的等距柱狀貼圖（`EquirectangularReflectionMapping`）或大圓柱內側遠景，山線對齊地平線。
+
+## 可平鋪貼圖（Phase 2，A4）
+
+產出：`tools/blender/tiles/build_tiles.py`（`blender -b -P` 執行）。底圖由 imgen-local（qwen21，1024x1024）產生後縮成 512、去低頻、四邊交叉淡化成無縫；
+地磚 / 石材接縫與帷幕框由程式疊上（以 512 px 為週期）。驗收：每張 2x2 拼接目視無接縫（檢查圖不入 repo）。
+全部 512x512 JPG、單檔 ≤ 150KB，放 `public/art/tiles/`。three.js 需設 `RepeatWrapping` 與 `SRGBColorSpace`。
+
+| 檔名 | 用途 | 建議重複尺度（一張貼圖＝幾公尺） | seed | 底圖 |
+|---|---|---|---|---|
+| asphalt.jpg | 柏油路面 | 4 m × 4 m | — | 純程序（imgen seed 301 下載失敗 rc=6，依規則不重試） |
+| sidewalk_gray.jpg | 人行道灰色方磚（30 cm 磚，8×8 片） | 2.4 m × 2.4 m | 306 | tcgta_tile_paver_gray |
+| sidewalk_redbrick.jpg | 人行道紅磚色地磚（20×10 cm 丁字錯縫，8×16 片） | 1.6 m × 1.6 m | 307 | tcgta_tile_paver_red |
+| grass.jpg | 草地 / 綠帶 | 3 m × 3 m | 302 | tcgta_tile_grass（色調壓回 #5B8A45） |
+| concrete.jpg | 混凝土（路緣、基座、牆面） | 3 m × 3 m | 303 | tcgta_tile_concrete |
+| stone_cream.jpg | 豪宅外牆石材 A：米色（120×60 cm 石板錯縫） | 2.4 m × 2.4 m | 305 | 花崗岩底圖改色（米色砂岩 seed 304 送出逾時 rc=3，依規則不重試） |
+| stone_granite.jpg | 豪宅外牆石材 B：淺棕灰花崗岩（90×60 cm 石板） | 1.8 m × 1.8 m | 305 | tcgta_tile_stone_granite |
+| glass_blue.jpg | 玻璃帷幕 A：藍灰玻璃 + 深灰框（2 片寬、底部 22% 為層間帶） | 寬 3.0 m × 高 3.6 m（一層樓） | 308 | tcgta_tile_glass_blue |
+| glass_dark.jpg | 玻璃帷幕 B：深茶 / 古銅玻璃 + 細竪框（4 片寬） | 寬 3.0 m × 高 3.6 m（一層樓） | 309 | tcgta_tile_glass_dark |
+
+提示詞（共同尾綴：「，光線均勻柔和、沒有陰影與反光熱點，無縫平鋪材質貼圖，寫實攝影質感，畫面中沒有任何文字、標誌或物體」）：
+- asphalt（301，未產出）：正上方垂直俯視的柏油路面材質特寫，深灰色細緻瀝青與小碎石顆粒均勻分布，表面平整略有磨損色差，沒有標線、沒有裂縫、沒有落葉
+- grass（302）：正上方垂直俯視的修剪整齊草坪材質特寫，翠綠與少許黃綠色的短草葉密集均勻，沒有花朵、沒有石頭、沒有泥土空洞
+- concrete（303）：正面平視的淺灰色清水混凝土表面材質特寫，細微氣孔、自然水痕與色斑均勻分布，沒有模板接縫線
+- stone_cream（304，未產出）：正面平視的米黃色砂岩石材表面材質特寫，細緻石紋與天然淺色斑點均勻分布，沒有接縫線
+- stone_granite（305）：正面平視的淺棕灰色花崗岩石材表面材質特寫，細密的黑白與米色礦物顆粒均勻分布，霧面，沒有接縫線
+- paver_gray（306）：正上方垂直俯視的灰色石英磚地磚表面材質特寫，細緻顆粒與輕微色差均勻分布，霧面防滑，沒有接縫線
+- paver_red（307）：正上方垂直俯視的紅磚色陶土磚表面材質特寫，細緻顆粒與深淺色差均勻分布，霧面，沒有接縫線
+- glass_blue（308）：柔和抽象的藍灰色玻璃表面反射，淡淡的天空漸層與模糊雲影均勻分布，沒有建築、沒有窗框
+- glass_dark（309）：柔和抽象的深茶色帶古銅色調的玻璃表面反射，淡淡的模糊天空與雲影均勻分布，沒有建築、沒有窗框

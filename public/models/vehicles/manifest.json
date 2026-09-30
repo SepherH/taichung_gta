@@ -1,0 +1,210 @@
+{
+  "convention": "原點＝地面、車輛外接盒中心正下方；面向 glTF +Z、+Y 上、公尺。節點 body + wheel_fl/fr/rl/rr（機車 wheel_f/r），輪子原點在輪心、繞本地 X 轉動、繞本地 Y 轉向。材質 paint＝車身主色（執行期換色）；headlight / taillight 帶 emission。seat＝駕駛（騎士）H 點，角色 drive 動作的 Hips 關節位置：角色原點 = seat − (0, 0.30, 0)。width 含後照鏡；座標皆為 glTF（x 左右、y 上、z 前）。",
+  "vehicles": [
+    {
+      "id": "sedan",
+      "name": "轎車",
+      "file": "sedan.glb",
+      "length": 4.66,
+      "width": 1.99,
+      "height": 1.425,
+      "wheelbase": 2.7,
+      "track": 1.54,
+      "wheelRadius": 0.315,
+      "mass": 1300,
+      "seat": [
+        0.37,
+        0.52,
+        -0.15
+      ],
+      "paint": "#B8BEC6",
+      "notes": "臺灣常見 C 段四門轎車的一般外觀與規格值（推測，非特定車款）。seat = 駕駛座 H 點（左駕，角色 drive 動作的 Hips 關節位置）。",
+      "wheels": {
+        "wheel_fl": [
+          0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_fr": [
+          -0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_rl": [
+          0.77,
+          0.315,
+          -1.315
+        ],
+        "wheel_rr": [
+          -0.77,
+          0.315,
+          -1.315
+        ]
+      },
+      "triangles": 4574,
+      "bytes": 110644
+    },
+    {
+      "id": "taxi",
+      "name": "計程車",
+      "file": "taxi.glb",
+      "length": 4.66,
+      "width": 1.99,
+      "height": 1.58,
+      "wheelbase": 2.7,
+      "track": 1.54,
+      "wheelRadius": 0.315,
+      "mass": 1350,
+      "seat": [
+        0.37,
+        0.52,
+        -0.15
+      ],
+      "paint": "#F5C400",
+      "notes": "臺灣常見 C 段四門轎車的一般外觀與規格值（推測，非特定車款）。seat = 駕駛座 H 點（左駕，角色 drive 動作的 Hips 關節位置）。計程車：法規色卡純黃、車頂燈箱一盞（查證檔 docs/ref/qiuhonggu-opera-vehicle-reference.md §4）；燈箱不放文字，材質 taxisign 帶 emission。",
+      "wheels": {
+        "wheel_fl": [
+          0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_fr": [
+          -0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_rl": [
+          0.77,
+          0.315,
+          -1.315
+        ],
+        "wheel_rr": [
+          -0.77,
+          0.315,
+          -1.315
+        ]
+      },
+      "triangles": 4790,
+      "bytes": 117192
+    },
+    {
+      "id": "suv",
+      "name": "休旅車",
+      "file": "suv.glb",
+      "length": 4.63,
+      "width": 2.04,
+      "height": 1.68,
+      "wheelbase": 2.69,
+      "track": 1.58,
+      "wheelRadius": 0.36,
+      "mass": 1650,
+      "seat": [
+        0.38,
+        0.72,
+        -0.1
+      ],
+      "paint": "#5A6470",
+      "notes": "臺灣街頭常見 C-SUV 的一般外觀；長寬高、軸距、輪距、輪胎、懸長、離地、質量皆為一般 C-SUV 級距值（推測，非特定車款）。seat = 駕駛座 H 點（左駕，角色 drive 動作的 Hips 關節位置）。黑色塑膠輪拱飾條 / 下護板、車頂行李架、近垂直尾門為一般 SUV 外觀特徵（推測）。",
+      "wheels": {
+        "wheel_fl": [
+          0.79,
+          0.36,
+          1.38
+        ],
+        "wheel_fr": [
+          -0.79,
+          0.36,
+          1.38
+        ],
+        "wheel_rl": [
+          0.79,
+          0.36,
+          -1.31
+        ],
+        "wheel_rr": [
+          -0.79,
+          0.36,
+          -1.31
+        ]
+      },
+      "triangles": 6684,
+      "bytes": 171228
+    },
+    {
+      "id": "bus",
+      "name": "市區公車",
+      "file": "bus.glb",
+      "length": 12.516,
+      "width": 2.58,
+      "height": 3.14,
+      "wheelbase": 6.1,
+      "track": 2.05,
+      "wheelRadius": 0.48,
+      "mass": 12500,
+      "seat": [
+        0.72,
+        1.35,
+        4.828
+      ],
+      "paint": "#F2F2EE",
+      "notes": "臺中市區 12 m 級低地板公車一般外觀（不仿特定車款）。尺寸依 docs/ref/qiuhonggu-opera-vehicle-reference.md §4.1 國產電巴一例（長 12.19 × 寬 2.50 × 高 3.14、軸距 6.10，已確認摘要）；前懸 2.55、輪距 2.05、輪徑、車身頂 3.00 為推測。配色業者各異（§4.1），預設白底 + 綠色帶，stripe 材質可執行期換色；路線牌 display 材質不含文字。2 門配置（§4.1 已確認，部分業者為 3 門）：門在右側（−X）。後輪雙胎以單一寬 0.40 輪表示。外接盒長寬含兔耳後照鏡，略大於規格值。seat = 駕駛座 H 點（左駕）。",
+      "wheels": {
+        "wheel_fl": [
+          1.025,
+          0.48,
+          3.423
+        ],
+        "wheel_fr": [
+          -1.025,
+          0.48,
+          3.423
+        ],
+        "wheel_rl": [
+          1.025,
+          0.48,
+          -2.677
+        ],
+        "wheel_rr": [
+          -1.025,
+          0.48,
+          -2.677
+        ]
+      },
+      "triangles": 4508,
+      "bytes": 130516
+    },
+    {
+      "id": "scooter",
+      "name": "機車（速克達）",
+      "file": "scooter.glb",
+      "length": 1.849,
+      "width": 0.7,
+      "height": 1.1,
+      "wheelbase": 1.28,
+      "track": 0,
+      "wheelRadius": 0.22,
+      "mass": 120,
+      "seat": [
+        0.0,
+        0.8,
+        -0.186
+      ],
+      "paint": "#D23A2E",
+      "notes": "臺灣常見 125 cc 腳踏板式速克達的一般外觀（不仿品牌 / 車款）。尺寸依 docs/ref/qiuhonggu-opera-vehicle-reference.md §4.3（官方規格區間已確認、建模值 1.85×0.70×1.10、軸距 1.28、輪外徑 0.44 為估算）；前擋板、坐墊、車殼等細部比例為推測。mass 120 kg 為估算。騎乘沿用角色 drive 動作（Hips 關節在 seat 點）。",
+      "wheels": {
+        "wheel_f": [
+          0.0,
+          0.22,
+          0.704
+        ],
+        "wheel_r": [
+          0.0,
+          0.22,
+          -0.576
+        ]
+      },
+      "triangles": 4959,
+      "bytes": 129040
+    }
+  ]
+}

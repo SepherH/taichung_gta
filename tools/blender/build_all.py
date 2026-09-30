@@ -18,6 +18,12 @@ LANDMARKS = [
     "baohui_qiuhonggu",
     "lianju_zhongyong",
     "lin_hotel",
+    # Phase 2（七期精華區擴充）
+    "taichung_city_hall",
+    "taichung_city_council",
+    "mrt_city_hall_station",
+    "qiuhonggu_pavilion",
+    "qiuhonggu_red_bridge",
 ]
 
 failed = []
