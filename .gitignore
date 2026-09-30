@@ -6,3 +6,4 @@ dist/
 CLAUDE.md
 .claude/
 var/
+*.blend1

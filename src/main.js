@@ -1,13 +1,15 @@
-// 臺中GTA prototype M1 進入點：建立場景、分步載入、主迴圈
+// 臺中GTA prototype M1 進入點：建立場景、分步載入、主迴圈（世界依真實 OSM 資料生成）
 import * as THREE from 'three';
 import './style.css';
-import { TRIVIA, SPAWN, PARKED_VEHICLES, LANDMARKS } from './data/city.js';
+import { TRIVIA } from './data/city.js';
 import { LoadingScreen } from './loading.js';
 import { Input } from './input.js';
 import { CollisionWorld } from './collision.js';
 import { buildWorld, heightAt, describeLocation } from './world.js';
 import { buildBuildings } from './buildings.js';
-import { buildLandmarks } from './landmarks.js';
+import { loadLandmarkModels } from './landmarks/index.js';
+import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
+import { buildingAt } from './citymodel.js';
 import { Player } from './player.js';
 import { VehicleManager, exitPosition } from './vehicle.js';
 import { Traffic } from './traffic.js';
@@ -19,7 +21,7 @@ import { nextFrame } from './utils.js';
 const loading = new LoadingScreen(TRIVIA);
 
 async function init() {
-  const total = 9;
+  const total = 10;
   let step = 0;
   const progress = async (text) => {
     step++;
@@ -42,42 +44,47 @@ async function init() {
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.3, 2000);
   const dayNight = new DayNight(scene, 16.5);
 
-  await progress('鋪設道路與人行道…');
+  await progress('依 OSM 鋪設道路、公園與水域…');
   const world = buildWorld(scene, { anisotropy });
 
-  await progress('生成七期大樓…');
-  const buildings = buildBuildings(scene, world.cells, { anisotropy });
+  await progress('載入地標模型…');
+  const landmarks = await loadLandmarkModels((done, n, name) => {
+    loading.setProgress((step + done / n) / total, `載入地標模型 ${done}/${n}：${name}`);
+  });
 
-  await progress('建造地標：老虎城、秋紅谷、歌劇院…');
-  const landmarks = buildLandmarks(scene);
+  await progress('依 OSM 輪廓擠出七期建築…');
+  const buildings = buildBuildings(scene, { anisotropy, landmarks });
+
+  await progress('計算出生點…');
+  const spawn = computeSpawn();
 
   await progress('建立碰撞資料…');
   const collision = new CollisionWorld(25);
-  for (const b of buildings.boxes) collision.addBox(b);
-  for (const b of landmarks.boxes) collision.addBox(b);
+  for (const c of buildings.colliders) collision.addPolygon(c.poly, c.h, c.name);
 
   await progress('停放車輛…');
-  const vehicles = new VehicleManager(scene, PARKED_VEHICLES, heightAt);
+  const parked = computeParkedVehicles(spawn);
+  const vehicles = new VehicleManager(scene, parked, heightAt);
 
   await progress('放出行人與車流…');
-  const traffic = new Traffic(scene, world.cells, heightAt);
+  const traffic = new Traffic(scene, { center: spawn, heightAt });
 
   await progress('準備角色與鏡頭…');
-  const player = new Player(scene, SPAWN);
-  player.placeAt(SPAWN.x, SPAWN.z, SPAWN.yaw, heightAt);
+  const player = new Player(scene, spawn);
+  player.placeAt(spawn.x, spawn.z, spawn.yaw, heightAt);
   const input = new Input(renderer.domElement);
   const rig = new CameraRig(camera, collision, heightAt);
-  rig.yaw = SPAWN.yaw;
+  rig.yaw = spawn.yaw;
 
   await progress('繪製小地圖…');
-  const hud = new HUD({ footprints: buildings.footprints });
+  const hud = new HUD();
 
   // ---------- 遊戲狀態 ----------
   const state = {
     started: false,
     mode: 'walk', // 'walk' | 'drive'
     vehicle: null,
-    landmarkId: null,
+    placeId: null,
   };
   const focus = new THREE.Vector3();
 
@@ -165,10 +172,10 @@ async function init() {
     });
 
     const loc = describeLocation(focus.x, focus.z);
-    const lmId = loc.landmark ? loc.landmark.id : null;
-    if (lmId !== state.landmarkId) {
-      state.landmarkId = lmId;
-      if (loc.landmark) hud.toast(`📍 ${loc.landmark.name}｜${loc.landmark.info}`, 7);
+    const placeId = loc.building ? loc.building.id : null;
+    if (placeId !== state.placeId) {
+      state.placeId = placeId;
+      if (loc.building) hud.toast(`📍 ${loc.building.name}`, 4);
     }
     hud.update(dt, {
       x: focus.x,
@@ -184,12 +191,19 @@ async function init() {
   };
 
   // 開始前：鏡頭緩慢環繞老虎城當作背景
-  const tiger = LANDMARKS.find((l) => l.id === 'tiger');
-  const orbitCenter = new THREE.Vector3((tiger.zone.x0 + tiger.zone.x1) / 2, 10, (tiger.zone.z0 + tiger.zone.z1) / 2);
+  const tiger = tigerCity();
+  const orbitCenter = new THREE.Vector3(tiger ? tiger.center.x : 0, 10, tiger ? tiger.center.z : 0);
   let orbitT = 0;
+  let orbitY = 70;
   const updateAttract = (dt) => {
     orbitT += dt * 0.05;
-    camera.position.set(orbitCenter.x + Math.cos(orbitT) * 150, 70, orbitCenter.z + Math.sin(orbitT) * 150);
+    const ox = orbitCenter.x + Math.cos(orbitT) * 150;
+    const oz = orbitCenter.z + Math.sin(orbitT) * 150;
+    // 經過高樓時把鏡頭抬高，避免穿進建築
+    const tall = buildingAt(ox, oz, 25);
+    const wantY = Math.max(70, tall ? tall.height + 15 : 70);
+    orbitY += (wantY - orbitY) * Math.min(1, dt * 1.5);
+    camera.position.set(ox, orbitY, oz);
     camera.lookAt(orbitCenter);
     dayNight.update(dt, orbitCenter);
     traffic.update(dt, blockers);
@@ -212,12 +226,12 @@ async function init() {
     state.started = true;
     input.enabled = true;
     hud.setVisible(true);
-    hud.toast('歡迎來到臺中七期！你站在老虎城門口，旁邊路邊有車可以開。', 6);
+    hud.toast('歡迎來到臺中七期！你站在老虎城外、河南路三段這一側，附近路邊有車可以開。', 6);
   });
 
   // 除錯用（僅 dev）：在主控台可以用 window.__game 檢視狀態、直接設輸入
   if (import.meta.env.DEV) {
-    window.__game = { scene, camera, renderer, player, vehicles, traffic, collision, dayNight, state, input, hud, rig, enterVehicle, exitVehicle };
+    window.__game = { scene, camera, renderer, player, vehicles, traffic, collision, dayNight, state, input, hud, rig, enterVehicle, exitVehicle, world, buildings, spawn, parked, updateGame, updateAttract };
   }
 }
 

@@ -302,3 +302,22 @@ body {
   line-height: 1.5;
   text-align: center;
 }
+
+/* ---------- 授權標示（右下角常駐小字） ---------- */
+#attribution {
+  position: fixed;
+  right: 8px;
+  bottom: 3px;
+  z-index: 30;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.78);
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  pointer-events: auto;
+  user-select: text;
+}
+
+#attribution a {
+  color: inherit;
+  text-decoration: underline;
+}

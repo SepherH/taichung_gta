@@ -1,12 +1,13 @@
-// HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、上車提示、地標小知識
-import { BOUNDS, LANDMARKS, SIDEWALK } from './data/city.js';
-import { ROADS } from './world.js';
+// HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、上車提示、地點提示
+// 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
+import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
+const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
 
 export class HUD {
-  constructor({ footprints }) {
+  constructor() {
     this.root = document.getElementById('hud');
     this.locationEl = document.getElementById('location');
     this.speedEl = document.getElementById('speed');
@@ -20,56 +21,84 @@ export class HUD {
     this._lastLocation = '';
     this._lastPrompt = null;
     this._toastTimer = 0;
-    this.mapCanvas = this._buildMap(footprints);
+    this.mapCanvas = this._buildMap();
   }
 
-  _buildMap(footprints) {
-    const W = (BOUNDS.maxX - BOUNDS.minX) * MAP_SCALE;
-    const H = (BOUNDS.maxZ - BOUNDS.minZ) * MAP_SCALE;
+  _buildMap() {
+    const W = Math.ceil((BOUNDS.maxX - BOUNDS.minX) * MAP_SCALE);
+    const H = Math.ceil((BOUNDS.maxZ - BOUNDS.minZ) * MAP_SCALE);
     const c = makeCanvas(W, H);
     const ctx = c.getContext('2d');
     const X = (x) => (x - BOUNDS.minX) * MAP_SCALE;
     const Z = (z) => (z - BOUNDS.minZ) * MAP_SCALE;
-    ctx.fillStyle = '#2f4a33';
-    ctx.fillRect(0, 0, W, H);
-    // 人行道 + 道路
-    for (const r of ROADS) {
-      const extra = SIDEWALK;
-      ctx.fillStyle = '#8c887e';
-      if (r.axis === 'x') ctx.fillRect(X(r.from), Z(r.c - r.hw - extra), (r.to - r.from) * MAP_SCALE, (r.width + extra * 2) * MAP_SCALE);
-      else ctx.fillRect(X(r.c - r.hw - extra), Z(r.from), (r.width + extra * 2) * MAP_SCALE, (r.to - r.from) * MAP_SCALE);
-    }
-    for (const r of ROADS) {
-      ctx.fillStyle = '#e6e1d3';
-      if (r.axis === 'x') ctx.fillRect(X(r.from), Z(r.c - r.hw), (r.to - r.from) * MAP_SCALE, r.width * MAP_SCALE);
-      else ctx.fillRect(X(r.c - r.hw), Z(r.from), r.width * MAP_SCALE, (r.to - r.from) * MAP_SCALE);
-    }
-    // 建築
-    ctx.fillStyle = '#5b6570';
-    for (const f of footprints) ctx.fillRect(X(f.x0), Z(f.z0), (f.x1 - f.x0) * MAP_SCALE, (f.z1 - f.z0) * MAP_SCALE);
-    // 地標
-    for (const lm of LANDMARKS) {
-      const rects = lm.buildings || (lm.footprint ? [lm.footprint] : []);
-      ctx.fillStyle = lm.mapColor;
-      if (lm.id === 'qiuhong') {
-        const z = lm.zone;
-        ctx.fillRect(X(z.x0 + 17), Z(z.z0 + 30), (z.x1 - z.x0 - 37) * MAP_SCALE, (z.z1 - z.z0 - 47) * MAP_SCALE);
+    const polyPath = (p) => {
+      ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) {
+        if (i === 0) ctx.moveTo(X(p[i]), Z(p[i + 1]));
+        else ctx.lineTo(X(p[i]), Z(p[i + 1]));
       }
-      for (const r of rects) ctx.fillRect(X(r.x0), Z(r.z0), (r.x1 - r.x0) * MAP_SCALE, (r.z1 - r.z0) * MAP_SCALE);
+      ctx.closePath();
+    };
+    const linePath = (pts) => {
+      ctx.beginPath();
+      pts.forEach((q, i) => (i === 0 ? ctx.moveTo(X(q.x), Z(q.z)) : ctx.lineTo(X(q.x), Z(q.z))));
+    };
+    // 底色：人行鋪面
+    ctx.fillStyle = '#6c6860';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#4a7a45';
+    for (const p of parks) {
+      polyPath(p.poly);
+      ctx.fill();
     }
-    // 地標名稱
-    ctx.font = `bold 22px ${FONT_STACK}`;
+    ctx.fillStyle = '#3f7fa8';
+    for (const w of water) {
+      polyPath(w.poly);
+      ctx.fill();
+    }
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#a9a292';
+    for (const r of surfaceFootways) {
+      ctx.lineWidth = Math.max(1.5, r.width * MAP_SCALE);
+      linePath(r.pts);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#e6e1d3';
+    for (const r of surfaceRoads.slice().sort((a, b) => a.width - b.width)) {
+      ctx.lineWidth = r.width * MAP_SCALE;
+      linePath(r.pts);
+      ctx.stroke();
+    }
+    // 建築輪廓
+    ctx.fillStyle = '#4c5560';
+    ctx.strokeStyle = '#2f353c';
+    ctx.lineWidth = 1;
+    for (const b of buildings) {
+      polyPath(b.poly);
+      ctx.fill();
+      ctx.stroke();
+    }
+    // 具名建築標點
+    for (const b of namedBuildings) {
+      ctx.beginPath();
+      ctx.arc(X(b.center.x), Z(b.center.z), 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd23f';
+      ctx.fill();
+    }
+    // 大型具名建築的名稱
+    ctx.font = `bold 20px ${FONT_STACK}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for (const lm of LANDMARKS) {
-      const z = lm.zone;
-      const cx = X((z.x0 + z.x1) / 2);
-      const cz = Z((z.z0 + z.z1) / 2);
+    for (const b of namedBuildings) {
+      if (b.area < MAP_LABEL_AREA) continue;
+      const cx = X(b.center.x);
+      const cz = Z(b.center.z) - 14;
       ctx.lineWidth = 5;
       ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-      ctx.strokeText(lm.shortName, cx, cz);
+      ctx.strokeText(b.name, cx, cz);
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(lm.shortName, cx, cz);
+      ctx.fillText(b.name, cx, cz);
     }
     return c;
   }

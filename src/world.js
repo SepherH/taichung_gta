@@ -1,210 +1,48 @@
-// 世界：地面、秋紅谷地形、道路、人行道、路口、斑馬線、路名地面字、行道樹、路燈
+// 世界：地面鋪面、公園草地、水面、OSM 道路路面 / 步道、標線、路名地面字、行道樹、路燈、公園樹木
+// 全部依 src/data/osm-city.json（真實 OSM 資料）生成；地面高度一律為 0（秋紅谷先以平面公園處理）
 import * as THREE from 'three';
-import { BOUNDS, SIDEWALK, ROADS_EW, ROADS_NS, LANDMARKS, QIUHONG_BOWL } from './data/city.js';
-import { makeCanvas, makeTextTexture, mulberry32, smoothstep, pointInRect } from './utils.js';
+import {
+  BOUNDS, MAJOR_TYPES, surfaceRoads, surfaceFootways, parks, water, nodeRoads, nodeKey, nodeDegree,
+  buildingAt, onRoadSurface, inWater, inBounds, junctionClearance, nearestNamedRoad, nearestNamedBuilding, namedRoadsAt,
+} from './citymodel.js';
+import { triangulate, pointInPolygon, polygonArea } from './geom.js';
+import { makeCanvas, mulberry32, buildTextAtlas, fitText } from './utils.js';
 import { registerNight } from './daynight.js';
 
 // 各圖層高度（拉開間距避免 z-fighting）
-const Y_SIDEWALK = 0.06;
+const Y_PARK = 0.03;
+const Y_WATER = 0.05;
+const Y_FOOT = 0.07;
 const Y_ROAD = 0.1;
-const Y_INTERSECTION = 0.14;
-const Y_MARK = 0.18;
-const Y_LABEL = 0.2;
+const Y_MARK = 0.13;
+const Y_LABEL = 0.15;
 
-// ---------- 道路資料正規化 ----------
-// axis：'x' 表示道路沿 X 延伸（東西向），'z' 表示沿 Z 延伸（南北向）
-// c：道路中心線座標（東西向為 z，南北向為 x）；hw：半路寬
-export const ROADS = [];
-for (const r of ROADS_EW) {
-  ROADS.push({ ...r, axis: 'x', c: r.z, hw: r.width / 2, from: r.from ?? BOUNDS.minX, to: r.to ?? BOUNDS.maxX, median: r.median || 0 });
-}
-for (const r of ROADS_NS) {
-  ROADS.push({ ...r, axis: 'z', c: r.x, hw: r.width / 2, from: r.from ?? BOUNDS.minZ, to: r.to ?? BOUNDS.maxZ, median: r.median || 0 });
-}
-export const EW_ROADS = ROADS.filter((r) => r.axis === 'x').sort((a, b) => a.c - b.c);
-export const NS_ROADS = ROADS.filter((r) => r.axis === 'z').sort((a, b) => a.c - b.c);
-
-export function roadById(id) {
-  return ROADS.find((r) => r.id === id) || null;
-}
-
-// 道路在沿線座標 t 處是否存在
-export function roadPresentAt(road, t) {
-  return t >= road.from - 0.01 && t <= road.to + 0.01;
-}
-
-// 道路是否完整覆蓋沿線區間 [a, b]
-function roadCovers(road, a, b) {
-  return road.from <= a + 0.01 && road.to >= b - 0.01;
+// 除了高度差，再用 polygonOffset 分層：遠處深度精度不足時地面圖層也不會互相閃爍
+function layer(k) {
+  return { polygonOffset: true, polygonOffsetFactor: -k, polygonOffsetUnits: -k * 2 };
 }
 
 // ---------- 地形高度 ----------
-// 除了秋紅谷的下凹地形外，地面高度都是 0
-export function heightAt(x, z) {
-  const b = QIUHONG_BOWL;
-  if (x <= b.x0 || x >= b.x1 || z <= b.z0 || z >= b.z1) return 0;
-  const d = Math.min(x - b.x0, b.x1 - x, z - b.z0, b.z1 - z);
-  let h = -b.depth * smoothstep(0, b.slope, d);
-  const px = (x - b.pondX) / b.pondRX;
-  const pz = (z - b.pondZ) / b.pondRZ;
-  const e = px * px + pz * pz;
-  if (e < 1) h -= b.pondDepth * smoothstep(1, 0.5, e);
-  return h;
-}
-
-// ---------- 街廓 ----------
-// 以所有道路中心線切出格子；lot 為可蓋建築的範圍，ring 為人行道中線（行人巡迴用）
-export function computeCells() {
-  const xs = [{ c: BOUNDS.minX, road: null }, ...NS_ROADS.map((r) => ({ c: r.c, road: r })), { c: BOUNDS.maxX, road: null }];
-  const zs = [{ c: BOUNDS.minZ, road: null }, ...EW_ROADS.map((r) => ({ c: r.c, road: r })), { c: BOUNDS.maxZ, road: null }];
-  const cells = [];
-  for (let i = 0; i < xs.length - 1; i++) {
-    for (let j = 0; j < zs.length - 1; j++) {
-      const W = xs[i];
-      const E = xs[i + 1];
-      const N = zs[j];
-      const S = zs[j + 1];
-      const x0 = W.c;
-      const x1 = E.c;
-      const z0 = N.c;
-      const z1 = S.c;
-      // 邊線的內縮量：地圖邊緣 3m；道路存在時 = 半路寬 + 人行道 + 3m；道路不存在（綠帶）8m
-      const present = (line, a, b) => !!line.road && roadCovers(line.road, a, b);
-      const margin = (line, a, b) => (!line.road ? 3 : present(line, a, b) ? line.road.hw + SIDEWALK + 3 : 8);
-      const ringOff = (line, a, b) => (present(line, a, b) ? line.road.hw + SIDEWALK / 2 : 6);
-      const allPresent = present(W, z0, z1) && present(E, z0, z1) && present(N, x0, x1) && present(S, x0, x1);
-      cells.push({
-        x0, x1, z0, z1,
-        lot: {
-          x0: x0 + margin(W, z0, z1),
-          x1: x1 - margin(E, z0, z1),
-          z0: z0 + margin(N, x0, x1),
-          z1: z1 - margin(S, x0, x1),
-        },
-        ring: {
-          x0: x0 + ringOff(W, z0, z1),
-          x1: x1 - ringOff(E, z0, z1),
-          z0: z0 + ringOff(N, x0, x1),
-          z1: z1 - ringOff(S, x0, x1),
-        },
-        interior: allPresent,
-      });
-    }
-  }
-  return cells;
+// 目前整個街區都是平地（秋紅谷下凹地形不強求，先以平面公園處理）
+export function heightAt() {
+  return 0;
 }
 
 // ---------- 位置描述（HUD 用） ----------
-export function landmarkAt(x, z) {
-  for (const lm of LANDMARKS) {
-    if (pointInRect(x, z, lm.zone)) {
-      // 地標街廓內但仍在道路 / 人行道上時，以道路為準
-      if (roadsAt(x, z).length === 0) return lm;
-    }
-  }
-  return null;
-}
-
-function roadsAt(x, z) {
-  const out = [];
-  for (const r of ROADS) {
-    const along = r.axis === 'x' ? x : z;
-    const perp = r.axis === 'x' ? z : x;
-    if (roadPresentAt(r, along) && Math.abs(perp - r.c) <= r.hw + SIDEWALK) out.push(r);
-  }
-  return out;
-}
-
+// 靠近具名建築（輪廓 10m 內）→ 顯示建築名；否則顯示所在 / 最近的道路名
 export function describeLocation(x, z) {
-  const lm = landmarkAt(x, z);
-  if (lm) return { text: lm.name, landmark: lm };
-  const on = roadsAt(x, z);
-  if (on.length >= 2) return { text: `${on[0].name} / ${on[1].name} 路口`, landmark: null };
-  if (on.length === 1) return { text: on[0].name, landmark: null };
-  // 不在路上：找最近的東西向與南北向道路
-  let bestEW = null;
-  let bestNS = null;
-  let dEW = Infinity;
-  let dNS = Infinity;
-  for (const r of EW_ROADS) {
-    const d = Math.abs(z - r.c);
-    if (roadPresentAt(r, x) && d < dEW) { dEW = d; bestEW = r; }
-  }
-  for (const r of NS_ROADS) {
-    const d = Math.abs(x - r.c);
-    if (roadPresentAt(r, z) && d < dNS) { dNS = d; bestNS = r; }
-  }
-  const parts = [];
-  if (bestEW) parts.push(bestEW.name);
-  if (bestNS) parts.push(bestNS.name);
-  return { text: parts.length ? `近 ${parts.join(' · ')}` : '七期', landmark: null };
+  const nb = nearestNamedBuilding(x, z, 10);
+  if (nb) return { text: nb.building.name, building: nb.building };
+  const here = namedRoadsAt(x, z, 1);
+  if (here.length >= 2) return { text: `${here[0]} / ${here[1]} 路口`, building: null };
+  if (here.length === 1) return { text: here[0], building: null };
+  const near = nearestNamedRoad(x, z, 240);
+  if (near) return { text: `近 ${near.road.name}`, building: null };
+  return { text: '七期', building: null };
 }
 
 // ---------- 貼圖 ----------
-// 道路貼圖：沿路方向 256px = 12m（重複），橫向 512px = 全路寬
-function makeRoadTexture(road, anisotropy) {
-  const W = 256;
-  const H = 512;
-  const canvas = makeCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#3b3c40';
-  ctx.fillRect(0, 0, W, H);
-  // 柏油雜點
-  const rng = mulberry32(road.c * 7 + 13);
-  for (let i = 0; i < 1400; i++) {
-    const g = 50 + Math.floor(rng() * 30);
-    ctx.fillStyle = `rgb(${g},${g},${g + 4})`;
-    ctx.fillRect(rng() * W, rng() * H, 2, 2);
-  }
-  const pxPerM = H / road.width;
-  // 橫向偏移（-hw..hw）轉為畫布 y
-  const yOf = (off) => H / 2 + off * pxPerM;
-  const lineW = Math.max(2, 0.15 * pxPerM);
-  const medianHalf = road.median / 2;
-  if (road.median) {
-    // 中央分隔島（綠色植栽帶 + 淺色緣石）
-    ctx.fillStyle = '#c9c6bd';
-    ctx.fillRect(0, yOf(-medianHalf), W, medianHalf * 2 * pxPerM);
-    ctx.fillStyle = '#4f7a3f';
-    ctx.fillRect(0, yOf(-medianHalf + 0.3), W, (medianHalf - 0.3) * 2 * pxPerM);
-  } else {
-    // 雙黃線
-    ctx.fillStyle = '#e8c020';
-    ctx.fillRect(0, yOf(-0.25) - lineW / 2, W, lineW);
-    ctx.fillRect(0, yOf(0.25) - lineW / 2, W, lineW);
-  }
-  // 路邊停車帶的白色邊線（距路緣 2.5m）
-  const edge = road.hw - 2.5;
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(0, yOf(-edge) - lineW / 2, W, lineW);
-  ctx.fillRect(0, yOf(edge) - lineW / 2, W, lineW);
-  // 車道虛線（每 12m 畫 4m）
-  const laneW = (edge - medianHalf) / road.lanes;
-  for (let k = 1; k < road.lanes; k++) {
-    const off = medianHalf + laneW * k;
-    for (const s of [-1, 1]) {
-      ctx.fillRect(0, yOf(s * off) - lineW / 2, W * (4 / 12), lineW);
-    }
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.anisotropy = anisotropy;
-  return tex;
-}
-
-// 人行道地磚貼圖（一格 = 2m × 2m）
-function makeSidewalkTexture(anisotropy) {
-  const canvas = makeCanvas(128, 128);
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#b9b3a8';
-  ctx.fillRect(0, 0, 128, 128);
-  ctx.fillStyle = '#a59e92';
-  for (let i = 0; i < 4; i++) {
-    ctx.fillRect(i * 32, 0, 2, 128);
-    ctx.fillRect(0, i * 32, 128, 2);
-  }
+function repeatTex(canvas, anisotropy) {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
@@ -213,7 +51,38 @@ function makeSidewalkTexture(anisotropy) {
   return tex;
 }
 
-// 草地貼圖
+// 人行鋪面地磚（一張 = 4m × 4m，每格 1m）
+function makePavingTexture(anisotropy) {
+  const canvas = makeCanvas(128, 128);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#b7b1a6';
+  ctx.fillRect(0, 0, 128, 128);
+  const rng = mulberry32(31);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      const g = 172 + Math.floor(rng() * 14);
+      ctx.fillStyle = `rgb(${g},${g - 5},${g - 13})`;
+      ctx.fillRect(i * 32 + 1, j * 32 + 1, 30, 30);
+    }
+  }
+  return repeatTex(canvas, anisotropy);
+}
+
+// 柏油雜點（一張 = 8m）
+function makeAsphaltTexture(anisotropy) {
+  const canvas = makeCanvas(128, 128);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 128, 128);
+  const rng = mulberry32(13);
+  for (let i = 0; i < 900; i++) {
+    const g = 215 + Math.floor(rng() * 40);
+    ctx.fillStyle = `rgb(${g},${g},${g})`;
+    ctx.fillRect(rng() * 128, rng() * 128, 2, 2);
+  }
+  return repeatTex(canvas, anisotropy);
+}
+
 function makeGrassTexture(anisotropy) {
   const canvas = makeCanvas(256, 256);
   const ctx = canvas.getContext('2d');
@@ -221,62 +90,407 @@ function makeGrassTexture(anisotropy) {
   ctx.fillRect(0, 0, 256, 256);
   const rng = mulberry32(99);
   for (let i = 0; i < 2500; i++) {
-    const g = rng();
-    ctx.fillStyle = g < 0.5 ? '#668650' : '#789a5d';
+    ctx.fillStyle = rng() < 0.5 ? '#668650' : '#789a5d';
     ctx.fillRect(rng() * 256, rng() * 256, 3, 3);
   }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.anisotropy = anisotropy;
-  return tex;
+  return repeatTex(canvas, anisotropy);
 }
 
-// 將平面幾何 UV 放大（配合 RepeatWrapping）
-function scaleUV(geo, su, sv) {
-  const uv = geo.attributes.uv;
-  for (let i = 0; i < uv.count; i++) {
-    uv.setXY(i, uv.getX(i) * su, uv.getY(i) * sv);
+// ---------- 平面幾何寫入器（所有三角形保證朝上） ----------
+class FlatWriter {
+  constructor(uvScale = 8) {
+    this.pos = [];
+    this.uv = [];
+    this.col = [];
+    this.uvScale = uvScale;
+    this.color = null;
   }
-  uv.needsUpdate = true;
+
+  // 水平三角形；在 (x, z) 平面為逆時針時交換頂點，讓法線朝上
+  tri(x1, z1, x2, z2, x3, z3, y) {
+    const cr = (x2 - x1) * (z3 - z1) - (z2 - z1) * (x3 - x1);
+    if (Math.abs(cr) < 1e-10) return;
+    if (cr > 0) {
+      const tx = x2;
+      const tz = z2;
+      x2 = x3;
+      z2 = z3;
+      x3 = tx;
+      z3 = tz;
+    }
+    const k = 1 / this.uvScale;
+    this.pos.push(x1, y, z1, x2, y, z2, x3, y, z3);
+    this.uv.push(x1 * k, -z1 * k, x2 * k, -z2 * k, x3 * k, -z3 * k);
+    if (this.color) for (let i = 0; i < 3; i++) this.col.push(this.color.r, this.color.g, this.color.b);
+  }
+
+  // 帶 UV 的水平三角形（文字貼圖用；頂點與 UV 一起交換，不會鏡像）
+  triUV(a, b, c, y) {
+    const cr = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (cr > 0) {
+      const t = b;
+      b = c;
+      c = t;
+    }
+    for (const q of [a, b, c]) {
+      this.pos.push(q[0], y, q[1]);
+      this.uv.push(q[2], q[3]);
+    }
+  }
+
+  quad(ax, az, bx, bz, cx, cz, dx, dz, y) {
+    this.tri(ax, az, bx, bz, cx, cz, y);
+    this.tri(ax, az, cx, cz, dx, dz, y);
+  }
+
+  disc(x, z, r, y, seg = 14) {
+    for (let i = 0; i < seg; i++) {
+      const a0 = (i / seg) * Math.PI * 2;
+      const a1 = ((i + 1) / seg) * Math.PI * 2;
+      this.tri(x, z, x + Math.cos(a0) * r, z + Math.sin(a0) * r, x + Math.cos(a1) * r, z + Math.sin(a1) * r, y);
+    }
+  }
+
+  polygon(p, y) {
+    const t = triangulate(p);
+    for (let k = 0; k < t.length; k += 3) {
+      this.tri(p[t[k] * 2], p[t[k] * 2 + 1], p[t[k + 1] * 2], p[t[k + 1] * 2 + 1], p[t[k + 2] * 2], p[t[k + 2] * 2 + 1], y);
+    }
+  }
+
+  // 帶狀路面：每段一個矩形；端點與轉折處補圓盤，路口與彎道不留破洞
+  ribbon(pts, hw, y) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const L = Math.hypot(b.x - a.x, b.z - a.z);
+      if (L < 1e-4) continue;
+      const nx = (-(b.z - a.z) / L) * hw;
+      const nz = ((b.x - a.x) / L) * hw;
+      this.quad(a.x + nx, a.z + nz, b.x + nx, b.z + nz, b.x - nx, b.z - nz, a.x - nx, a.z - nz, y);
+    }
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0 && i < pts.length - 1) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const c = pts[i + 1];
+        const d1x = b.x - a.x;
+        const d1z = b.z - a.z;
+        const d2x = c.x - b.x;
+        const d2z = c.z - b.z;
+        const cos = (d1x * d2x + d1z * d2z) / ((Math.hypot(d1x, d1z) * Math.hypot(d2x, d2z)) || 1);
+        if (cos > 0.9997) continue; // 幾乎直線，不需要補
+      }
+      this.disc(pts[i].x, pts[i].z, hw, y, hw > 5 ? 18 : 12);
+    }
+  }
+
+  toGeometry() {
+    const geo = new THREE.BufferGeometry();
+    const n = this.pos.length / 3;
+    const nor = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) nor[i * 3 + 1] = 1;
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
+    if (this.col.length) geo.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
+    geo.computeBoundingSphere();
+    return geo;
+  }
 }
 
-// 建立水平矩形平面（x0..x1, z0..z1）
-function flatRect(x0, z0, x1, z1, y, material, uvScale = null) {
-  const w = x1 - x0;
-  const d = z1 - z0;
-  const geo = new THREE.PlaneGeometry(w, d);
-  geo.rotateX(-Math.PI / 2);
-  if (uvScale) scaleUV(geo, w / uvScale, d / uvScale);
-  const mesh = new THREE.Mesh(geo, material);
-  mesh.position.set((x0 + x1) / 2, y, (z0 + z1) / 2);
-  mesh.receiveShadow = true;
+function flatMesh(writer, material, receiveShadow = true) {
+  const mesh = new THREE.Mesh(writer.toGeometry(), material);
+  mesh.receiveShadow = receiveShadow;
   return mesh;
 }
 
-// 沿道路方向的長條平面：along 起訖、垂直方向中心 perpC、寬度 width
-function roadStrip(road, from, to, perpC, width, y, material) {
-  const len = to - from;
-  const mid = (from + to) / 2;
-  const geo = new THREE.PlaneGeometry(len, width);
-  geo.rotateX(-Math.PI / 2);
-  if (road.axis === 'z') geo.rotateY(Math.PI / 2);
-  const mesh = new THREE.Mesh(geo, material);
-  if (road.axis === 'x') mesh.position.set(mid, y, perpC);
-  else mesh.position.set(perpC, y, mid);
-  mesh.receiveShadow = true;
-  return { mesh, geo, len };
+// ---------- 標線 ----------
+// 道路上的路口位置（沿線距離 s 與淨空半徑），標線在這些範圍內中斷
+function junctionStops(road) {
+  const stops = [];
+  road.pts.forEach((p, idx) => {
+    const list = nodeRoads.get(nodeKey(p.x, p.z));
+    if (!list || nodeDegree(list) < 3) return;
+    let hw = 0;
+    for (const e of list) if (e.road !== road) hw = Math.max(hw, e.road.hw);
+    if (hw > 0) stops.push({ s: road.cum[idx], r: hw + 2 });
+  });
+  return stops;
 }
 
-// 沿線座標 t 是否靠近與其交叉的道路（路口）
-function nearCrossing(road, t, pad) {
-  const others = road.axis === 'x' ? NS_ROADS : EW_ROADS;
-  for (const q of others) {
-    if (!roadPresentAt(q, road.c)) continue;
-    if (Math.abs(t - q.c) < q.hw + pad) return true;
+// [0, L] 扣掉路口範圍後的區間
+function allowedIntervals(road) {
+  let iv = [[1, road.length - 1]];
+  for (const j of junctionStops(road)) {
+    const next = [];
+    for (const [a, b] of iv) {
+      if (j.s + j.r <= a || j.s - j.r >= b) next.push([a, b]);
+      else {
+        if (j.s - j.r > a) next.push([a, j.s - j.r]);
+        if (j.s + j.r < b) next.push([j.s + j.r, b]);
+      }
+    }
+    iv = next;
   }
-  return false;
+  return iv.filter(([a, b]) => b - a > 1);
+}
+
+// 沿折線 [s0, s1] 畫一條側向偏移 off、寬 w 的線
+function lineAlong(writer, road, s0, s1, off, w, y) {
+  const { pts, cum } = road;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a0 = cum[i];
+    const a1 = cum[i + 1];
+    if (a1 <= s0 || a0 >= s1) continue;
+    const L = a1 - a0;
+    if (L < 1e-4) continue;
+    const ux = (pts[i + 1].x - pts[i].x) / L;
+    const uz = (pts[i + 1].z - pts[i].z) / L;
+    const rx = -uz; // 右方（x 東、z 南）
+    const rz = ux;
+    const t0 = Math.max(s0, a0) - a0;
+    const t1 = Math.min(s1, a1) - a0;
+    const cx0 = pts[i].x + ux * t0 + rx * off;
+    const cz0 = pts[i].z + uz * t0 + rz * off;
+    const cx1 = pts[i].x + ux * t1 + rx * off;
+    const cz1 = pts[i].z + uz * t1 + rz * off;
+    const hx = rx * (w / 2);
+    const hz = rz * (w / 2);
+    writer.quad(cx0 + hx, cz0 + hz, cx1 + hx, cz1 + hz, cx1 - hx, cz1 - hz, cx0 - hx, cz0 - hz, y);
+  }
+}
+
+function dashedAlong(writer, road, s0, s1, off, w, y, dash = 3, gap = 6) {
+  const period = dash + gap;
+  for (let s = Math.floor(s0 / period) * period; s < s1; s += period) {
+    const a = Math.max(s, s0);
+    const b = Math.min(s + dash, s1);
+    if (b - a > 0.3) lineAlong(writer, road, a, b, off, w, y);
+  }
+}
+
+function addMarkings(yellow, white, road) {
+  const hw = road.hw;
+  const intervals = allowedIntervals(road);
+  if (!intervals.length) return;
+  const edge = hw - 0.45;
+  for (const [a, b] of intervals) {
+    if (road.oneway) {
+      // 單行道：白色車道虛線 + 兩側白色邊線
+      const n = Math.max(1, road.lanes || Math.floor(road.width / 3.2));
+      const lw = road.width / n;
+      for (let k = 1; k < n; k++) dashedAlong(white, road, a, b, -hw + lw * k, 0.15, Y_MARK);
+      if (road.width >= 6) {
+        lineAlong(white, road, a, b, edge, 0.15, Y_MARK);
+        lineAlong(white, road, a, b, -edge, 0.15, Y_MARK);
+      }
+    } else {
+      // 雙向道：雙黃中線 + 各方向車道虛線 + 邊線
+      lineAlong(yellow, road, a, b, 0.2, 0.15, Y_MARK);
+      lineAlong(yellow, road, a, b, -0.2, 0.15, Y_MARK);
+      const perSide = Math.max(1, Math.floor((road.lanes || Math.floor(road.width / 3.2)) / 2));
+      const lw = hw / perSide;
+      for (let k = 1; k < perSide; k++) {
+        dashedAlong(white, road, a, b, lw * k, 0.15, Y_MARK);
+        dashedAlong(white, road, a, b, -lw * k, 0.15, Y_MARK);
+      }
+      if (road.width >= 8) {
+        lineAlong(white, road, a, b, edge, 0.15, Y_MARK);
+        lineAlong(white, road, a, b, -edge, 0.15, Y_MARK);
+      }
+    }
+  }
+}
+
+// ---------- 路名地面字 ----------
+const LABEL_W = 512;
+const LABEL_H = 128;
+const LABEL_SPACING = 110; // 同名道路兩個地面字的最小間距
+
+function drawLabel(ctx, x, y, w, h, text) {
+  ctx.clearRect(x, y, w, h);
+  fitText(ctx, text, x + w / 2, y + h / 2, w * 0.92, Math.floor(h * 0.62));
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = 'rgba(30,30,34,0.55)';
+  ctx.strokeText(text, x + w / 2, y + h / 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  ctx.fillText(text, x + w / 2, y + h / 2);
+}
+
+function placeRoadLabels() {
+  const placed = new Map(); // name -> [{x, z}]
+  const labels = [];
+  const tmp = { x: 0, z: 0, dx: 0, dz: 0 };
+  const roadsByLen = surfaceRoads.filter((r) => r.name && r.type !== 'service' && r.length >= 30).sort((a, b) => b.length - a.length);
+  for (const r of roadsByLen) {
+    const n = Math.max(1, Math.floor(r.length / LABEL_SPACING));
+    for (let k = 0; k < n; k++) {
+      const s = (r.length * (k + 0.5)) / n;
+      sampleAt(r, s, tmp);
+      if (!inBounds(tmp.x, tmp.z, 5)) continue;
+      if (junctionClearance(tmp.x, tmp.z) < 6) continue;
+      const list = placed.get(r.name) || [];
+      if (list.some((p) => Math.hypot(p.x - tmp.x, p.z - tmp.z) < LABEL_SPACING * 0.8)) continue;
+      list.push({ x: tmp.x, z: tmp.z });
+      placed.set(r.name, list);
+      // 文字一律由西往東（純南北向時由北往南）閱讀，北方朝上看不會倒過來
+      let dx = tmp.dx;
+      let dz = tmp.dz;
+      if (dx < -1e-3 || (Math.abs(dx) <= 1e-3 && dz < 0)) {
+        dx = -dx;
+        dz = -dz;
+      }
+      const h = Math.min(3.2, r.width * 0.42);
+      // 雙向道把字放在中線一側（行進方向右側），避開雙黃線
+      const off = r.oneway ? 0 : Math.min(r.hw * 0.5, h * 0.5 + 0.8);
+      labels.push({ name: r.name, x: tmp.x - tmp.dz * off, z: tmp.z + tmp.dx * off, dx, dz, h, len: h * (LABEL_W / LABEL_H) });
+    }
+  }
+  return labels;
+}
+
+function sampleAt(road, s, out) {
+  const { pts, cum } = road;
+  let i = 0;
+  while (i < cum.length - 2 && cum[i + 1] < s) i++;
+  const L = cum[i + 1] - cum[i] || 1;
+  const t = Math.min(1, Math.max(0, (s - cum[i]) / L));
+  out.x = pts[i].x + (pts[i + 1].x - pts[i].x) * t;
+  out.z = pts[i].z + (pts[i + 1].z - pts[i].z) * t;
+  out.dx = (pts[i + 1].x - pts[i].x) / L;
+  out.dz = (pts[i + 1].z - pts[i].z) / L;
+  return out;
+}
+
+function buildRoadLabels(group, anisotropy) {
+  const labels = placeRoadLabels();
+  const names = [...new Set(labels.map((l) => l.name))];
+  const atlas = buildTextAtlas(names, LABEL_W, LABEL_H, drawLabel, { anisotropy });
+  const writers = atlas.textures.map(() => new FlatWriter());
+  for (const l of labels) {
+    const cell = atlas.cells[names.indexOf(l.name)];
+    const w = writers[cell.atlas];
+    // 文字左→右沿 (dx, dz)，文字上方朝 (dz, -dx)（北方朝上看為左手邊）
+    const ux = l.dz;
+    const uz = -l.dx;
+    const hl = l.len / 2;
+    const hh = l.h / 2;
+    const bl = [l.x - l.dx * hl - ux * hh, l.z - l.dz * hl - uz * hh, cell.u0, cell.v0];
+    const br = [l.x + l.dx * hl - ux * hh, l.z + l.dz * hl - uz * hh, cell.u1, cell.v0];
+    const tr = [l.x + l.dx * hl + ux * hh, l.z + l.dz * hl + uz * hh, cell.u1, cell.v1];
+    const tl = [l.x - l.dx * hl + ux * hh, l.z - l.dz * hl + uz * hh, cell.u0, cell.v1];
+    w.triUV(bl, br, tr, Y_LABEL);
+    w.triUV(bl, tr, tl, Y_LABEL);
+  }
+  writers.forEach((w, a) => {
+    const mat = new THREE.MeshStandardMaterial({
+      map: atlas.textures[a],
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.9,
+      ...layer(6),
+    });
+    group.add(flatMesh(w, mat, false));
+  });
+  return labels.length;
+}
+
+// ---------- 行道樹、路燈、公園樹木 ----------
+// 簡單的點間距檢查（避免兩條平行道路把樹種在同一點）
+class PointSet {
+  constructor(minDist) {
+    this.min = minDist;
+    this.map = new Map();
+  }
+
+  _k(ix, iz) {
+    return ix * 100003 + iz;
+  }
+
+  tryAdd(x, z) {
+    const cs = this.min;
+    const ix = Math.floor(x / cs);
+    const iz = Math.floor(z / cs);
+    for (let a = -1; a <= 1; a++) {
+      for (let b = -1; b <= 1; b++) {
+        const list = this.map.get(this._k(ix + a, iz + b));
+        if (list && list.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < cs * cs)) return false;
+      }
+    }
+    const k = this._k(ix, iz);
+    if (!this.map.has(k)) this.map.set(k, []);
+    this.map.get(k).push({ x, z });
+    return true;
+  }
+}
+
+function placeStreetFurniture(rng) {
+  const trees = [];
+  const lamps = [];
+  const treeSet = new PointSet(5);
+  const lampSet = new PointSet(12);
+  const tmp = { x: 0, z: 0, dx: 0, dz: 0 };
+  for (const r of surfaceRoads) {
+    if (!MAJOR_TYPES.has(r.type)) continue;
+    for (const side of [1, -1]) {
+      for (let s = 6; s < r.length - 3; s += 12) {
+        sampleAt(r, s, tmp);
+        const rx = -tmp.dz * side;
+        const rz = tmp.dx * side;
+        const off = r.hw + 2.0;
+        const x = tmp.x + rx * off;
+        const z = tmp.z + rz * off;
+        if (!inBounds(x, z, 2)) continue;
+        if (buildingAt(x, z, 1.8)) continue;
+        if (onRoadSurface(x, z, 0.8, true)) continue;
+        if (inWater(x, z, 1)) continue;
+        if (!treeSet.tryAdd(x, z)) continue;
+        trees.push({ x, z, scale: 0.8 + rng() * 0.45, hue: rng() });
+      }
+      for (let s = 15; s < r.length - 3; s += 30) {
+        sampleAt(r, s, tmp);
+        const rx = -tmp.dz * side;
+        const rz = tmp.dx * side;
+        const off = r.hw + 0.8;
+        const x = tmp.x + rx * off;
+        const z = tmp.z + rz * off;
+        if (!inBounds(x, z, 2)) continue;
+        if (buildingAt(x, z, 1.2)) continue;
+        if (onRoadSurface(x, z, 0.4, false)) continue;
+        if (inWater(x, z, 0.5)) continue;
+        if (!lampSet.tryAdd(x, z)) continue;
+        // 燈頭朝道路中心伸出，燈頭末端也不能伸進建築
+        const hx = x - rx * 1.0;
+        const hz = z - rz * 1.0;
+        if (buildingAt(hx, hz, 0.3)) continue;
+        lamps.push({ x, z, dirX: -rx, dirZ: -rz });
+      }
+    }
+  }
+  return { trees, lamps };
+}
+
+function placeParkTrees(rng, trees) {
+  const set = new PointSet(6);
+  for (const t of trees) set.tryAdd(t.x, t.z);
+  for (const p of parks) {
+    const step = polygonArea(p.poly) > 20000 ? 11 : 9;
+    for (let x = p.bbox.x0 + step / 2; x < p.bbox.x1; x += step) {
+      for (let z = p.bbox.z0 + step / 2; z < p.bbox.z1; z += step) {
+        const jx = x + (rng() - 0.5) * step * 0.7;
+        const jz = z + (rng() - 0.5) * step * 0.7;
+        if (rng() < 0.35) continue;
+        if (!pointInPolygon(jx, jz, p.poly)) continue;
+        if (!inBounds(jx, jz, 2)) continue;
+        if (buildingAt(jx, jz, 2)) continue;
+        if (onRoadSurface(jx, jz, 1.2, true)) continue;
+        if (inWater(jx, jz, 2)) continue;
+        if (!set.tryAdd(jx, jz)) continue;
+        trees.push({ x: jx, z: jz, scale: 0.9 + rng() * 0.5, hue: rng() });
+      }
+    }
+  }
 }
 
 // ---------- 建構世界 ----------
@@ -285,178 +499,93 @@ export function buildWorld(scene, { anisotropy = 4 } = {}) {
   group.name = 'world';
   scene.add(group);
 
-  // 地面：秋紅谷範圍挖空，另外用可變形網格做下凹地形
-  const grassTex = makeGrassTexture(anisotropy);
-  const grassMat = new THREE.MeshStandardMaterial({ map: grassTex, roughness: 1 });
-  const b = QIUHONG_BOWL;
-  const E = 1600;
-  group.add(flatRect(-E, -E, E, b.z0, 0, grassMat, 8));
-  group.add(flatRect(-E, b.z1, E, E, 0, grassMat, 8));
-  group.add(flatRect(-E, b.z0, b.x0, b.z1, 0, grassMat, 8));
-  group.add(flatRect(b.x1, b.z0, E, b.z1, 0, grassMat, 8));
-
-  // 秋紅谷下凹地形
+  // 地面：人行鋪面色（世界邊界外再延伸一段，避免看到天空底）
   {
-    const w = b.x1 - b.x0;
-    const d = b.z1 - b.z0;
-    const segW = Math.ceil(w / 1.5);
-    const segD = Math.ceil(d / 1.5);
-    const geo = new THREE.PlaneGeometry(w, d, segW, segD);
-    geo.rotateX(-Math.PI / 2);
-    const cx = (b.x0 + b.x1) / 2;
-    const cz = (b.z0 + b.z1) / 2;
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i) + cx;
-      const z = pos.getZ(i) + cz;
-      pos.setY(i, heightAt(x, z));
-    }
-    pos.needsUpdate = true;
-    scaleUV(geo, w / 8, d / 8);
-    geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, grassMat);
-    mesh.position.set(cx, 0, cz);
-    mesh.receiveShadow = true;
-    group.add(mesh);
+    const E = 900;
+    const x0 = BOUNDS.minX - E;
+    const x1 = BOUNDS.maxX + E;
+    const z0 = BOUNDS.minZ - E;
+    const z1 = BOUNDS.maxZ + E;
+    const w = new FlatWriter(4);
+    w.quad(x0, z0, x1, z0, x1, z1, x0, z1, 0);
+    const mat = new THREE.MeshStandardMaterial({ map: makePavingTexture(anisotropy), roughness: 0.95 });
+    group.add(flatMesh(w, mat));
   }
 
-  // 道路
-  const sidewalkTex = makeSidewalkTexture(anisotropy);
-  const sidewalkMat = new THREE.MeshStandardMaterial({ map: sidewalkTex, roughness: 0.95 });
-  const asphaltMat = new THREE.MeshStandardMaterial({ color: 0x3b3c40, roughness: 0.95 });
-  for (const r of ROADS) {
-    const tex = makeRoadTexture(r, anisotropy);
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9 });
-    const { mesh, len } = roadStrip(r, r.from, r.to, r.c, r.width, Y_ROAD, mat);
-    tex.repeat.set(len / 12, 1);
-    group.add(mesh);
-    // 兩側人行道
-    for (const s of [-1, 1]) {
-      const sw = roadStrip(r, r.from, r.to, r.c + s * (r.hw + SIDEWALK / 2), SIDEWALK, Y_SIDEWALK, sidewalkMat);
-      scaleUV(sw.geo, sw.len / 2, SIDEWALK / 2);
-      group.add(sw.mesh);
-    }
-  }
-
-  // 路口（純柏油方塊蓋住標線）與斑馬線
-  const stripes = [];
-  for (const e of EW_ROADS) {
-    for (const n of NS_ROADS) {
-      if (!roadPresentAt(e, n.c) || !roadPresentAt(n, e.c)) continue;
-      group.add(flatRect(n.c - n.hw, e.c - e.hw, n.c + n.hw, e.c + e.hw, Y_INTERSECTION, asphaltMat));
-      // 南北向道路上的斑馬線（北、南兩側）
-      const nsArms = [];
-      if (n.from < e.c - 1) nsArms.push(-1);
-      if (n.to > e.c + 1) nsArms.push(1);
-      for (const s of nsArms) {
-        const zc = e.c + s * (e.hw + 2);
-        for (let x = n.c - n.hw + 1; x <= n.c + n.hw - 1; x += 1.2) {
-          if (n.median && Math.abs(x - n.c) < n.median / 2) continue;
-          stripes.push({ x, z: zc, sx: 0.6, sz: 3 });
-        }
-      }
-      // 東西向道路上的斑馬線（西、東兩側）
-      const ewArms = [];
-      if (e.from < n.c - 1) ewArms.push(-1);
-      if (e.to > n.c + 1) ewArms.push(1);
-      for (const s of ewArms) {
-        const xc = n.c + s * (n.hw + 2);
-        for (let z = e.c - e.hw + 1; z <= e.c + e.hw - 1; z += 1.2) {
-          if (e.median && Math.abs(z - e.c) < e.median / 2) continue;
-          stripes.push({ x: xc, z, sx: 3, sz: 0.6 });
-        }
-      }
-    }
-  }
+  // 公園草地
   {
-    const geo = new THREE.PlaneGeometry(1, 1);
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.8 });
-    const inst = new THREE.InstancedMesh(geo, mat, stripes.length);
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const p = new THREE.Vector3();
-    const s = new THREE.Vector3();
-    stripes.forEach((st, i) => {
-      p.set(st.x, Y_MARK, st.z);
-      s.set(st.sx, 1, st.sz);
-      m.compose(p, q, s);
-      inst.setMatrixAt(i, m);
-    });
-    inst.instanceMatrix.needsUpdate = true;
-    inst.receiveShadow = true;
-    group.add(inst);
+    const w = new FlatWriter(8);
+    for (const p of parks) w.polygon(p.poly, Y_PARK);
+    const mat = new THREE.MeshStandardMaterial({ map: makeGrassTexture(anisotropy), roughness: 1, ...layer(1) });
+    if (w.pos.length) group.add(flatMesh(w, mat));
   }
 
-  // 路名地面字（每段街廓中間一個）
-  for (const r of ROADS) {
-    const tex = makeTextTexture(r.name, { width: 512, height: 128, color: 'rgba(255,255,255,0.9)' });
-    tex.anisotropy = anisotropy;
-    const mat = new THREE.MeshStandardMaterial({
-      map: tex,
-      transparent: true,
-      depthWrite: false,
-      roughness: 0.9,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-    });
-    const others = (r.axis === 'x' ? NS_ROADS : EW_ROADS).filter((q) => roadPresentAt(q, r.c)).map((q) => q.c);
-    const stops = [r.from, ...others.filter((c) => c > r.from && c < r.to), r.to].sort((a, b2) => a - b2);
-    const labelOff = r.median ? r.median / 2 + (r.hw - r.median / 2) / 2 : r.hw * 0.45;
-    for (let i = 0; i < stops.length - 1; i++) {
-      if (stops[i + 1] - stops[i] < 45) continue;
-      const t = (stops[i] + stops[i + 1]) / 2;
-      const geo = new THREE.PlaneGeometry(14, 3.5);
-      geo.rotateX(-Math.PI / 2);
-      if (r.axis === 'z') geo.rotateY(Math.PI / 2);
-      const mesh = new THREE.Mesh(geo, mat);
-      if (r.axis === 'x') mesh.position.set(t, Y_LABEL, r.c + labelOff);
-      else mesh.position.set(r.c + labelOff, Y_LABEL, t);
-      group.add(mesh);
+  // 水面
+  {
+    const w = new FlatWriter(8);
+    for (const p of water) w.polygon(p.poly, Y_WATER);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x3f6f8a, roughness: 0.15, metalness: 0.3, ...layer(2) });
+    if (w.pos.length) group.add(flatMesh(w, mat));
+  }
+
+  // 步道（淺色窄帶）
+  {
+    const w = new FlatWriter(4);
+    for (const r of surfaceFootways) w.ribbon(r.pts, r.hw, Y_FOOT);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xd9d3c5, roughness: 0.95, ...layer(3) });
+    if (w.pos.length) group.add(flatMesh(w, mat));
+  }
+
+  // 車道路面（依類型給不同深淺的柏油色，全部合併成一個幾何）
+  {
+    const w = new FlatWriter(8);
+    const colors = {
+      trunk: new THREE.Color(0x3a3b3f),
+      primary: new THREE.Color(0x3b3c40),
+      secondary: new THREE.Color(0x3f4044),
+      tertiary: new THREE.Color(0x434448),
+      service: new THREE.Color(0x55565a),
+      other: new THREE.Color(0x48494d),
+    };
+    // 窄路先畫、寬路後畫；同高度重疊處顏色相同
+    const sorted = surfaceRoads.slice().sort((a, b) => a.width - b.width);
+    for (const r of sorted) {
+      w.color = colors[r.type] || colors.other;
+      w.ribbon(r.pts, r.hw, Y_ROAD);
     }
+    const mat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(anisotropy), vertexColors: true, roughness: 0.92, ...layer(4) });
+    group.add(flatMesh(w, mat));
   }
 
-  // 行道樹與路燈（InstancedMesh）
-  const trees = [];
-  const lamps = [];
+  // 標線（主要道路：中線 / 車道線 / 邊線；路口範圍內中斷）
+  {
+    const yellow = new FlatWriter();
+    const white = new FlatWriter();
+    for (const r of surfaceRoads) if (MAJOR_TYPES.has(r.type)) addMarkings(yellow, white, r);
+    const ym = new THREE.MeshStandardMaterial({ color: 0xe8c020, roughness: 0.8, ...layer(5) });
+    const wm = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.8, ...layer(5) });
+    if (yellow.pos.length) group.add(flatMesh(yellow, ym));
+    if (white.pos.length) group.add(flatMesh(white, wm));
+  }
+
+  const labelCount = buildRoadLabels(group, anisotropy);
+
+  // 行道樹、路燈、公園樹木（InstancedMesh）
   const rng = mulberry32(4242);
-  for (const r of ROADS) {
-    for (const s of [-1, 1]) {
-      for (let t = r.from + 7; t < r.to - 3; t += 14) {
-        if (nearCrossing(r, t, SIDEWALK + 2)) continue;
-        const off = r.c + s * (r.hw + 1.6);
-        const x = r.axis === 'x' ? t : off;
-        const z = r.axis === 'x' ? off : t;
-        trees.push({ x, z, scale: 0.8 + rng() * 0.45, hue: rng() });
-      }
-      for (let t = r.from + 14; t < r.to - 3; t += 28) {
-        if (nearCrossing(r, t, SIDEWALK + 2)) continue;
-        const off = r.c + s * (r.hw + 0.5);
-        const x = r.axis === 'x' ? t : off;
-        const z = r.axis === 'x' ? off : t;
-        // 燈頭朝道路中心伸出
-        const hx = r.axis === 'x' ? x : x - s * 1.0;
-        const hz = r.axis === 'x' ? z - s * 1.0 : z;
-        lamps.push({ x, z, hx, hz, alongX: r.axis === 'x' });
-      }
-    }
-  }
-  // 秋紅谷內也種一些樹
-  for (let i = 0; i < 28; i++) {
-    const x = b.x0 + 4 + rng() * (b.x1 - b.x0 - 8);
-    const z = b.z0 + 4 + rng() * (b.z1 - b.z0 - 8);
-    const px = (x - b.pondX) / b.pondRX;
-    const pz = (z - b.pondZ) / b.pondRZ;
-    if (px * px + pz * pz < 1.4) continue;
-    trees.push({ x, z, scale: 0.9 + rng() * 0.5, hue: rng(), y: heightAt(x, z) });
-  }
-
+  const { trees, lamps } = placeStreetFurniture(rng);
+  const streetTrees = trees.length;
+  placeParkTrees(rng, trees);
   const treeResult = buildTrees(trees);
   group.add(treeResult.trunks, treeResult.crowns);
   const lampResult = buildLamps(lamps);
   group.add(lampResult.poles, lampResult.heads);
 
-  return { group, cells: computeCells() };
+  return {
+    group,
+    stats: { labels: labelCount, streetTrees, parkTrees: trees.length - streetTrees, lamps: lamps.length },
+    trees,
+    lamps,
+  };
 }
 
 function buildTrees(trees) {
@@ -466,17 +595,20 @@ function buildTrees(trees) {
   crownGeo.translate(0, 3.7, 0);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a32, roughness: 1 });
   const crownMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, flatShading: true });
-  const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, trees.length);
-  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, trees.length);
+  const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, Math.max(1, trees.length));
+  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, Math.max(1, trees.length));
+  trunks.count = trees.length;
+  crowns.count = trees.length;
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const p = new THREE.Vector3();
   const s = new THREE.Vector3();
   const c = new THREE.Color();
+  const up = new THREE.Vector3(0, 1, 0);
   const greens = [new THREE.Color(0x3f7a38), new THREE.Color(0x4f8a3c), new THREE.Color(0x356b3a)];
   trees.forEach((t, i) => {
-    p.set(t.x, t.y || 0, t.z);
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.hue * Math.PI * 2);
+    p.set(t.x, 0, t.z);
+    q.setFromAxisAngle(up, t.hue * Math.PI * 2);
     s.set(t.scale, t.scale, t.scale);
     m.compose(p, q, s);
     trunks.setMatrixAt(i, m);
@@ -499,20 +631,24 @@ function buildLamps(lamps) {
   const poleMat = new THREE.MeshStandardMaterial({ color: 0x5a5f66, roughness: 0.6, metalness: 0.4 });
   const headMat = new THREE.MeshStandardMaterial({ color: 0x3a3d42, emissive: 0xffe2a8, emissiveIntensity: 0, roughness: 0.5 });
   registerNight(headMat, 2.5);
-  const poles = new THREE.InstancedMesh(poleGeo, poleMat, lamps.length);
-  const heads = new THREE.InstancedMesh(headGeo, headMat, lamps.length);
+  const poles = new THREE.InstancedMesh(poleGeo, poleMat, Math.max(1, lamps.length));
+  const heads = new THREE.InstancedMesh(headGeo, headMat, Math.max(1, lamps.length));
+  poles.count = lamps.length;
+  heads.count = lamps.length;
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
-  const qTurn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+  const up = new THREE.Vector3(0, 1, 0);
   const p = new THREE.Vector3();
   const one = new THREE.Vector3(1, 1, 1);
   lamps.forEach((l, i) => {
+    q.identity();
     p.set(l.x, 0, l.z);
     m.compose(p, q, one);
     poles.setMatrixAt(i, m);
-    // 燈頭長邊沿 Z；東西向道路的燈頭要朝 Z 伸出（預設即可），南北向道路要轉 90 度
-    p.set((l.x + l.hx) / 2, 7, (l.z + l.hz) / 2);
-    m.compose(p, l.alongX ? q : qTurn, one);
+    // 燈頭長邊（本地 +Z）朝道路中心
+    q.setFromAxisAngle(up, Math.atan2(l.dirX, l.dirZ));
+    p.set(l.x + l.dirX * 1.0, 7, l.z + l.dirZ * 1.0);
+    m.compose(p, q, one);
     heads.setMatrixAt(i, m);
   });
   poles.instanceMatrix.needsUpdate = true;

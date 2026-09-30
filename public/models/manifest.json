@@ -1,0 +1,79 @@
+[
+  {
+    "id": 853807906,
+    "name": "寶輝秋紅谷",
+    "file": "baohui_qiuhonggu.glb",
+    "anchorLat": 24.1656545,
+    "anchorLon": 120.6389631,
+    "height": 142.3,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM Z 字形輪廓擠出；OSM 41 層 × 3.3 m（參考文件 §5 住宅層高）+ 冠頂 = 142 m。參考文件無此棟外觀描述：米色石材、壁柱、冠頂皆套 §3 七期豪宅通用風格，屬推測。"
+  },
+  {
+    "id": 865367994,
+    "name": "聯聚中雍大廈",
+    "file": "lianju_zhongyong.glb",
+    "anchorLat": 24.1640531,
+    "anchorLon": 120.6439605,
+    "height": 165.0,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM 矩形輪廓擠出；OSM 39 層，高度依參考文件 §5 推測 165 m。黑色玻璃 + 垂直鰭片依 §3；頂冠退縮與大廳挑高推測。"
+  },
+  {
+    "id": 456488572,
+    "name": "林酒店",
+    "file": "lin_hotel.glb",
+    "anchorLat": 24.1650692,
+    "anchorLon": 120.6373529,
+    "height": 104.0,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM 輪廓擠出；OSM 25 層 × 3.8 m + 冠頂 = 104 m（參考文件 §5 表寫 120 m 推測，與 OSM 層數不符，此處以 OSM 層數估算）。古銅玻璃 + 每層白色水平帶 + 三段內縮近似弧形收頭；裙樓泳池位置不明未建。"
+  },
+  {
+    "id": 222636759,
+    "name": "臺中國家歌劇院",
+    "file": "national_taichung_theater.glb",
+    "anchorLat": 24.1629259,
+    "anchorLon": 120.6405172,
+    "height": 38.0,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM 矩形輪廓擠出 30 m（參考文件 §3 推測高）。白色外牆以布林挖出上下交錯的橢圓洞孔、洞底深色玻璃，表現伊東豐雄曲牆洞孔意象；洞的數量 / 位置為推測。屋頂花園 + 深灰方盒（位置推測）。東側廣場與橢圓水景超出建物輪廓，位置 / 尺寸推測。"
+  },
+  {
+    "id": 148849083,
+    "name": "新光三越 台中中港店",
+    "file": "shin_kong_mitsukoshi.glb",
+    "anchorLat": 24.164762,
+    "anchorLon": 120.6434568,
+    "height": 67.2,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM 輪廓擠出主體 60 m、北端圓弧擬合為圓柱玻璃塔 66 m（OSM 14 層；高度依參考文件 §5 推測）。暗酒紅牆板 + 一道紅帶 + 灰綠玻璃依 §3；紅帶高度、玻璃在圓塔上、招牌位置皆推測。OSM name:en 標 (suspended)，營運現況未查證。"
+  },
+  {
+    "id": 150999799,
+    "name": "老虎城購物中心",
+    "file": "tiger_city.glb",
+    "anchorLat": 24.1643599,
+    "anchorLon": 120.6378544,
+    "height": 45.0,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM L 形輪廓擠出；主立面朝東南（河南路）。高度無官方數字，依參考文件 §1 推測 35–40 m：主體 30 m、影城方盒 40 m、玻璃景觀塔 45 m（height 取景觀塔頂）。下沉廣場只做地表示意、未往地下挖。sign:TIGER CITY 為字牌佔位，圓形 logo 為抽象同心圓。"
+  },
+  {
+    "id": 224955652,
+    "name": "Top City 台中大遠百",
+    "file": "top_city.glb",
+    "anchorLat": 24.1641717,
+    "anchorLon": 120.6444841,
+    "height": 70.0,
+    "heightSource": "estimated",
+    "footprint": true,
+    "notes": "OSM 輪廓擠出 65 m（OSM 14 層，高度依參考文件 §5 推測）。藍灰玻璃 + 垂直分割線 + 紅色 Top City 字標 + 底部磚色轉角量體依 §3；字標朝臺灣大道、磚色量體在北角為推測。"
+  }
+]

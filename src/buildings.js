@@ -1,24 +1,63 @@
-// 程序生成建築：七期豪宅塔樓 / 商辦 / 低樓層，全部合併成一個幾何（單一 draw call）
-// 窗戶用重複的 CanvasTexture；夜晚以 emissiveMap 讓部分窗戶亮起
+// 建築：依 OSM 輪廓多邊形擠出（側牆 + 頂面三角化），依材質分桶合併成少數幾個幾何以壓低 draw call。
+// 外牆為中性的程序窗格貼圖（依建築類型分桶、幾組低彩度顏色），夜晚以 emissiveMap 讓部分窗戶亮起。
+// 不為任何建築杜撰特色造型；具名建築只在屋頂上方加一塊中性的名稱牌。
+// 地標實景外觀由 src/landmarks/ 依 manifest 載入的 glb 提供：footprint 為 true 的 id 不走通用擠出與名稱牌，碰撞仍用 OSM 輪廓。
 import * as THREE from 'three';
-import { LANDMARKS, CITY_SEED } from './data/city.js';
-import { makeCanvas, mulberry32, randRange, randPick, rectsOverlap } from './utils.js';
+import { buildings } from './citymodel.js';
+import { triangulate } from './geom.js';
+import { makeCanvas, mulberry32, buildTextAtlas, fitText } from './utils.js';
 import { registerNight } from './daynight.js';
 
-// 一張窗戶貼圖 = 8 開間 × 8 層
-const BAY = 3.5;
-const FLOOR = 3.3;
-const TEX_U = BAY * 8;
-const TEX_V = FLOOR * 8;
-
-const PALETTE = {
-  luxury: ['#e8e2d6', '#d9d4cb', '#c9c2b5', '#f0ece4', '#b8b2a8', '#a9adb2', '#d6cbb8'],
-  office: ['#8fa7bd', '#7d93a8', '#a8bccb', '#6f8599', '#9fb3c0'],
-  low: ['#d8cfc0', '#c4b8a5', '#b9b0a3', '#e0d8ca'],
-  crown: ['#6c6f75', '#55585e', '#7d7a72'],
+// 材質分桶：floor 為每層高（與 tools/build-city.mjs 的高度規則一致）、bay 為開間寬
+const BUCKETS = {
+  residential: {
+    floor: 3.3, bay: 3.4, windows: 'residential',
+    colors: ['#d9d4ca', '#cfc8bc', '#c4bfb6', '#e2ded6', '#b9b5ae', '#cbc6bf'],
+  },
+  office: {
+    floor: 3.3, bay: 3.6, windows: 'office',
+    colors: ['#a9b0b6', '#9ea6ad', '#b7bcc0', '#8f989f', '#c2c5c7'],
+  },
+  commercial: {
+    floor: 4.5, bay: 4.2, windows: 'commercial',
+    colors: ['#c9c6c0', '#bdbab4', '#d3d0ca', '#aeb0b1', '#b8b3aa'],
+  },
+  generic: {
+    floor: 3.3, bay: 3.6, windows: 'generic',
+    colors: ['#cdc8bf', '#bfbab2', '#b3b0aa', '#d6d2cb', '#c2beb8'],
+  },
+  plain: {
+    floor: 3.3, bay: 4, windows: null,
+    colors: ['#a7a59f', '#9b9993', '#b1aea7'],
+  },
 };
 
-function makeWindowTextures(anisotropy) {
+function bucketOf(type) {
+  switch (type) {
+    case 'apartments':
+    case 'residential':
+    case 'house':
+    case 'hotel':
+    case 'dormitory':
+      return 'residential';
+    case 'office':
+    case 'government':
+      return 'office';
+    case 'retail':
+    case 'commercial':
+    case 'public':
+    case 'supermarket':
+      return 'commercial';
+    case 'construction':
+    case 'roof':
+      return 'plain';
+    default:
+      return 'generic';
+  }
+}
+
+// 窗格貼圖：一張 = 8 開間 × 8 層；左上角留一塊純牆色給頂面與無窗牆面取樣
+function makeWindowTextures(style, anisotropy, seed) {
   const S = 256;
   const cell = S / 8;
   const wall = makeCanvas(S, S);
@@ -29,19 +68,28 @@ function makeWindowTextures(anisotropy) {
   const lctx = lit.getContext('2d');
   lctx.fillStyle = '#000000';
   lctx.fillRect(0, 0, S, S);
-  const rng = mulberry32(777);
+  const rng = mulberry32(seed);
   const warm = ['#ffd9a0', '#ffe8c0', '#fff2d8', '#ffc98a'];
+  // 各類型的窗洞比例（相對一格）：[左右留白, 上留白, 下留白]
+  const inset = {
+    residential: [7, 7, 9],
+    office: [3, 6, 6],
+    commercial: [4, 9, 7],
+    generic: [6, 7, 8],
+  }[style];
   for (let i = 0; i < 8; i++) {
     for (let j = 0; j < 8; j++) {
-      const x = i * cell + 6;
-      const y = j * cell + 6;
-      const w = cell - 12;
-      const h = cell - 13;
-      wctx.fillStyle = '#5f6d7c';
+      // 保留 (0, 7) 這一格（畫布左下角 = UV 原點附近）為純牆
+      if (i === 0 && j === 7) continue;
+      const x = i * cell + inset[0];
+      const y = j * cell + inset[1];
+      const w = cell - inset[0] * 2;
+      const h = cell - inset[1] - inset[2];
+      wctx.fillStyle = '#5f6b77';
       wctx.fillRect(x, y, w, h);
-      wctx.fillStyle = '#7d8b99';
-      wctx.fillRect(x, y, w, 3);
-      if (rng() < 0.42) {
+      wctx.fillStyle = '#7b8792';
+      wctx.fillRect(x, y, w, 2);
+      if (rng() < 0.4) {
         lctx.fillStyle = warm[Math.floor(rng() * warm.length)];
         lctx.fillRect(x, y, w, h);
       }
@@ -58,53 +106,27 @@ function makeWindowTextures(anisotropy) {
   return { map: toTex(wall), emissiveMap: toTex(lit) };
 }
 
-// 合併幾何的寫入器
-class BoxWriter {
+// 純牆色取樣點（貼圖保留的純牆格）
+const SOLID_UV = [0.06, 0.06];
+
+// 合併幾何寫入器（非索引三角形）
+class MeshWriter {
   constructor() {
     this.pos = [];
     this.nor = [];
     this.uv = [];
     this.col = [];
-    this.idx = [];
-    this.count = 0;
   }
 
-  quad(p0, p1, p2, p3, n, uvs, color) {
-    const base = this.count;
-    for (const p of [p0, p1, p2, p3]) this.pos.push(p[0], p[1], p[2]);
-    for (let i = 0; i < 4; i++) {
-      this.nor.push(n[0], n[1], n[2]);
-      this.col.push(color.r, color.g, color.b);
-    }
-    for (const t of uvs) this.uv.push(t[0], t[1]);
-    this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    this.count += 4;
+  vert(x, y, z, nx, ny, nz, u, v, c) {
+    this.pos.push(x, y, z);
+    this.nor.push(nx, ny, nz);
+    this.uv.push(u, v);
+    this.col.push(c.r, c.g, c.b);
   }
 
-  // 軸對齊方塊（不含底面）；windows=false 時整面取貼圖角落的純牆色
-  box(x0, z0, x1, z1, y0, y1, color, windows, uOff = 0, vOff = 0) {
-    const H = y1 - y0;
-    const faceUV = (L) => {
-      if (!windows) return [[0.005, 0.005], [0.005, 0.005], [0.005, 0.005], [0.005, 0.005]];
-      const u0 = uOff;
-      const u1 = uOff + L / TEX_U;
-      const v0 = vOff;
-      const v1 = vOff + H / TEX_V;
-      return [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-    };
-    const dx = x1 - x0;
-    const dz = z1 - z0;
-    // +X
-    this.quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0], faceUV(dz), color);
-    // -X
-    this.quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0], faceUV(dz), color);
-    // +Z
-    this.quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1], faceUV(dx), color);
-    // -Z
-    this.quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1], faceUV(dx), color);
-    // 頂面
-    const roofUV = [[0.005, 0.005], [0.005, 0.005], [0.005, 0.005], [0.005, 0.005]];
-    this.quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0], roofUV, color);
+  get empty() {
+    return this.pos.length === 0;
   }
 
   toGeometry() {
@@ -113,108 +135,226 @@ class BoxWriter {
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    geo.setIndex(this.idx);
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
     return geo;
   }
 }
 
-// cells：world.computeCells() 的結果
-// 回傳 { mesh, boxes（碰撞用）, footprints（小地圖用） }
-export function buildBuildings(scene, cells, { anisotropy = 4 } = {}) {
-  const rng = mulberry32(CITY_SEED);
-  const writer = new BoxWriter();
-  const boxes = [];
-  const footprints = [];
-  const color = new THREE.Color();
-  const crownColor = new THREE.Color();
-
-  const zones = LANDMARKS.map((lm) => lm.zone);
-
-  const place = (sub) => {
-    const sw = sub.x1 - sub.x0;
-    const sd = sub.z1 - sub.z0;
-    const gap = 4;
-    const r = rng();
-    let type;
-    let fw;
-    let fd;
-    let h;
-    if (r < 0.5 && sw > 22 && sd > 22) {
-      type = 'luxury';
-      fw = Math.min(sw - gap * 2, randRange(rng, 20, 34));
-      fd = Math.min(sd - gap * 2, randRange(rng, 20, 32));
-      h = Math.round(randRange(rng, 16, 38)) * FLOOR;
-    } else if (r < 0.82 && sw > 18 && sd > 18) {
-      type = 'office';
-      fw = Math.min(sw - gap * 2, randRange(rng, 24, 44));
-      fd = Math.min(sd - gap * 2, randRange(rng, 18, 34));
-      h = Math.round(randRange(rng, 9, 24)) * FLOOR;
+// 擠出一棟建築：側牆（每條邊一個面，UV 以公尺計讓窗格連續）+ 頂面（耳切三角化）
+// 輪廓為北方朝上逆時針 → (x, z) 平面外法線 = (-ez, ex)，三角形 (a, b, b頂) 朝外
+function extrude(writer, b, bucket, wallColor, roofColor, uOff, vOff) {
+  const p = b.poly;
+  const n = p.length / 2;
+  const h = b.height;
+  const texU = bucket.bay * 8;
+  const texV = bucket.floor * 8;
+  const windows = !!bucket.windows;
+  let run = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const ax = p[i * 2];
+    const az = p[i * 2 + 1];
+    const bx = p[j * 2];
+    const bz = p[j * 2 + 1];
+    const ex = bx - ax;
+    const ez = bz - az;
+    const L = Math.hypot(ex, ez);
+    if (L < 1e-3) continue;
+    const nx = -ez / L;
+    const nz = ex / L;
+    let u0;
+    let u1;
+    let v0;
+    let v1;
+    if (windows) {
+      // 開間對齊：每面牆從整數開間起算，避免窗戶被牆角切半
+      u0 = uOff + Math.round(run / bucket.bay) / 8;
+      u1 = u0 + L / texU;
+      v0 = vOff;
+      v1 = vOff + h / texV;
     } else {
-      type = 'low';
-      fw = sw - 3 * 2;
-      fd = sd - 3 * 2;
-      h = Math.round(randRange(rng, 3, 6)) * FLOOR;
+      u0 = u1 = SOLID_UV[0];
+      v0 = v1 = SOLID_UV[1];
     }
-    if (fw < 8 || fd < 8) return;
-    const cx = (sub.x0 + sub.x1) / 2 + (sw - fw - gap * 2) * (rng() - 0.5) * 0.8;
-    const cz = (sub.z0 + sub.z1) / 2 + (sd - fd - gap * 2) * (rng() - 0.5) * 0.8;
-    const x0 = cx - fw / 2;
-    const x1 = cx + fw / 2;
-    const z0 = cz - fd / 2;
-    const z1 = cz + fd / 2;
-    color.set(randPick(rng, PALETTE[type]));
-    const uOff = Math.floor(rng() * 8) / 8;
-    const vOff = Math.floor(rng() * 8) / 8;
-    writer.box(x0, z0, x1, z1, 0, h, color, true, uOff, vOff);
-    // 塔樓頂部機房
-    if (type !== 'low') {
-      crownColor.set(randPick(rng, PALETTE.crown));
-      const k = randRange(rng, 0.45, 0.7);
-      const hw = (fw * k) / 2;
-      const hd = (fd * k) / 2;
-      writer.box(cx - hw, cz - hd, cx + hw, cz + hd, h, h + randRange(rng, 3, 6), crownColor, false);
+    run += L;
+    writer.vert(ax, 0, az, nx, 0, nz, u0, v0, wallColor);
+    writer.vert(bx, 0, bz, nx, 0, nz, u1, v0, wallColor);
+    writer.vert(bx, h, bz, nx, 0, nz, u1, v1, wallColor);
+    writer.vert(ax, 0, az, nx, 0, nz, u0, v0, wallColor);
+    writer.vert(bx, h, bz, nx, 0, nz, u1, v1, wallColor);
+    writer.vert(ax, h, az, nx, 0, nz, u0, v1, wallColor);
+  }
+  const tris = triangulate(p);
+  for (let k = 0; k < tris.length; k += 3) {
+    let i0 = tris[k];
+    let i1 = tris[k + 1];
+    let i2 = tris[k + 2];
+    // 確保頂面朝上（(x, z) 平面上為順時針）
+    const cr = (p[i1 * 2] - p[i0 * 2]) * (p[i2 * 2 + 1] - p[i0 * 2 + 1]) - (p[i1 * 2 + 1] - p[i0 * 2 + 1]) * (p[i2 * 2] - p[i0 * 2]);
+    if (cr > 0) {
+      const t = i1;
+      i1 = i2;
+      i2 = t;
     }
-    boxes.push({ x0, x1, z0, z1, h, name: type });
-    footprints.push({ x0, x1, z0, z1, h, type });
-  };
+    for (const q of [i0, i1, i2]) writer.vert(p[q * 2], h, p[q * 2 + 1], 0, 1, 0, SOLID_UV[0], SOLID_UV[1], roofColor);
+  }
+}
 
-  for (const cell of cells) {
-    const L = cell.lot;
-    const w = L.x1 - L.x0;
-    const d = L.z1 - L.z0;
-    if (w < 12 || d < 12) continue;
-    if (zones.some((z) => rectsOverlap(z, L))) continue;
-    const nx = Math.max(1, Math.round(w / 45));
-    const nz = Math.max(1, Math.round(d / 50));
-    for (let i = 0; i < nx; i++) {
-      for (let j = 0; j < nz; j++) {
-        place({
-          x0: L.x0 + (w * i) / nx,
-          x1: L.x0 + (w * (i + 1)) / nx,
-          z0: L.z0 + (d * j) / nz,
-          z1: L.z0 + (d * (j + 1)) / nz,
-        });
-      }
+// ---------- 名稱牌（所有具名建築共用字卡圖集） ----------
+const PLATE_W = 512;
+const PLATE_H = 112;
+const PLATE_ASPECT = PLATE_W / PLATE_H;
+
+function drawPlate(ctx, x, y, w, h, text) {
+  ctx.fillStyle = '#2d3136';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#c9ccd0';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(x + 4, y + 4, w - 8, h - 8);
+  fitText(ctx, text, x + w / 2, y + h / 2, w * 0.88, 64);
+  ctx.fillStyle = '#f2f2f2';
+  ctx.fillText(text, x + w / 2, y + h / 2 + 2);
+}
+
+// 名稱牌位置：沿最長邊（主立面）內縮，立在屋頂上
+function platePlacement(b) {
+  const p = b.poly;
+  const n = p.length / 2;
+  let best = 0;
+  let bestL = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const L = Math.hypot(p[j * 2] - p[i * 2], p[j * 2 + 1] - p[i * 2 + 1]);
+    if (L > bestL) {
+      bestL = L;
+      best = i;
     }
   }
+  const j = (best + 1) % n;
+  const ax = p[best * 2];
+  const az = p[best * 2 + 1];
+  const tx = (p[j * 2] - ax) / bestL;
+  const tz = (p[j * 2 + 1] - az) / bestL;
+  const nx = -tz; // 外法線
+  const nz = tx;
+  const width = Math.max(5, Math.min(36, bestL * 0.6));
+  const inset = Math.min(2, width * 0.1);
+  return {
+    cx: ax + tx * bestL * 0.5 - nx * inset,
+    cz: az + tz * bestL * 0.5 - nz * inset,
+    tx, tz, nx, nz, width, height: width / PLATE_ASPECT,
+  };
+}
 
-  const tex = makeWindowTextures(anisotropy);
-  const material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    map: tex.map,
-    emissiveMap: tex.emissiveMap,
-    emissive: 0xffffff,
-    emissiveIntensity: 0,
-    roughness: 0.75,
-    metalness: 0.05,
+function buildPlates(scene, list, anisotropy) {
+  const group = new THREE.Group();
+  group.name = 'name-plates';
+  const atlas = buildTextAtlas(list.map((b) => b.name), PLATE_W, PLATE_H, drawPlate, { anisotropy });
+  const perAtlas = atlas.textures.map(() => ({ pos: [], uv: [] }));
+  list.forEach((b, k) => {
+    const cell = atlas.cells[k];
+    const out = perAtlas[cell.atlas];
+    const pl = platePlacement(b);
+    const y0 = b.height + 0.6;
+    const y1 = y0 + pl.height;
+    const hw = pl.width / 2;
+    // 正面朝外（文字沿輪廓方向由左到右），背面朝內；兩面各自對應 UV，都不鏡像
+    for (const side of [1, -1]) {
+      const ox = pl.cx + pl.nx * 0.08 * side;
+      const oz = pl.cz + pl.nz * 0.08 * side;
+      const rx = pl.tx * side;
+      const rz = pl.tz * side;
+      const lbx = ox - rx * hw;
+      const lbz = oz - rz * hw;
+      const rbx = ox + rx * hw;
+      const rbz = oz + rz * hw;
+      out.pos.push(lbx, y0, lbz, rbx, y0, rbz, rbx, y1, rbz);
+      out.pos.push(lbx, y0, lbz, rbx, y1, rbz, lbx, y1, lbz);
+      out.uv.push(cell.u0, cell.v0, cell.u1, cell.v0, cell.u1, cell.v1, cell.u0, cell.v0, cell.u1, cell.v1, cell.u0, cell.v1);
+    }
   });
-  registerNight(material, 1.3);
-  const mesh = new THREE.Mesh(writer.toGeometry(), material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.name = 'buildings';
-  scene.add(mesh);
-  return { mesh, boxes, footprints };
+  const meshes = perAtlas.map((d, a) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(d.pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(d.uv, 2));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: atlas.textures[a], toneMapped: false }));
+    group.add(mesh);
+    return mesh;
+  });
+  scene.add(group);
+  return { group, count: list.length, meshes };
+}
+
+// landmarks：src/landmarks/index.js 的 loadLandmarkModels() 結果（Map<wayId, { entry, object }>）
+// 回傳 { meshes, colliders: [{ poly, h, name }], plates, overridden: [id], landmarkObjects }
+export function buildBuildings(scene, { anisotropy = 4, landmarks = new Map() } = {}) {
+  const writers = {};
+  for (const key of Object.keys(BUCKETS)) writers[key] = new MeshWriter();
+  const colliders = [];
+  const overridden = [];
+  const plateList = [];
+  const wall = new THREE.Color();
+  const roof = new THREE.Color();
+
+  for (const b of buildings) {
+    const lm = landmarks.get(b.id);
+    if (lm && lm.entry.footprint === true) {
+      const h = Number.isFinite(lm.entry.height) && lm.entry.height > 0 ? lm.entry.height : b.height;
+      colliders.push({ poly: b.poly, h, name: b.name || lm.entry.name || b.type });
+      overridden.push(b.id);
+      continue;
+    }
+    const key = bucketOf(b.type);
+    const bucket = BUCKETS[key];
+    const rng = mulberry32(b.id);
+    wall.set(bucket.colors[Math.floor(rng() * bucket.colors.length) % bucket.colors.length]);
+    roof.copy(wall).multiplyScalar(0.78);
+    const uOff = Math.floor(rng() * 8) / 8;
+    const vOff = Math.floor(rng() * 8) / 8;
+    extrude(writers[key], b, bucket, wall, roof, uOff, vOff);
+    colliders.push({ poly: b.poly, h: b.height, name: b.name || b.type });
+    if (b.name) plateList.push(b);
+  }
+
+  const meshes = [];
+  let seed = 777;
+  for (const [key, bucket] of Object.entries(BUCKETS)) {
+    const w = writers[key];
+    if (w.empty) continue;
+    let material;
+    if (bucket.windows) {
+      const tex = makeWindowTextures(bucket.windows, anisotropy, seed++);
+      material = new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        map: tex.map,
+        emissiveMap: tex.emissiveMap,
+        emissive: 0xffffff,
+        emissiveIntensity: 0,
+        roughness: 0.78,
+        metalness: 0.05,
+      });
+      registerNight(material, 1.3);
+    } else {
+      material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.02 });
+    }
+    const mesh = new THREE.Mesh(w.toGeometry(), material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.name = `buildings-${key}`;
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+
+  // 地標模型（footprint 為 false 的模型與通用擠出並存）
+  const landmarkObjects = [];
+  for (const { object } of landmarks.values()) {
+    scene.add(object);
+    landmarkObjects.push(object);
+  }
+
+  const plates = buildPlates(scene, plateList, anisotropy);
+  return { meshes, colliders, plates, overridden, landmarkObjects };
 }

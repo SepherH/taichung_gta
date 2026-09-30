@@ -44,15 +44,6 @@ export function randPick(rng, arr) {
   return arr[Math.floor(rng() * arr.length) % arr.length];
 }
 
-// 矩形是否重疊（{x0,x1,z0,z1}）
-export function rectsOverlap(a, b) {
-  return a.x0 < b.x1 && a.x1 > b.x0 && a.z0 < b.z1 && a.z1 > b.z0;
-}
-
-export function pointInRect(x, z, r) {
-  return x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
-}
-
 // 系統字型堆疊（不下載任何字型）
 export const FONT_STACK = '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", "Noto Sans CJK TC", sans-serif';
 
@@ -108,8 +99,10 @@ export function makeTextTexture(text, opts = {}) {
 
 // 等下一個畫格（讓載入進度條有機會更新）
 export function nextFrame() {
+  // 背景分頁不跑 requestAnimationFrame：以逾時保底，載入不會卡在切到別的分頁時
   return new Promise((resolve) => {
     requestAnimationFrame(() => resolve());
+    setTimeout(resolve, 60);
   });
 }
 
@@ -123,4 +116,53 @@ export function cachedStandardMaterial(color, extra = {}) {
     materialCache.set(key, m);
   }
   return m;
+}
+
+// 文字圖集：把多段文字畫進少數幾張大畫布（減少貼圖與 draw call）
+// draw(ctx, x, y, w, h, text) 負責畫一格；回傳 { textures: [CanvasTexture], cells: [{ atlas, u0, v0, u1, v1 }] }
+export function buildTextAtlas(texts, cellW, cellH, draw, { size = 2048, anisotropy = 4 } = {}) {
+  const cols = Math.max(1, Math.floor(size / cellW));
+  const rows = Math.max(1, Math.floor(size / cellH));
+  const per = cols * rows;
+  const textures = [];
+  const cells = [];
+  for (let a = 0; a * per < texts.length; a++) {
+    const items = texts.slice(a * per, (a + 1) * per);
+    const usedRows = Math.ceil(items.length / cols);
+    const H = Math.min(size, 2 ** Math.ceil(Math.log2(Math.max(1, usedRows * cellH))));
+    const canvas = makeCanvas(size, H);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, H);
+    items.forEach((text, k) => {
+      const col = k % cols;
+      const row = Math.floor(k / cols);
+      draw(ctx, col * cellW, row * cellH, cellW, cellH, text);
+      // CanvasTexture 預設 flipY：v = 1 為畫布上緣
+      cells.push({
+        atlas: a,
+        u0: (col * cellW) / size,
+        u1: ((col + 1) * cellW) / size,
+        v1: 1 - (row * cellH) / H,
+        v0: 1 - ((row + 1) * cellH) / H,
+      });
+    });
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = anisotropy;
+    textures.push(tex);
+  }
+  return { textures, cells };
+}
+
+// 在畫布一格內畫置中文字（太長自動縮小字級）
+export function fitText(ctx, text, cx, cy, maxW, size, weight = 'bold') {
+  ctx.font = `${weight} ${size}px ${FONT_STACK}`;
+  const w = ctx.measureText(text).width;
+  if (w > maxW) {
+    size = Math.max(12, Math.floor(size * (maxW / w)));
+    ctx.font = `${weight} ${size}px ${FONT_STACK}`;
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  return size;
 }
