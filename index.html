@@ -2,7 +2,12 @@
 <html lang="zh-Hant-TW">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0a0f24" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <title>臺中GTA · 七期老虎城（prototype）</title>
   </head>
   <body>
@@ -26,6 +31,7 @@
             <li><b>Space</b> 跳躍</li>
             <li><b>滑鼠拖曳</b> 轉視角（點擊畫面可鎖定滑鼠，Esc 解除）</li>
             <li><b>滾輪</b> 縮放鏡頭</li>
+            <li><b>E</b> / <b>滑鼠左鍵</b> 揮拳</li>
             <li><b>F</b> 上車 / 下車</li>
           </ul>
           <div class="help-group">駕駛</div>
@@ -33,6 +39,7 @@
             <li><b>W / S</b> 油門 / 煞車倒車</li>
             <li><b>A / D</b> 轉向</li>
             <li><b>Space</b> 手煞車</li>
+            <li><b>R</b> 翻車自救（翻正車身）</li>
           </ul>
           <div class="help-group">其他</div>
           <ul>
@@ -41,9 +48,15 @@
           </ul>
         </div>
       </div>
+      <div id="touch-hint">左半邊拖曳移動 · 右半邊拖曳轉視角 · 雙指捏合縮放</div>
       <div id="prompt" class="hidden"></div>
       <div id="toast" class="hidden"></div>
     </div>
+
+    <!-- 手機：直向遮罩（純 CSS 控制）、上滑全螢幕遮罩、回到全螢幕按鈕 -->
+    <div id="rotate-mask"><div class="rotate-icon">📱</div><div>請轉為橫向</div></div>
+    <div id="swipe-up" class="hidden"><div class="swipe-arrow">⬆</div><div>往上滑，進入全螢幕</div></div>
+    <button id="fs-back" class="hidden" type="button">點一下，回到全螢幕</button>
 
     <!-- 載入畫面 -->
     <div id="loading">

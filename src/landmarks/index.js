@@ -1,20 +1,33 @@
 // 地標模型：依 public/models/manifest.json 載入實景 glb，取代對應 OSM 建築的通用擠出。
 //
 // manifest.json：陣列，每筆
-//   { id（OSM way id）, name, file（同目錄下的 .glb 檔名）, anchorLat, anchorLon, height, heightSource,
+//   { id（OSM way id；沒有 OSM 輪廓的物件為字串 id，如 qiuhonggu_pavilion）, name, file（同目錄下的 .glb 檔名）, anchorLat, anchorLon, height, heightSource,
 //     footprint（true = 取代通用擠出與通用名稱牌）, notes }
 // glb 契約：單位公尺；模型原點 = anchorLat / anchorLon 的地面點；+X 東、+Y 上、−Z 北（與世界座標 x 東 / z 南一致，不旋轉）。
-// 物件名稱以「sign:」開頭的平面為招牌佔位：執行期貼上冒號後的文字（置中、不鏡像、夜間自發光）。
+// 物件名稱以「sign:」開頭的平面為招牌佔位：執行期貼上冒號後的文字（置中、不鏡像、夜間自發光）；
+//   Blender 重複名稱的「.001」等結尾「.數字」後綴不是文字的一部分，取字時去掉（docs/models/README.md 座標約定）。
 //
 // 缺檔（manifest 不存在）→ 安靜回傳空表，全部走通用擠出；單一模型載入失敗 → console.warn 並退回通用擠出。
 // 碰撞一律沿用 OSM 輪廓（buildings.js 負責）。
+// 擺放高度（原點 y）依 manifest 各筆 notes 的「原點 z=0 = …」決定基準（datumOf）：
+//   湖水面（紅橋）→ 錨點所在湖的水面 terrain.lakes[].y（= osm T.basins[].levels.water）；
+//   路面（展示館）→ 錨點所在盆地的路面高 levels.road，不在盆地內則取錨點高度場；
+//   其他 → terrain.landmarkBase(id)（唯一高度場；有輪廓者 = 建築平台，不在 patch 內者為 0）。
+// 招牌等附屬物是模型子節點，隨根節點同一基準。
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import osm from '../data/osm-city.json';
 import { makeCanvas, fitText } from '../utils.js';
 import { registerNight } from '../daynight.js';
+import { getTerrain } from '../citymodel.js';
+import { pointInPolygon } from '../geom.js';
 
-const MODEL_DIR = `${import.meta.env.BASE_URL}models/`;
+// 路徑相對 Vite base（'./'）；Node 無頭測試沒有 import.meta.env 時同樣取 './'
+const MODEL_DIR = `${(import.meta.env && import.meta.env.BASE_URL) || './'}models/`;
+// notes 內的原點高度說明，例「原點 z=0 = 湖水面，推測…」「原點 z=0 = 北端路面高度（…）」
+const DATUM_RE = /原點\s*z\s*=\s*0\s*=\s*([^，。；,;（(]+)/;
+// Blender 重複物件名稱的結尾後綴（sign:市政府站.001）
+const BLENDER_SUFFIX = /\.\d+$/;
 
 // 與 tools/build-city.mjs 完全相同的投影（原點與係數由轉檔工具輸出）
 export function projectLatLon(lat, lon) {
@@ -42,9 +55,37 @@ async function fetchManifest(url) {
 
 function validEntry(e) {
   return (
-    e && Number.isFinite(Number(e.id)) && typeof e.file === 'string' && e.file && !e.file.includes('/') &&
+    e && (Number.isFinite(Number(e.id)) || (typeof e.id === 'string' && e.id !== '')) &&
+    typeof e.file === 'string' && e.file && !e.file.includes('/') &&
     Number.isFinite(e.anchorLat) && Number.isFinite(e.anchorLon)
   );
+}
+
+// 結果表的 key：OSM way id 用數字（與 citymodel buildings 的 id 相同），字串 id 原樣
+function entryKey(e) {
+  return Number.isFinite(Number(e.id)) ? Number(e.id) : e.id;
+}
+
+// 原點基準：'water'（湖水面）/ 'road'（路面）/ 'landmarkBase'（預設）
+export function datumOf(entry) {
+  const m = DATUM_RE.exec(entry.notes || '');
+  if (m && m[1].includes('水面')) return 'water';
+  if (m && m[1].includes('路面')) return 'road';
+  return 'landmarkBase';
+}
+
+// 依基準求原點 y（x, z = 錨點世界座標）
+export function originHeight(entry, x, z, terrain = getTerrain()) {
+  const datum = datumOf(entry);
+  if (datum === 'water') {
+    const lake = terrain.lakes.find((l) => pointInPolygon(x, z, l.poly)) || terrain.lakes[0];
+    return lake ? lake.y : osm.T.basins[0].levels.water;
+  }
+  if (datum === 'road') {
+    const basin = (osm.T.basins || []).find((b) => pointInPolygon(x, z, b.p));
+    return basin ? basin.levels.road : terrain.heightAt(x, z);
+  }
+  return terrain.landmarkBase(entry.id, x, z);
 }
 
 // 招牌：依平面實際寬高比畫字卡，自行計算 UV（從平面正面看文字由左到右、正立）
@@ -121,6 +162,7 @@ function applySign(mesh, text) {
   });
   registerNight(mat, 1.1);
   mesh.material = mat;
+  mesh.userData.signText = text;
 }
 
 // 整理模型：陰影、招牌、夜間發光
@@ -135,7 +177,7 @@ function prepareModel(root) {
     const signName = [o.userData.name, o.name, o.parent && o.parent.userData.name]
       .find((nm) => typeof nm === 'string' && nm.startsWith('sign:'));
     if (signName) {
-      signs.push([o, signName.slice(5).trim()]);
+      signs.push([o, signName.slice(5).trim().replace(BLENDER_SUFFIX, '')]);
       return;
     }
     for (const mat of Array.isArray(o.material) ? o.material : [o.material]) {
@@ -148,7 +190,7 @@ function prepareModel(root) {
   for (const [mesh, text] of signs) if (text) applySign(mesh, text);
 }
 
-// 載入所有地標模型；回傳 Map<wayId, { entry, object }>（object 已擺到世界座標，尚未加入場景）
+// 載入所有地標模型；回傳 Map<id, { entry, object }>（OSM way id 為數字 key、字串 id 原樣；object 已擺到世界座標，尚未加入場景）
 // onProgress(done, total, name)：每完成一個模型呼叫一次
 export async function loadLandmarkModels(onProgress = () => {}) {
   const result = new Map();
@@ -167,12 +209,13 @@ export async function loadLandmarkModels(onProgress = () => {}) {
         const gltf = await loader.loadAsync(`${MODEL_DIR}${e.file}`);
         const root = gltf.scene;
         const p = projectLatLon(e.anchorLat, e.anchorLon);
-        root.position.set(p.x, 0, p.z);
+        root.position.set(p.x, originHeight(e, p.x, p.z), p.z);
         root.name = `landmark-${e.id}`;
         root.userData.landmark = e;
+        root.userData.datum = datumOf(e);
         root.updateMatrixWorld(true);
         prepareModel(root);
-        result.set(Number(e.id), { entry: e, object: root });
+        result.set(entryKey(e), { entry: e, object: root });
       } catch (err) {
         console.warn(`[landmarks] ${e.name || e.id}（${e.file}）載入失敗，退回通用擠出：`, err && err.message ? err.message : err);
       }

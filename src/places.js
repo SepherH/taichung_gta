@@ -1,8 +1,21 @@
 // 依 OSM 資料計算出生點與路邊停放車輛的位置（不寫死座標）
+// y 一律取 querySurface（唯一高度場）；出生點 / 停車點不落在湖面，坡度 > PLACE_MAX_SLOPE 的點不用
 import { TIGER_CITY_ID, SPAWN_ROAD_NAME, PARKED_TYPES, PARKED_RADIUS } from './data/city.js';
-import { buildingById, surfaceRoads, buildingAt, onRoadSurface, junctionClearance, inBounds, inWater } from './citymodel.js';
+import { buildingById, surfaceRoads, buildingAt, onRoadSurface, junctionClearance, inBounds, inWater, querySurface } from './citymodel.js';
 import { closestOnSegment, distanceToPolygon, polygonCentroid } from './geom.js';
 import { VEHICLE_TYPES } from './vehicle.js';
+
+const PLACE_MAX_SLOPE = 12; // 出生 / 停車允許的最大地面坡度（°）
+const MIN_NY = Math.cos((PLACE_MAX_SLOPE * Math.PI) / 180);
+const _q = {};
+
+// 可放置：不在湖面範圍、地面坡度 ≤ PLACE_MAX_SLOPE；回傳地面 y，不可放置回傳 null
+function surfaceY(x, z) {
+  querySurface(x, z, Infinity, _q);
+  if (_q.waterY !== null && !_q.walkable) return null;
+  if (_q.ny < MIN_NY) return null;
+  return _q.y;
+}
 
 // 取得老虎城建築（找不到時退回原點）
 export function tigerCity() {
@@ -10,7 +23,7 @@ export function tigerCity() {
 }
 
 // 出生點：老虎城輪廓外、靠河南路三段那一側的人行鋪面上，面向老虎城
-// yaw 定義：前進方向 = (sin(yaw), cos(yaw))
+// yaw 定義：前進方向 = (sin(yaw), cos(yaw))；回傳 { x, y, z, yaw, … }
 export function computeSpawn() {
   const tiger = tigerCity();
   const c = tiger ? polygonCentroid(tiger.poly) : { x: 0, z: 0 };
@@ -24,7 +37,11 @@ export function computeSpawn() {
       if (!best || seg.d2 < best.d2) best = { x: seg.x, z: seg.z, d2: seg.d2, road: r };
     }
   }
-  if (!best || !tiger) return { x: c.x, z: c.z + 80, yaw: Math.PI, fallback: true };
+  if (!best || !tiger) {
+    const x = c.x;
+    const z = c.z + 80;
+    return { x, y: querySurface(x, z, Infinity, _q).y, z, yaw: Math.PI, fallback: true };
+  }
   const d = Math.sqrt(best.d2) || 1;
   const ux = (c.x - best.x) / d;
   const uz = (c.z - best.z) / d;
@@ -38,11 +55,15 @@ export function computeSpawn() {
     if (dist < 3) break;
     if (buildingAt(x, z, 1)) continue;
     if (onRoadSurface(x, z, 0.6, false)) continue;
-    return { x, z, yaw, road: best.road.name };
+    const y = surfaceY(x, z);
+    if (y === null) continue;
+    return { x, y, z, yaw, road: best.road.name };
   }
   // 沿線找不到：退回路緣外 3m
   const t = best.road.hw + 3;
-  return { x: best.x + ux * t, z: best.z + uz * t, yaw, road: best.road.name, fallback: true };
+  const x = best.x + ux * t;
+  const z = best.z + uz * t;
+  return { x, y: querySurface(x, z, Infinity, _q).y, z, yaw, road: best.road.name, fallback: true };
 }
 
 // 路邊停放車輛：老虎城周邊 PARKED_RADIUS 內道路的路邊（貼近路緣、順著道路方向），由近到遠挑
@@ -97,13 +118,13 @@ export function computeParkedVehicles(spawn) {
       for (const k of [-1, 0, 1]) {
         const qx = x + fx * half * k;
         const qz = z + fz * half * k;
-        if (buildingAt(qx, qz, vt.width / 2 + 0.3) || onRoadSurface(qx, qz, -0.5, false, cd.r) || inWater(qx, qz, 1)) {
+        if (buildingAt(qx, qz, vt.width / 2 + 0.3) || onRoadSurface(qx, qz, -0.5, false, cd.r) || inWater(qx, qz, 1) || surfaceY(qx, qz) === null) {
           ok = false;
           break;
         }
       }
       if (!ok) continue;
-      placed = { type: spec.type, color: spec.color, x, z, yaw: Math.atan2(fx, fz), road: cd.r.name };
+      placed = { type: spec.type, color: spec.color, x, y: surfaceY(x, z), z, yaw: Math.atan2(fx, fz), road: cd.r.name };
       break;
     }
     if (placed) {

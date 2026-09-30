@@ -1,10 +1,14 @@
 // HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、上車提示、地點提示
+// 觸控裝置（body.touch）版面由 style.css 重新配置；本檔負責依 state.driving 切換觸控按鈕配置、把鍵盤提示改成觸控用語
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
+import { isTouch } from './mobile.js';
+import { setTouchMode } from './touch.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
+const PLACE_TOAST = '📍 '; // main.js 進場地名 toast 的前綴：與地名 pill 同名時不重複顯示（見 toast()）
 
 export class HUD {
   constructor() {
@@ -21,6 +25,9 @@ export class HUD {
     this._lastLocation = '';
     this._lastPrompt = null;
     this._toastTimer = 0;
+    this._pendingPlace = null; // 待判斷的進場地名 toast（等本幀 pill 更新後再決定）
+    this.touch = isTouch();
+    this.enterBtn = null; // 觸控「上車」鈕：附近有車時加上 .ready 提示
     this.mapCanvas = this._buildMap();
   }
 
@@ -114,6 +121,12 @@ export class HUD {
   setPrompt(text) {
     if (text === this._lastPrompt) return;
     this._lastPrompt = text;
+    if (this.touch) {
+      // main.js 的提示文案是「按 F 上車（…）」，觸控時改指向按鈕
+      if (text) text = text.replace(/^按 F /, '點「上車」鈕 ');
+      if (!this.enterBtn) this.enterBtn = document.getElementById('tb-enter');
+      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!text);
+    }
     if (text) {
       this.promptEl.textContent = text;
       this.promptEl.classList.remove('hidden');
@@ -122,7 +135,17 @@ export class HUD {
     }
   }
 
+  // 進場地名 toast（PLACE_TOAST 開頭）與頂部地名 pill 重複：先暫存，update() 更新 pill 後，
+  // 只有「pill 看不到（隱藏 / 不在版面上）或被截斷、或 pill 顯示的不是這個地名」時才顯示，其餘 toast 照常立即顯示
   toast(text, seconds = 6) {
+    if (text.startsWith(PLACE_TOAST)) {
+      this._pendingPlace = { name: text.slice(PLACE_TOAST.length), text, seconds };
+      return;
+    }
+    this._showToast(text, seconds);
+  }
+
+  _showToast(text, seconds) {
     this.toastEl.textContent = text;
     this.toastEl.classList.remove('hidden');
     this._toastTimer = seconds;
@@ -130,9 +153,15 @@ export class HUD {
 
   // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers }
   update(dt, state) {
+    if (this.touch) setTouchMode(state.driving ? 'drive' : 'walk');
     if (state.location !== this._lastLocation) {
       this._lastLocation = state.location;
       this.locationEl.textContent = state.location;
+    }
+    if (this._pendingPlace) {
+      const p = this._pendingPlace;
+      this._pendingPlace = null;
+      if (!this._pillShows(p.name)) this._showToast(p.text, p.seconds);
     }
     if (state.driving) {
       this.speedEl.classList.remove('hidden');
@@ -146,6 +175,14 @@ export class HUD {
       if (this._toastTimer <= 0) this.toastEl.classList.add('hidden');
     }
     this._drawMinimap(state);
+  }
+
+  // 地名 pill 是否完整顯示 name：文字相同、HUD 與 pill 在版面上可見、未被 ellipsis 截斷
+  _pillShows(name) {
+    const el = this.locationEl;
+    if (el.textContent !== name || this.root.classList.contains('hidden') || !el.getClientRects().length) return false;
+    if (getComputedStyle(el).visibility === 'hidden') return false;
+    return el.scrollWidth <= el.clientWidth;
   }
 
   _drawMinimap(state) {

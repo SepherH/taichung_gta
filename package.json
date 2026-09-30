@@ -7,7 +7,19 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "build:city": "node tools/build-city.mjs"
+    "build:city": "node tools/build-city.mjs",
+    "test:city": "node tools/test/check-city.mjs",
+    "test:terrain": "node tools/test/terrain.mjs",
+    "test:placement": "node tools/test/placement.mjs",
+    "test:touch": "node tools/test/touch.mjs",
+    "test:physics": "node tools/test/physics-core.mjs",
+    "test:vehicle": "node tools/test/physics-vehicle.mjs",
+    "test:physinteg": "node tools/test/physics-integration.mjs",
+    "test:detail": "node tools/test/detail-stats.mjs",
+    "test:chars": "node tools/test/characters.mjs",
+    "test:combat": "node tools/test/combat.mjs",
+    "test:combatinteg": "node tools/test/combat-integration.mjs",
+    "test:all": "npm run test:city && npm run test:terrain && npm run test:placement && npm run test:touch && npm run test:physics && npm run test:vehicle && npm run test:physinteg && npm run test:detail && npm run test:chars && npm run test:combat && npm run test:combatinteg"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

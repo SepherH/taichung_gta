@@ -1,12 +1,22 @@
-// 第三人稱鏡頭：滑鼠拖曳 / pointer lock 轉視角、滾輪縮放、開車時自動回到車尾、避免穿進建築
+// 第三人稱鏡頭：滑鼠拖曳 / pointer lock 轉視角、滾輪縮放、開車時自動回到車尾、避免穿進建築與地形
+// 建築遮擋由 collision.sweep(目標, 鏡頭, 半徑) 取得可到達比例（遊戲本體 = PhysicsOccluder 的 Rapier 球體掃掠，見 collision.js）
+// 地形取 terrain（唯一高度場）：鏡頭不低於所在點地面（湖面範圍取水面）+ CAM_GROUND_CLEAR；
+// 目標 → 鏡頭連線每 GROUND_STEP 取樣地面，被邊坡擋住就把鏡頭拉近（秋紅谷坡下往外看時不鑽進邊坡）
 import * as THREE from 'three';
 import { clamp, angleDelta } from './utils.js';
 
+const CAM_GROUND_CLEAR = 0.4; // 鏡頭離地最小高度（m）
+const GROUND_STEP = 1; // 連線取地面樣本的間距（m）
+const RAY_GROUND_CLEAR = 0.2; // 連線上的點低於「地面 + 此值」視為被地形擋住（m）
+const CAM_RADIUS = 0.35; // 鏡頭碰撞半徑（m）
+
 export class CameraRig {
-  constructor(camera, collision, heightAt) {
+  // collision：需有 sweep(from, to, radius)；terrain：需有 querySurface（本檔只取高度場高度與水面，不站上 walkable）
+  constructor(camera, collision, terrain) {
     this.camera = camera;
     this.collision = collision;
-    this.heightAt = heightAt;
+    this.terrain = terrain;
+    this._q = {};
     this.yaw = 0; // 鏡頭看的水平方向：前方 = (sin, cos)
     this.pitch = 0.32;
     this.dist = 7;
@@ -42,14 +52,16 @@ export class CameraRig {
       t.z - Math.cos(this.yaw) * cp * d,
     );
 
-    // 鏡頭碰撞：從目標往鏡頭逐步檢查，遇到建築就拉近
-    const steps = 24;
-    let frac = 1;
-    for (let i = 1; i <= steps; i++) {
-      const f = i / steps;
+    // 鏡頭碰撞：從目標往鏡頭掃掠，遇到建築就拉近
+    let frac = this.collision.sweep(t, desired, CAM_RADIUS);
+    // 地形遮擋：同一條連線每 GROUND_STEP 取樣地面
+    const gSteps = Math.max(1, Math.ceil(d / GROUND_STEP));
+    for (let i = 1; i <= gSteps; i++) {
+      const f = i / gSteps;
+      if (f >= frac) break;
       this._p.lerpVectors(t, desired, f);
-      if (this.collision.pointBlocked(this._p.x, this._p.y, this._p.z, 0.35)) {
-        frac = Math.max(0.05, (i - 1) / steps);
+      if (this._p.y < this.groundAt(this._p.x, this._p.z) + RAY_GROUND_CLEAR) {
+        frac = Math.max(0.05, (i - 1) / gSteps);
         break;
       }
     }
@@ -59,10 +71,16 @@ export class CameraRig {
     else this.curDist += (want - this.curDist) * Math.min(1, 4 * dt);
     const k = d > 0 ? this.curDist / d : 1;
     this._p.lerpVectors(t, desired, k);
-    const minY = this.heightAt(this._p.x, this._p.z) + 0.4;
+    const minY = this.groundAt(this._p.x, this._p.z) + CAM_GROUND_CLEAR;
     if (this._p.y < minY) this._p.y = minY;
 
     this.camera.position.copy(this._p);
     this.camera.lookAt(t);
+  }
+
+  // 鏡頭用地面：高度場高度（yHint −∞ 不站上甲板），湖面範圍內取水面與湖床較高者
+  groundAt(x, z) {
+    const q = this.terrain.querySurface(x, z, -Infinity, this._q);
+    return q.waterY !== null ? Math.max(q.y, q.waterY) : q.y;
   }
 }

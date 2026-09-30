@@ -1,0 +1,14 @@
+{
+  "name": "臺中GTA · 七期老虎城",
+  "short_name": "臺中GTA",
+  "lang": "zh-Hant-TW",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0a0f24",
+  "theme_color": "#0a0f24",
+  "icons": [
+    { "src": "/art/logo-mark.jpg", "type": "image/jpeg", "sizes": "512x512", "purpose": "any" }
+  ]
+}

@@ -1,8 +1,14 @@
-// 碰撞系統：建築以 OSM 輪廓多邊形表示，用空間網格加速查詢。
-// 角色與車輛以「圓」近似，與多邊形做推出；出界由世界邊界夾住（隱形牆）。
+// 碰撞查詢：
+// - PhysicsOccluder（遊戲本體）：以 Rapier 世界碰撞體（src/physics/colliders.js）做球體掃掠，供鏡頭遮擋
+// - CollisionWorld（無物理模式：tools/test/placement.mjs 與 player / vehicle 的無物理路徑）：建築以 OSM 輪廓多邊形表示，
+//   用空間網格加速查詢；角色與車輛以「圓」近似，與多邊形做推出；出界由世界邊界夾住（隱形牆）
+// 兩者都提供 sweep(from, to, radius) → 可到達的比例 0..1，鏡頭只呼叫這個介面
 import { BOUNDS } from './citymodel.js';
 import { SpatialGrid, pointInPolygon, closestOnPolygon, polygonBBox } from './geom.js';
 import { clamp } from './utils.js';
+import { WORLD, queryGroups } from './physics/groups.js';
+
+const SWEEP_STEPS = 24; // CollisionWorld.sweep 沿線取樣點數
 
 export class CollisionWorld {
   constructor(cellSize = 25) {
@@ -81,7 +87,19 @@ export class CollisionWorld {
     return { x, z, hit, nx, nz };
   }
 
-  // 點是否在任何建築內部（或距外牆 pad 以內）；鏡頭碰撞與下車位置用
+  // 從 from 往 to 逐點檢查，遇到建築就停：回傳最後一個安全點的比例（最小 0.05）
+  sweep(from, to, radius) {
+    for (let i = 1; i <= SWEEP_STEPS; i++) {
+      const f = i / SWEEP_STEPS;
+      const x = from.x + (to.x - from.x) * f;
+      const y = from.y + (to.y - from.y) * f;
+      const z = from.z + (to.z - from.z) * f;
+      if (this.pointBlocked(x, y, z, radius)) return Math.max(0.05, (i - 1) / SWEEP_STEPS);
+    }
+    return 1;
+  }
+
+  // 點是否在任何建築內部（或距外牆 pad 以內）
   pointBlocked(x, y, z, pad = 0.3) {
     const list = this.grid.query(x - pad, z - pad, x + pad, z + pad, this._tmp);
     for (const b of list) {
@@ -118,4 +136,36 @@ export function pushOutOfCircles(x, z, r, circles) {
     hit = true;
   }
   return { x, z, hit, nx, nz };
+}
+
+// 物理版鏡頭遮擋：球體從 from 掃到 to，只看 WORLD 組；看不見的湖面阻擋柱與邊界牆（stats.handles.lake / wall）不擋鏡頭
+// stats：buildWorldColliders 的回傳值
+export class PhysicsOccluder {
+  constructor(physicsWorld, stats) {
+    this.pw = physicsWorld;
+    const R = physicsWorld.RAPIER;
+    this.shapes = new Map(); // 半徑 → Ball（鏡頭只用一兩種半徑）
+    this.rot = { x: 0, y: 0, z: 0, w: 1 };
+    this.vel = { x: 0, y: 0, z: 0 };
+    const hidden = new Set([...stats.handles.lake, ...stats.handles.wall].map((c) => c.handle));
+    this.opts = {
+      groups: queryGroups(WORLD),
+      flags: R.QueryFilterFlags.EXCLUDE_SENSORS,
+      predicate: (c) => !hidden.has(c.handle),
+      // 起點（角色頭頂附近）貼著牆時不算命中，只要掃掠方向是離開該牆
+      stopAtPenetration: false,
+    };
+  }
+
+  sweep(from, to, radius) {
+    let ball = this.shapes.get(radius);
+    if (!ball) this.shapes.set(radius, (ball = new this.pw.RAPIER.Ball(radius)));
+    const v = this.vel;
+    v.x = to.x - from.x;
+    v.y = to.y - from.y;
+    v.z = to.z - from.z;
+    // vel × toi = 位移，maxToi = 1 → toi 即可到達比例
+    const hit = this.pw.castShape(from, this.rot, v, ball, 1, this.opts);
+    return hit ? Math.max(0.05, hit.time_of_impact) : 1;
+  }
 }

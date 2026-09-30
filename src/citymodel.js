@@ -2,6 +2,11 @@
 // 純 JS（不依賴 three），小地圖、碰撞、車流、擺放檢查都從這裡取資料
 import osm from './data/osm-city.json';
 import { polygonBBox, polygonCentroid, polygonArea, pointInPolygon, closestOnPolygon, closestOnSegment, polylineInfo, SpatialGrid } from './geom.js';
+import { initTerrain } from './terrain.js';
+
+// 地形唯一高度場：以同一份 osm 資料在模組載入時初始化一次（之後任何模組 import terrain.js 的 heightAt / querySurface 都可直接用）
+initTerrain(osm);
+export { heightAt, querySurface, getTerrain } from './terrain.js';
 
 // 車流行駛的道路類型
 export const TRAFFIC_TYPES = new Set(['primary', 'secondary', 'tertiary']);
