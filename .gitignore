@@ -7,3 +7,4 @@ CLAUDE.md
 .claude/
 var/
 *.blend1
+__pycache__/
