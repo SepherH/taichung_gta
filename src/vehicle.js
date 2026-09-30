@@ -1,7 +1,11 @@
 // 車輛：外型（轎車 / 計程車 / 休旅車 / 公車 / 機車）與駕駛
 // 本地座標前方為 +Z、左方為 +X；yaw 定義與玩家相同：前進方向 = (sin(yaw), cos(yaw))
 // 外觀：有 glb（vehicle-model.js，manifest 驅動）用 glb，否則退回本檔的程序化方塊車；glb 的長寬高 / 軸距 / 輪距 / 輪徑 / 質量 / 座位點
-//   併入 this.spec（覆寫 VEHICLE_TYPES 的外形欄位，手感欄位 maxSpeed / accel / … 不變），VehicleBody / NPC 剛體以此 spec 建立
+//   併入 this.spec（覆寫 VEHICLE_TYPES 的外形欄位與 mass，手感欄位 maxSpeed / accel / … 不變），VehicleBody / NPC 剛體以此 spec 建立
+// Phase 3 手感：極速 / 加速 / 質量對齊參考作（依臺中路長下修）、高速轉向遞減、機車傾斜與倒地（onFall）、車身懸吊視覺傾斜、
+//   翻覆扶起（upright，flip 為別名）、喇叭（honk → bus 'vehicle:horn'）、損壞降功率（setPowerScale）
+// 掉出世界回收：每個物理子步檢查動態車 y < 地面 − FALL_OUT_DEPTH → 玩家駕駛中的車重置到最近道路（直立、速度歸零），
+//   無人車重置到最近道路後停放（kinematic）；有 bus 時 emit 'vehicle:recovered' { vehicle, driven, x, y, z }
 // 兩種模式：
 // - 物理模式（attachBody 後，玩家駕駛 / 停放車）：Rapier 動態剛體 + 射線懸吊（src/physics/vehicle-body.js），
 //   網格依插值後的底盤姿態擺放（網格原點在輪底 = 底盤中心沿車身 up 往下 layout.centerY），四輪依 getState 同步轉動 / 轉向 / 懸吊高度
@@ -11,18 +15,27 @@
 import * as THREE from 'three';
 import { cachedStandardMaterial, clamp, makeTextTexture } from './utils.js';
 import { pushOutOfCircles } from './collision.js';
+import { closestOnSegment } from './geom.js';
 import { registerNight } from './daynight.js';
 import { SURFACE_OFFSET } from './data/city.js';
-import { VehicleBody, rotateVec, yawOf } from './physics/vehicle-body.js';
+import { VehicleBody, rotateVec, yawOf, leanAngle } from './physics/vehicle-body.js';
 import { createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS, SEAT_HIPS_HEIGHT } from './vehicle-model.js';
 
+// 手感數值（Phase 3，對齊參考作 docs/ref/taipei-gta-feature-map.md §2-4 規格表並依臺中路長下修）：
+// - maxSpeed（m/s）：轎車 42（151 km/h，參考 180）、計程車 40（參考 170）、休旅車 39（參考 165）、機車 26.4（95 km/h，同參考）、公車 22（80 km/h，參考 90）
+// - accel：參考作加速值 × 1.25（轎車 6.4 → 8，與 Phase 2 轎車相同，保留既有起步手感；其餘依參考作比例：計程車 5.9、休旅 5.5、機車 6.8、公車 2.7）
+//   物理版起步加速度 = accel × HANDLING.launchScale（vehicle-body.js）
+// - mass（kg）：參考作 轎車 1300、計程車 1350、休旅 1750、機車 125、公車 11000；有 glb 時以 manifest 的 mass 為準（美術規格，
+//   目前休旅 1650、公車 12500、機車 120，與參考作差 ≤ 14%），本欄為無 glb 時的後備
+// - maxLatAccel（m/s²）：非手煞車時的穩態側向加速度上限（高速轉向遞減），約為各車防翻抓地上限的 0.85 倍；機車 6.5 → 傾角約 33.5°
+// - tiltScale：車身懸吊視覺傾斜倍率（高車身較軟）
 export const VEHICLE_TYPES = {
-  sedan: { label: '轎車', length: 4.5, width: 1.85, height: 1.45, maxSpeed: 34, maxReverse: 8, accel: 8, brake: 18, turnRate: 1.7, camScale: 1.35 },
-  taxi: { label: '計程車', length: 4.5, width: 1.85, height: 1.45, maxSpeed: 32, maxReverse: 8, accel: 8, brake: 18, turnRate: 1.7, camScale: 1.35 },
-  suv: { label: '休旅車', length: 4.9, width: 2.0, height: 1.8, maxSpeed: 31, maxReverse: 7, accel: 7, brake: 16, turnRate: 1.5, camScale: 1.45 },
-  scooter: { label: '機車', length: 1.9, width: 0.7, height: 1.1, maxSpeed: 22, maxReverse: 3, accel: 9, brake: 14, turnRate: 2.4, camScale: 1.0, twoWheeler: true },
-  // 公車：外形取 docs/ref/qiuhonggu-opera-vehicle-reference.md §4.1（12.19 × 2.50 × 3.14 m）；極速 / 加減速 / 轉向為手感設定（推測）
-  bus: { label: '公車', length: 12.2, width: 2.5, height: 3.14, maxSpeed: 16, maxReverse: 4, accel: 2.5, brake: 7, turnRate: 0.8, camScale: 2.4 },
+  sedan: { label: '轎車', length: 4.5, width: 1.85, height: 1.45, maxSpeed: 42, maxReverse: 8, accel: 8, brake: 18, turnRate: 1.7, camScale: 1.35, mass: 1300, maxLatAccel: 10.5 },
+  taxi: { label: '計程車', length: 4.5, width: 1.85, height: 1.45, maxSpeed: 40, maxReverse: 8, accel: 7.4, brake: 18, turnRate: 1.7, camScale: 1.35, mass: 1350, maxLatAccel: 9.5 },
+  suv: { label: '休旅車', length: 4.9, width: 2.0, height: 1.8, maxSpeed: 39, maxReverse: 7, accel: 6.9, brake: 16, turnRate: 1.5, camScale: 1.45, mass: 1750, maxLatAccel: 8.5, tiltScale: 1.2 },
+  scooter: { label: '機車', length: 1.9, width: 0.7, height: 1.1, maxSpeed: 26.4, maxReverse: 3, accel: 8.5, brake: 14, turnRate: 2.4, camScale: 1.0, twoWheeler: true, mass: 125, maxLatAccel: 6.5 },
+  // 公車：外形取 docs/ref/qiuhonggu-opera-vehicle-reference.md §4.1（12.19 × 2.50 × 3.14 m）
+  bus: { label: '公車', length: 12.2, width: 2.5, height: 3.14, maxSpeed: 22, maxReverse: 4, accel: 3.4, brake: 7, turnRate: 0.8, camScale: 2.4, mass: 11000, maxLatAccel: 5, tiltScale: 1.4 },
 };
 
 // 程序化車（無 glb）的座位點（本地座標，角色 drive 動作 Hips 位置；推測值，依方塊車外形目測）
@@ -46,6 +59,11 @@ const NO_DRIVE_CELLS = new Set(['stairs', 'riser']);
 // 物理模式：無人駕駛的車速度 / 角速度低於門檻持續 PARK_REST_SEC 秒 → 切回 kinematic 停放
 const PARK_REST_SPEED = 0.1;
 const PARK_REST_SEC = 1;
+const HORN_COOLDOWN = 0.4; // 喇叭冷卻（s，物理時間）
+export const FALL_OUT_DEPTH = 20; // 車身（輪底）低於地面此深度（m）視為掉出世界
+const RECOVER_LANE_OFFSET = 0.5; // 重置點：道路中心線往行進方向右側偏移 半路寬 × 此值（右側通行、避開中線對向車）
+const _tiltEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _tiltQuat = new THREE.Quaternion();
 
 // 駕駛輸入 → VehicleBody.setControls：axis = input.moveAxis()（駕駛時 y = 油門正 / 煞車倒車負，x = 轉向右正）；
 // VehicleBody 的 steer +1 = 左轉，所以取 −x；throttle 負值在前進中是煞車、停下後才倒車（driveCommand）
@@ -209,6 +227,11 @@ export class Vehicle {
     this.body = null; // 物理模式的 VehicleBody
     this.interp = null; // PhysicsWorld.register 的插值 handle
     this.rest = 0; // 無人駕駛時已靜止的秒數
+    this.onFall = null; // 機車倒地回呼 onFall(vehicle)（騎士下車由整合者處理）
+    this.bus = null; // 事件匯流排（VehicleManager 注入；無則 honk 不發事件）
+    this._clock = null; // 物理時間（VehicleManager 注入），喇叭冷卻用
+    this._hornAt = -Infinity;
+    this._yawRate = 0; // 無物理模式的偏航率（機車 lean 用）
     this.syncMesh();
   }
 
@@ -225,10 +248,43 @@ export class Vehicle {
     this.body.setControls(c);
   }
 
-  // 翻車自救：抬高、轉正（VehicleBody.flip），插值狀態對齊新位置
-  flip() {
+  // 扶起：汽車翻覆 / 機車倒地 → 抬高、轉正、清除倒地（VehicleBody.flip），插值狀態對齊新位置
+  upright() {
     this.body.flip();
     this.interp.reset();
+  }
+
+  // 舊名（R 鍵翻車自救時代），保留為別名
+  flip() {
+    this.upright();
+  }
+
+  // 汽車翻覆 / 機車倒地持續 ≥ 1.5 s（OVERTURN_PROMPT_SEC）
+  isOverturned() {
+    return !!this.body && this.body.isOverturned();
+  }
+
+  // 機車倒地中（剛倒下就為真；isOverturned 要再等 1.5 s）
+  get fallen() {
+    return !!this.body && this.body.fallen;
+  }
+
+  // 損壞降功率：k 0–1（0 = 熄火無動力）
+  setPowerScale(k) {
+    if (this.body) this.body.setPowerScale(k);
+  }
+
+  get powerScale() {
+    return this.body ? this.body.powerScale : 1;
+  }
+
+  // 喇叭：冷卻 HORN_COOLDOWN 秒；有 bus 時 emit 'vehicle:horn' { vehicle, x, z, dirX, dirZ }（dir = 車頭方向）。回傳這次是否有響
+  honk() {
+    const now = this._clock ? this._clock() : 0;
+    if (now - this._hornAt < HORN_COOLDOWN - 1e-9) return false;
+    this._hornAt = now;
+    if (this.bus) this.bus.emit('vehicle:horn', { vehicle: this, x: this.pos.x, z: this.pos.z, dirX: Math.sin(this.yaw), dirZ: Math.cos(this.yaw) });
+    return true;
   }
 
   // 物理 step 之後呼叫：網格依插值姿態擺放；pos / yaw / speed 供鏡頭、HUD、上下車使用
@@ -246,6 +302,12 @@ export class Vehicle {
     this.speed = vb.kinematic ? 0 : vb.forwardSpeed();
     this.mesh.position.set(m.x, m.y + SURFACE_OFFSET, m.z);
     this.mesh.quaternion.set(q.x, q.y, q.z, q.w);
+    // 視覺傾斜（懸吊 pitch / roll、機車 lean、倒地側躺）：車身本地座標、以輪底為支點，只轉網格
+    const vis = vb.visual;
+    if (vis && (vis.pitch !== 0 || vis.roll !== 0)) {
+      _tiltEuler.set(vis.pitch, 0, vis.roll, 'YXZ');
+      this.mesh.quaternion.multiply(_tiltQuat.setFromEuler(_tiltEuler));
+    }
     // 四輪：懸吊長度 → 輪心高度（網格本地 = 硬點 y − 懸吊長 + centerY）、滾動角（前進為正，同 animate）、前輪轉向角
     // kinematic 停放期間控制器不更新（懸吊長度無效），輪子放在靜態下沉位置、維持最後的滾動角
     const st = vb.kinematic ? null : vb.getState();
@@ -365,6 +427,7 @@ export class Vehicle {
     let yawRate = this.steer * s.turnRate * speedFactor * Math.sign(v || 1);
     if (c.handbrake && av > 5) yawRate *= 1.6;
     this.yaw += yawRate * dt;
+    this._yawRate = yawRate;
 
     // 抓地力：實際速度向車頭方向靠攏（手煞車時抓地變差 → 甩尾）
     const fx = Math.sin(this.yaw);
@@ -428,8 +491,8 @@ export class Vehicle {
     this.wheelSpin += (this.speed * dt) / r;
     for (const w of this.mesh.userData.wheels) w.rotation.x = this.wheelSpin;
     for (const h of this.mesh.userData.frontWheels) h.rotation.y = this.steer * 0.45;
-    // 機車轉彎時車身傾斜（疊加在地形 roll 上；機車的地形 roll 恆 0）
-    this.lean = this.spec.twoWheeler ? -this.steer * clamp(Math.abs(this.speed) / 15, 0, 1) * 0.35 : 0;
+    // 機車轉彎時車身傾斜（疊加在地形 roll 上；機車的地形 roll 恆 0）：與物理模式共用 leanAngle（側向加速度 = v × 偏航率，上限 35°）
+    this.lean = this.spec.twoWheeler ? -leanAngle(this.speed * this._yawRate) : 0;
   }
 
   syncMesh() {
@@ -443,33 +506,113 @@ export class Vehicle {
   }
 }
 
-// 管理所有可駕駛車輛（路邊停放）；list 的 y 為 places.js 的 querySurface 高度
+const _roadSeg = { x: 0, z: 0, d2: 0, t: 0 };
+
+// 最近道路上的重置點：roads = citymodel.js 的 surfaceRoads（{ pts: [{ x, z }], hw }）；
+// 回傳 { x, z, yaw }（中心線最近點往右側偏移、yaw 沿線段方向且盡量保留原車頭 prevYaw 的前後向）；沒有道路回傳 null
+export function nearestRoadPose(roads, x, z, prevYaw = null) {
+  let best = null;
+  let bestD2 = Infinity;
+  for (const r of roads || []) {
+    const pts = r.pts || [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      closestOnSegment(x, z, a.x, a.z, b.x, b.z, _roadSeg);
+      if (_roadSeg.d2 >= bestD2) continue;
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      if (len < 1e-6) continue;
+      bestD2 = _roadSeg.d2;
+      best = { x: _roadSeg.x, z: _roadSeg.z, dx: (b.x - a.x) / len, dz: (b.z - a.z) / len, hw: r.hw || 0 };
+    }
+  }
+  if (!best) return null;
+  let { dx, dz } = best;
+  // 車頭與線段反向時改走反方向車道
+  if (Number.isFinite(prevYaw) && dx * Math.sin(prevYaw) + dz * Math.cos(prevYaw) < 0) {
+    dx = -dx;
+    dz = -dz;
+  }
+  // 右方 = −左方 = (−cos yaw, sin yaw) = (−dz, dx)
+  const off = best.hw * RECOVER_LANE_OFFSET;
+  return { x: best.x - dz * off, z: best.z + dx * off, yaw: Math.atan2(dx, dz) };
+}
+
+// 管理所有可駕駛車輛（路邊停放 + adopt 轉來的車流車）；list 的 y 為 places.js 的 querySurface 高度
 // physics = { RAPIER, pw（PhysicsWorld）, router（contacts.js）, groups }：每台車建 VehicleBody（kinematic 停放），
 // 物理子步前 preStep、子步後檢查無人車是否靜止可停放；被撞（onVehicleHitVehicle）時醒來並吃下衝量
+// options = { bus }：事件匯流排（src/core/events.js 的 createBus 產物），honk 時 emit 'vehicle:horn'；沒給就不發事件
+// options.roads：掉出世界時重置用的道路（citymodel.js 的 surfaceRoads）；沒給時重置到原 x / z 的地面
+// onFall：機車倒地回呼（vehicles.onFall = (vehicle) => …），每台車也可個別設 vehicle.onFall
 export class VehicleManager {
-  constructor(scene, list, terrain, physics) {
-    const { RAPIER, pw, router, groups } = physics;
+  constructor(scene, list, terrain, physics, { bus = null, roads = null } = {}) {
+    const { pw, router } = physics;
+    this.scene = scene;
+    this.terrain = terrain;
+    this.physics = physics;
     this.pw = pw;
-    this.vehicles = list.map((d) => {
-      const v = new Vehicle(scene, d.type, d.color, d.x, d.z, d.yaw);
-      const y = Number.isFinite(d.y) ? d.y : terrain.querySurface(d.x, d.z, Infinity, v._q).y;
-      const vb = new VehicleBody(RAPIER, pw, { type: d.type, ...v.spec }, { x: d.x, y, z: d.z, yaw: d.yaw, groups, ccd: false });
-      vb.setControls({ handbrake: true });
-      vb.setKinematic(true);
-      vb.owner = v;
-      router.register(vb.collider, vb);
-      v.attachBody(vb, pw.register(vb.body));
-      v.syncBody(0);
-      return v;
-    });
+    this.router = router;
+    this.bus = bus;
+    this.roads = roads;
+    this.recovered = 0; // 掉出世界回收次數（除錯 / 測試用）
+    this.time = 0; // 物理時間（s），喇叭冷卻用
+    this.onFall = null;
+    this.vehicles = [];
+    for (const d of list) this._create(d, true);
     pw.onBeforeStep((dt) => {
       for (const v of this.vehicles) v.body.preStep(dt);
     });
-    pw.onAfterStep((dt) => this._park(dt));
+    pw.onAfterStep((dt) => {
+      this.time += dt;
+      this._recoverLost();
+      this._park(dt);
+    });
     router.onVehicleHitVehicle(({ a, b, impulse, dir }) => {
       this._wake(a, impulse, { x: -dir.x, y: -dir.y, z: -dir.z });
       this._wake(b, impulse, dir);
     });
+  }
+
+  // 建一台車（d = { type, color, x, y?, z, yaw }）：parked = true → kinematic 停放 + 手煞車；false → dynamic
+  _create(d, parked) {
+    const { RAPIER, pw, router, groups } = this.physics;
+    const v = new Vehicle(this.scene, d.type, d.color, d.x, d.z, d.yaw);
+    const y = Number.isFinite(d.y) ? d.y : this.terrain.querySurface(d.x, d.z, Infinity, v._q).y;
+    const vb = new VehicleBody(RAPIER, pw, { type: d.type, ...v.spec }, { x: d.x, y, z: d.z, yaw: d.yaw, groups, ccd: false });
+    vb.setControls({ handbrake: parked });
+    if (parked) vb.setKinematic(true);
+    vb.owner = v;
+    vb.onFall = () => {
+      if (v.onFall) v.onFall(v);
+      if (this.onFall) this.onFall(v);
+    };
+    v.bus = this.bus;
+    v._clock = () => this.time;
+    router.register(vb.collider, vb);
+    v.attachBody(vb, pw.register(vb.body));
+    v.syncBody(0);
+    this.vehicles.push(v);
+    return v;
+  }
+
+  // 車流車轉成可駕駛車（契約 §5）：pose = traffic.releaseCar(car) 的 { type, color, x, y, z, yaw, vx, vz }（y = 輪底地面高，缺值貼地）
+  // 回傳 Vehicle（dynamic、沿用原速度）；之後由整合者 drive(v, true)
+  adopt({ type, color, x, y, z, yaw = 0, vx = 0, vz = 0 }) {
+    const v = this._create({ type, color, x, y, z, yaw }, false);
+    v.body.body.setLinvel({ x: vx, y: 0, z: vz }, true);
+    return v;
+  }
+
+  // 移除一台車（剛體、控制器、碰撞路由、插值、網格）；回傳是否有移除
+  remove(v) {
+    const i = this.vehicles.indexOf(v);
+    if (i < 0) return false;
+    this.vehicles.splice(i, 1);
+    this.router.unregister(v.body.collider);
+    this.pw.unregister(v.interp);
+    v.body.dispose();
+    v.mesh.removeFromParent();
+    return true;
   }
 
   // 被撞的停放車：切 dynamic 並施加衝量（dir = 受力方向）
@@ -480,10 +623,51 @@ export class VehicleManager {
     vb.body.applyImpulse({ x: dir.x * impulse, y: dir.y * impulse, z: dir.z * impulse }, true);
   }
 
+  // 掉出世界：動態中的車輪底 y < 地面 − FALL_OUT_DEPTH → 重置（kinematic / 停用的車不會掉，不查）
+  _recoverLost() {
+    for (const v of this.vehicles) {
+      const vb = v.body;
+      if (vb.kinematic || !vb.active) continue;
+      const t = vb.body.translation();
+      const bottom = t.y - vb.layout.centerY;
+      if (!Number.isFinite(bottom)) {
+        this.recover(v);
+        continue;
+      }
+      const ground = this.terrain.querySurface(t.x, t.z, Infinity, v._q).y;
+      if (bottom < (Number.isFinite(ground) ? ground : 0) - FALL_OUT_DEPTH) this.recover(v);
+    }
+  }
+
+  // 重置一台車到最近道路（直立、速度歸零、清除倒地 / 翻覆）；無人車重置後停放（kinematic）。回傳重置點 { x, y, z, yaw }
+  recover(v) {
+    const vb = v.body;
+    const t = vb.body.translation();
+    const x0 = Number.isFinite(t.x) ? t.x : v.pos.x;
+    const z0 = Number.isFinite(t.z) ? t.z : v.pos.z;
+    const road = this.roads ? nearestRoadPose(this.roads, x0, z0, v.yaw) : null;
+    const x = road ? road.x : x0;
+    const z = road ? road.z : z0;
+    const yaw = road ? road.yaw : Number.isFinite(v.yaw) ? v.yaw : 0;
+    const gy = this.terrain.querySurface(x, z, Infinity, v._q).y;
+    const y = Number.isFinite(gy) ? gy : 0;
+    vb.resetTo({ x, y, z, yaw });
+    v.rest = 0;
+    if (!v.driven) {
+      vb.setControls({ handbrake: true });
+      vb.setKinematic(true);
+    }
+    v.interp.reset();
+    this.recovered++;
+    if (this.bus) this.bus.emit('vehicle:recovered', { vehicle: v, driven: v.driven, x, y, z });
+    return { x, y, z, yaw };
+  }
+
   // 無人駕駛、動態中的車：速度與角速度都低於門檻持續 PARK_REST_SEC → 切回 kinematic
   _park(dt) {
     for (const v of this.vehicles) {
       const vb = v.body;
+      if (vb.fallen && vb.kinematic) vb.fallenTime += dt; // 倒地後已停放：倒地計時照走（preStep 不跑）
       if (v.driven || vb.kinematic || !vb.active) continue;
       const lv = vb.body.linvel();
       const av = vb.body.angvel();
@@ -517,7 +701,24 @@ export class VehicleManager {
     let best = null;
     let bestD = maxDist;
     for (const v of this.vehicles) {
-      if (v.driven) continue;
+      if (v.driven || v.fallen || v.isOverturned()) continue; // 翻覆 / 倒地的車要先扶起（findOverturned）
+      for (const c of v.circles()) {
+        const d = Math.hypot(pos.x - c.x, pos.z - c.z) - c.r;
+        if (d < bestD) {
+          bestD = d;
+          best = v;
+        }
+      }
+    }
+    return best;
+  }
+
+  // 找玩家附近翻覆 / 倒地（isOverturned）的車，供步行按 F 扶起（駕駛中的車也列入：機車倒地時騎士已下車）
+  findOverturned(pos, maxDist = 2.6) {
+    let best = null;
+    let bestD = maxDist;
+    for (const v of this.vehicles) {
+      if (!v.isOverturned()) continue;
       for (const c of v.circles()) {
         const d = Math.hypot(pos.x - c.x, pos.z - c.z) - c.r;
         if (d < bestD) {

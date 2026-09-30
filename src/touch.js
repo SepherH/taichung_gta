@@ -1,44 +1,51 @@
-// 觸控操作：左半螢幕浮動搖桿、右半螢幕拖曳轉視角 / 雙指捏合縮放、虛擬按鈕（步行 / 駕駛兩套配置）
-// 一律用 Pointer Events，以 pointerId 追蹤每根手指，多指同時操作互不干擾（docs/ref/mobile-reference.md §3）
-// 按鈕以虛擬鍵碼寫入 Input（hold = 按住期間在 keys、按下當幀在 pressed；tap = 只在 pressed），
-// 鍵碼沿用 main.js / player.js 的既有語意：Space 跳 / 手煞車、ShiftLeft 跑、KeyF 上下車、KeyW 油門、KeyS 煞車倒車
+// 觸控操作（B3）：左半螢幕浮動搖桿、右半螢幕拖曳轉視角 / 雙指捏合縮放（步行）或兩塊大踏板（駕駛）、虛擬按鈕
+// 一律用 Pointer Events，每個 pointerId 只綁定一個控制（搖桿 / 視角區 / 各踏板 / 各按鈕各自追蹤），多指同時操作互不搶
+// 按鈕以虛擬鍵碼寫入 Input（hold = 按住期間在 keys、按下當幀在 pressed；tap = 只在 pressed），鍵碼對齊 core/actions.js：
+//   Space 跳 / 手煞車、ShiftLeft 衝刺、KeyF 上下車 / 扶起、Mouse0 攻擊、KeyH 喇叭、Escape 暫停、KeyM 地圖、KeyT 手機（預留）
+// 搖桿推到底（≥ 0.9）= 衝刺（input.js 搖桿相容層寫入 ShiftLeft）
+// 駕駛：右半區換成 #touch-pedals（左 = 煞車、右 = 油門），深度 = 手指在踏板內的縱向位置（越下越深），寫入 input.setPedals
+// input.enabled = false（開始前 / 暫停 / 選單）時整個觸控層不吃操作，且 Input 會呼叫 onDisable 釋放所有按住中的觸控
 //
-// 之後的單元新增按鈕只需：registerTouchButton({ id, label, code, mode: 'hold'|'tap', slot, showWhen: 'walk'|'drive'|'always' })
-//   不寫入鍵碼的功能鈕改給 onPress(input)（按下時呼叫，例如「靈敏度」循環切換），此時可省略 code
-// slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（主鈕左上的大號醒目攻擊鈕）/
-//   top1、top2、top3（右上小鈕，由右往左）
-// 攻擊鈕：id 為 ATTACK_ID 或 label 為 ATTACK_LABEL 的按鈕一律改放 attack slot（main.js 以 sec3 註冊「揮拳」也會變大）
+// 之後的單元新增按鈕只需：registerTouchButton({ id, label, code, mode: 'hold'|'tap', slot, showWhen: 'walk'|'drive'|'always', hidden })
+//   不寫入鍵碼的功能鈕改給 onPress(input)（按下時呼叫），此時可省略 code；hidden: true = 建立但不顯示（預留）
+// slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
+//   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、手機，由左往右，排在小地圖右側）
+//   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
+// 攻擊鈕：id 為 ATTACK_ID 或 label 在 ATTACK_LABELS 內的按鈕一律改放 attack slot
+// 已移除的舊按鈕 id（DEPRECATED_IDS：翻正、靈敏度、舊揮拳、油門 / 煞車鈕）再註冊會被忽略（回傳 null），由 F 扶起與設定頁滑桿取代
 // 鏡頭拖曳區 = 右半螢幕的 #touch-look；按鈕疊在其上並 capture 自己的指標，從按鈕上開始的拖曳不會轉鏡頭
 import { isInputBlocked } from './mobile.js';
 
 const RADIUS = 64; // 搖桿半徑（px）
 const DEAD = 0.08; // 死區；死區外重新映射到 0..1
 const PINCH_K = 2; // 捏合每 px 距離變化換算的 wheel 量（張開 = 拉近）
+const PEDAL_MIN = 0.35; // 踏板最上緣的深度（碰到就有此力道），最下緣 = 1
 const END_EVENTS = ['pointerup', 'pointercancel', 'lostpointercapture'];
 
-const ATTACK_ID = 'tb-punch';
-const ATTACK_LABEL = '揮拳';
+const ATTACK_ID = 'tb-attack';
+const ATTACK_LABELS = ['攻擊', '揮拳'];
+export const DEPRECATED_IDS = ['tb-flip', 'tb-sens', 'tb-punch', 'tb-gas', 'tb-brake'];
 
-export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'top1', 'top2', 'top3'];
+export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3'];
 
 const DEFAULT_BUTTONS = [
   // 步行
   { id: 'tb-jump', label: '跳', code: 'Space', mode: 'tap', slot: 'main', showWhen: 'walk' },
   { id: 'tb-run', label: '跑', code: 'ShiftLeft', mode: 'hold', slot: 'sec1', showWhen: 'walk' },
   { id: 'tb-enter', label: '上車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'walk' },
-  // 駕駛
-  { id: 'tb-gas', label: '油門', code: 'KeyW', mode: 'hold', slot: 'main', showWhen: 'drive' },
-  { id: 'tb-brake', label: '煞車', code: 'KeyS', mode: 'hold', slot: 'sec1', showWhen: 'drive' },
+  { id: ATTACK_ID, label: '攻擊', code: 'Mouse0', mode: 'tap', slot: 'attack', showWhen: 'walk' },
+  // 駕駛（油門 / 煞車改為踏板）
   { id: 'tb-exit', label: '下車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'drive' },
   { id: 'tb-handbrake', label: '手煞', code: 'Space', mode: 'hold', slot: 'sec3', showWhen: 'drive' },
-  // 遊戲目前沒有喇叭邏輯；KeyG 為預留鍵碼，之後的單元讀 input.down('KeyG') 即可
-  { id: 'tb-horn', label: '喇叭', code: 'KeyG', mode: 'hold', slot: 'top1', showWhen: 'drive' },
-  // 共用：鏡頭靈敏度低 / 中 / 高循環（input.js 存 localStorage，hud.js toast 顯示檔位）
-  { id: 'tb-sens', label: '靈敏度', onPress: (input) => input.cycleSensitivity('touch'), slot: 'top3', showWhen: 'always' },
+  { id: 'tb-horn', label: '喇叭', code: 'KeyH', mode: 'hold', slot: 'top1', showWhen: 'drive' },
+  // 共用：左上三顆小鈕
+  { id: 'tb-pause', label: '暫停', code: 'Escape', mode: 'tap', slot: 'tl1', showWhen: 'always' },
+  { id: 'tb-map', label: '地圖', code: 'KeyM', mode: 'tap', slot: 'tl2', showWhen: 'always' },
+  { id: 'tb-phone', label: '手機', code: 'KeyT', mode: 'tap', slot: 'tl3', showWhen: 'always', hidden: true },
 ];
 
 const registry = new Map(); // id → def
-let ui = null; // initTouch 後：{ root, input, buttons: Map id → { def, el, pointerId } }
+let ui = null; // initTouch 後：{ root, input, buttons: Map id → { def, el, pointerId }, resetAll }
 let mode = 'walk';
 
 function prevent(e) {
@@ -73,6 +80,7 @@ function createButtonEl(def) {
   el.className = `tbtn slot-${def.slot}`;
   el.setAttribute('data-show', def.showWhen);
   el.textContent = def.label;
+  if (def.hidden) el.hidden = true;
   const b = { def, el, pointerId: null };
   el.addEventListener('pointerdown', (e) => {
     prevent(e);
@@ -105,11 +113,12 @@ function mountButton(def) {
   return b.el;
 }
 
-// 回傳按鈕元素（尚未 initTouch 時回傳 null，initTouch 時再建立）
+// 回傳按鈕元素（尚未 initTouch 時回傳 null，initTouch 時再建立）；已移除的舊按鈕 id 一律忽略並回傳 null
 export function registerTouchButton(def) {
+  if (def && DEPRECATED_IDS.includes(def.id)) return null;
   const d = { mode: 'tap', slot: 'top2', showWhen: 'always', ...def };
   if (!d.id || (!d.code && !d.onPress)) throw new Error('registerTouchButton 需要 id 與 code（或 onPress）');
-  if (d.id === ATTACK_ID || d.label === ATTACK_LABEL) d.slot = 'attack';
+  if (d.id === ATTACK_ID || ATTACK_LABELS.includes(d.label)) d.slot = 'attack';
   registry.set(d.id, d);
   return ui ? mountButton(d) : null;
 }
@@ -117,10 +126,14 @@ export function registerTouchButton(def) {
 for (const def of DEFAULT_BUTTONS) registerTouchButton(def);
 
 // ---------- 模式 ----------
-// 'walk' | 'drive'；hud.js 每幀依 state.driving 呼叫，main.js 不需接線
+// 'walk' | 'drive'；hud.js 每幀依 state.driving 呼叫
 function applyModeClass() {
   document.body.classList.toggle('touch-walk', mode === 'walk');
   document.body.classList.toggle('touch-drive', mode === 'drive');
+}
+
+export function getTouchMode() {
+  return mode;
 }
 
 export function setTouchMode(next) {
@@ -128,8 +141,10 @@ export function setTouchMode(next) {
   mode = next;
   if (!ui) return;
   applyModeClass();
-  // 切換時放開所有按鈕（例如按「上車」的同一根手指），避免殘留按住狀態
+  // 切換時放開所有按鈕（例如按「上車」的同一根手指）、視角區與踏板，避免殘留按住狀態；搖桿保留（轉向不中斷）
   for (const b of ui.buttons.values()) releaseButton(b);
+  ui.look.reset();
+  ui.pedals.reset();
   ui.input.setTouchMode(mode);
 }
 
@@ -213,7 +228,7 @@ function buildLook(root, input) {
 
   look.addEventListener('pointerdown', (e) => {
     prevent(e);
-    if (!accepting() || pts.size >= 2) return;
+    if (!accepting() || mode !== 'walk' || pts.size >= 2) return;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     capture(look, e.pointerId);
     if (pts.size === 2) pinchDist = twoDist();
@@ -240,7 +255,86 @@ function buildLook(root, input) {
       pts.delete(e.pointerId);
     });
   }
-  return { reset: () => pts.clear() };
+  return {
+    reset: () => {
+      pts.clear();
+      pinchDist = 0;
+    },
+  };
+}
+
+// ---------- 駕駛踏板 ----------
+function buildPedals(root, input) {
+  const wrap = document.createElement('div');
+  wrap.id = 'touch-pedals';
+  root.appendChild(wrap);
+  const make = (id, label) => {
+    const el = document.createElement('div');
+    el.id = id;
+    el.className = 'tpedal';
+    const fill = document.createElement('div');
+    fill.className = 'tpedal-fill';
+    const text = document.createElement('span');
+    text.className = 'tpedal-label';
+    text.textContent = label;
+    el.appendChild(fill);
+    el.appendChild(text);
+    wrap.appendChild(el);
+    return { el, fill, id: null, depth: 0 };
+  };
+  const brake = make('pedal-brake', '煞車');
+  const gas = make('pedal-gas', '油門');
+  const push = () => input.setPedals(gas.depth, brake.depth);
+
+  const depthAt = (p, clientY) => {
+    const r = p.el.getBoundingClientRect ? p.el.getBoundingClientRect() : null;
+    const top = r && r.height > 0 ? r.top : 0;
+    const h = r && r.height > 0 ? r.height : Math.max(1, window.innerHeight);
+    const t = Math.min(1, Math.max(0, (clientY - top) / h));
+    return PEDAL_MIN + (1 - PEDAL_MIN) * t;
+  };
+  const setDepth = (p, d) => {
+    p.depth = d;
+    p.fill.style.height = `${Math.round(d * 100)}%`;
+  };
+  const release = (p) => {
+    if (p.id === null) return;
+    p.id = null;
+    p.el.classList.remove('active');
+    setDepth(p, 0);
+    push();
+  };
+
+  for (const p of [brake, gas]) {
+    p.el.addEventListener('pointerdown', (e) => {
+      prevent(e);
+      if (!accepting() || mode !== 'drive' || p.id !== null) return;
+      p.id = e.pointerId;
+      capture(p.el, e.pointerId);
+      p.el.classList.add('active');
+      setDepth(p, depthAt(p, e.clientY));
+      push();
+    });
+    p.el.addEventListener('pointermove', (e) => {
+      prevent(e);
+      if (e.pointerId !== p.id) return;
+      setDepth(p, depthAt(p, e.clientY));
+      push();
+    });
+    for (const type of END_EVENTS) {
+      p.el.addEventListener(type, (e) => {
+        prevent(e);
+        if (e.pointerId === p.id) release(p);
+      });
+    }
+    p.el.addEventListener('contextmenu', prevent);
+  }
+  return {
+    reset: () => {
+      release(brake);
+      release(gas);
+    },
+  };
 }
 
 // ---------- 初始化 ----------
@@ -251,23 +345,26 @@ export function initTouch(input) {
   document.body.appendChild(root);
   ui = { root, input, buttons: new Map() };
   const stick = buildStick(root, input);
-  const look = buildLook(root, input);
+  ui.look = buildLook(root, input);
+  ui.pedals = buildPedals(root, input);
   for (const def of registry.values()) mountButton(def);
 
-  // 全部歸零：搖桿、鏡頭指標、按鈕、觸控寫入的鍵
+  // 全部歸零：搖桿、鏡頭指標、踏板、按鈕、觸控寫入的鍵
   const resetAll = () => {
     stick.reset();
-    look.reset();
+    ui.look.reset();
+    ui.pedals.reset();
     for (const b of ui.buttons.values()) releaseButton(b);
     input.resetTouch();
   };
   ui.resetAll = resetAll;
+  input.onDisable = resetAll; // 暫停 / 選單開啟（input.enabled = false）→ 釋放所有按住中的觸控
   window.addEventListener('blur', resetAll);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') resetAll();
   });
 
-  // 每幀（Input.endFrame）檢查遮罩：直向 / 上滑遮罩期間輸入歸零，駕駛中拉手煞車讓車煞停
+  // 每幀（Input.endFrame）檢查遮罩：上滑全螢幕 / 直向提示遮罩期間輸入歸零，駕駛中拉手煞車讓車煞停
   let blocked = false;
   input.onFrame = () => {
     const b = isInputBlocked();

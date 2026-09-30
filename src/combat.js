@@ -16,6 +16,9 @@
 // 狀態（stateOf）：normal / hit（受擊硬直）/ knockdown（倒地）/ getup（起身中）/ dead（已發 dead 事件，等呼叫端回收）
 // 計時一律用注入的 now()（秒），update(dt) 的 dt 只作介面相容，方便暫停時由 now 決定是否前進
 // 事件：on('hit' | 'knockdown' | 'getup' | 'dead', cb)，回傳取消訂閱函式
+//   'knockdown' payload：{ target, impulse, cause: 'punch'|'vehicle', attacker（拳擊 = 出拳者；車撞 = 駕駛 actor 或 null）,
+//     byPlayer（attacker 為玩家）, x, z（倒地點）, damage, vehicle?, relSpeed? }；整合層以 pedKnockdownPayload 轉成契約 §1 ped:knockdown
+// 車撞的駕駛：onVehicleHit 的 driver 參數優先，否則用建構時注入的 vehicleDriver(vehicle) → actor | null（例：玩家駕駛的車回傳玩家 actor）
 
 export const PUNCH_DAMAGE = 20; // 每拳傷害：滿血 100 需 5 拳，但 4 秒內連中 3 拳就先倒地
 export const PUNCH_COOLDOWN = 0.55; // 出拳冷卻（秒）：約等於一拳動畫長度，連按不會變機關槍
@@ -81,6 +84,12 @@ export function assistRange(attacker, target) {
   return (dx * Math.sin(attacker.yaw) + dz * Math.cos(attacker.yaw)) / d >= COS_ASSIST - 1e-9 ? d : null;
 }
 
+// combat 'knockdown' 事件 → 契約 §1 ped:knockdown payload（玩家本身倒地回 null，由整合層另發 player:ko）
+export function pedKnockdownPayload(e) {
+  if (!e || !e.target || e.target.kind === 'player') return null;
+  return { ped: e.target, cause: e.cause, byPlayer: !!e.byPlayer, x: e.x, z: e.z };
+}
+
 // anim 的 punchHitWindow 參數容許 'open' / 'close' 字串或 { phase } / { type } 物件
 function windowPhase(arg) {
   if (typeof arg === 'string') return arg;
@@ -89,8 +98,9 @@ function windowPhase(arg) {
 }
 
 export class CombatSystem {
-  constructor({ now = () => performance.now() / 1000 } = {}) {
+  constructor({ now = () => performance.now() / 1000, vehicleDriver = null } = {}) {
     this.now = now;
+    this.vehicleDriver = vehicleDriver;
     this.entries = new Map(); // actor.id → entry
     this.listeners = { hit: [], knockdown: [], getup: [], dead: [] };
     this.punchSeq = 0;
@@ -215,7 +225,7 @@ export class CombatSystem {
     }
   }
 
-  onVehicleHit({ ped, impulse, relSpeed, vehicle = null }) {
+  onVehicleHit({ ped, impulse, relSpeed, vehicle = null, driver = null }) {
     const e = ped && this.entries.get(ped.id);
     if (!e || e.state === 'dead' || !(relSpeed > VEHICLE_KNOCKDOWN_SPEED)) return false;
     const t = this.now();
@@ -230,7 +240,8 @@ export class CombatSystem {
       // 已倒地又被撞：不重播倒地動畫，只扣血並重新計算落穩時間
       e.stateAt = t;
     } else {
-      this._knockdown(e, impulse, t, { cause: 'vehicle', vehicle, relSpeed, damage });
+      const attacker = driver || (vehicle && this.vehicleDriver ? this.vehicleDriver(vehicle) || null : null);
+      this._knockdown(e, impulse, t, { cause: 'vehicle', attacker, vehicle, relSpeed, damage });
     }
     return true;
   }
@@ -252,7 +263,9 @@ export class CombatSystem {
     e.hitTimes.length = 0;
     e.actor.body.knockdown(impulse);
     e.actor.anim.trigger('knockdown');
-    this._emit('knockdown', { target: e.actor, impulse, ...info });
+    const a = e.actor;
+    const attacker = info.attacker || null;
+    this._emit('knockdown', { target: a, impulse, ...info, attacker, byPlayer: !!attacker && attacker.kind === 'player', x: a.pos.x, z: a.pos.z });
   }
 
   _applyPunch(att, e, t) {

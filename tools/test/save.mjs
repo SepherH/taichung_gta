@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // B2 存檔與經濟無頭驗證：假 storage（含會丟 QuotaExceeded 的版本）、假 bus、注入 now / rng
 // 用法：node tools/test/save.mjs（任一斷言失敗 exit 1；最後一行印 PASS n/n 或 FAIL k/n）
-// 項目：load 狀態 new / ok / recovered / corrupt-reset / incompatible、.bak / .corrupt 內容、save 失敗回 false、
+// 項目：load 狀態 new / ok / recovered / corrupt-reset / incompatible、.bak / .corrupt 內容（corrupt-reset 清掉壞槽）、save 失敗回 false、
 //   validateSave 清洗（NaN、負數、未知鍵、缺鍵）、autosave 時序與例外、economy 事件計數 / 金錢 / 醫藥費 / dispose
 import { register } from 'node:module';
 
@@ -140,6 +140,18 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   const r5 = createSaveStore({ storage: s }).load();
   check('load：主鍵與 .bak 皆壞 → corrupt-reset + 預設', r5.status === 'corrupt-reset' && r5.data.money === 500);
   check('corrupt-reset：.corrupt 只保留最後一份（主鍵原文）', s.getItem(K + '.corrupt') === 'garbage');
+  check('corrupt-reset：壞掉的主鍵與 .bak 已清掉、hasSave → false', s.getItem(K) === null && s.getItem(K + '.bak') === null && createSaveStore({ storage: s }).hasSave() === false);
+  check('corrupt-reset 後再讀 → new（不重複報損毀）、.corrupt 仍保留原文', createSaveStore({ storage: s }).load().status === 'new' && s.getItem(K + '.corrupt') === 'garbage');
+  const st5 = createSaveStore({ storage: s, now: () => 3000 });
+  st5.load();
+  const saved5 = st5.save(good());
+  const r5b = createSaveStore({ storage: s }).load();
+  check('corrupt-reset 後 save 成功 → 下次讀 ok、.bak 為新存檔（不會被壞 .bak 蓋回）', saved5 && r5b.status === 'ok' && r5b.data.money === 1234 && JSON.parse(s.getItem(K + '.bak')).money === 1234);
+
+  // corrupt-reset：主鍵不存在、只有壞 .bak → 原文寫 .corrupt、.bak 清掉
+  const s7 = fakeStorage({ [K + '.bak']: '{壞備份' });
+  const r7 = createSaveStore({ storage: s7 }).load();
+  check('load：主鍵不存在 + .bak 壞 → corrupt-reset、.corrupt = 備份原文、.bak 清掉', r7.status === 'corrupt-reset' && s7.getItem(K + '.corrupt') === '{壞備份' && s7.getItem(K + '.bak') === null);
 
   // 主鍵不存在但 .bak 有效 → recovered
   const s6 = fakeStorage({ [K + '.bak']: JSON.stringify(good()) });

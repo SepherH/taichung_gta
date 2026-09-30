@@ -1,5 +1,5 @@
 // 車輛耐久與冒煙（C3）：碰撞扣耐久 → 門檻冒白煙 / 黑灰煙降功率 / 歸零熄火（不爆炸、不起火）
-// 用法：const dmg = createVehicleDamage({ bus, THREE, scene })；dmg.attach(vehicle) 後由整合把 contacts router 的撞擊餵給 onImpact，
+// 用法：const dmg = createVehicleDamage({ bus, THREE, scene, isNight })；dmg.attach(vehicle) 後由整合把 contacts router 的撞擊餵給 onImpact，
 //   每幀 dmg.update(dt, camX, camZ) 推進去重時鐘與煙霧粒子
 // 傷害：relSpeed < 4 m/s 不扣；以上 = K × (relSpeed − 4)^1.6 × 質量係數 × 對象係數（撞行人 ×0.2）× 機車 ×0.7
 //   K 讓 1400 kg 轎車 30 km/h 撞牆約 61、60 km/h 約 340（目標區間 60–90 / 250–350）
@@ -7,6 +7,8 @@
 //   vehicle:disabled { vehicle }
 // 煙：全域共用 Sprite 池（≤ MAX_PARTICLES 顆，canvas 柔邊圓貼圖），從引擎蓋（車頭方向 length × 0.4、高 height × 0.8）冒出，
 //   只替離相機 SMOKE_RADIUS 內的車產生新粒子；池滿時不再產生（不搶舊粒子）
+// 熄火濃煙為深灰（SMOKE_STAGE 3），夜間在深色建築前會看不見：注入 isNight()（回傳 boolean 或 0–1 夜間程度，例 DayNight.night）時，
+//   新粒子顏色依夜間程度往 SMOKE_NIGHT_COLOR 提亮；沒注入就用固定深灰
 
 export const DAMAGE_MIN_SPEED = 4; // m/s，低於此不扣
 export const DAMAGE_EXP = 1.6;
@@ -22,15 +24,35 @@ export const SMOKE_DARK_AT = 300; // 耐久 ≤ 此值黑灰煙 + 降功率
 export const DAMAGED_POWER = 0.6;
 export const MAX_PARTICLES = 200;
 export const SMOKE_RADIUS = 120; // m
+export const SMOKE_NIGHT_COLOR = 0x5a5a5a; // 夜間（isNight() = 1）熄火濃煙的顏色；介於之間線性內插
 
 // 各階段煙霧參數：每秒顆數、顏色、起始不透明度、壽命（秒）、上升速度（m/s）、起始 / 結束大小（m）
-const SMOKE_STAGE = {
+export const SMOKE_STAGE = {
   1: { rate: 5, color: 0xdedede, opacity: 0.35, life: 1.6, rise: 1.1, size0: 0.35, size1: 1.4 },
   2: { rate: 10, color: 0x55555a, opacity: 0.5, life: 2.2, rise: 1.3, size0: 0.45, size1: 2.0 },
-  3: { rate: 16, color: 0x161616, opacity: 0.65, life: 2.8, rise: 1.5, size0: 0.55, size1: 2.6 },
+  3: { rate: 16, color: 0x3a3a3a, opacity: 0.65, life: 2.8, rise: 1.5, size0: 0.55, size1: 2.6 },
 };
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// 兩個 0xRRGGBB 逐通道線性內插
+function mixHex(a, b, k) {
+  let out = 0;
+  for (const sh of [16, 8, 0]) {
+    const ca = (a >> sh) & 0xff;
+    const cb = (b >> sh) & 0xff;
+    out |= Math.round(ca + (cb - ca) * k) << sh;
+  }
+  return out;
+}
+
+// 粒子顏色：只有熄火濃煙（stage 3）依夜間程度提亮；night 為 0–1
+export function smokeColor(stage, night = 0) {
+  const st = SMOKE_STAGE[stage];
+  if (!st) return 0xffffff;
+  if (stage !== 3) return st.color;
+  return mixHex(st.color, SMOKE_NIGHT_COLOR, clamp(Number(night) || 0, 0, 1));
+}
 
 // 車重：Vehicle.spec.mass（manifest）→ VehicleBody.spec.mass → 參考車重
 function massOf(vehicle) {
@@ -74,12 +96,22 @@ function makeSmokeTexture(THREE) {
   return new THREE.CanvasTexture(c);
 }
 
-export function createVehicleDamage({ bus, THREE, scene } = {}) {
+export function createVehicleDamage({ bus, THREE, scene, isNight = null } = {}) {
   const entries = new Map(); // vehicle → 狀態
   const emit = (name, payload) => {
     if (bus && bus.emit) bus.emit(name, payload);
   };
   let now = 0;
+  // 夜間程度 0–1（isNight 例外或未注入 → 0）
+  const nightLevel = () => {
+    if (typeof isNight !== 'function') return 0;
+    try {
+      const v = isNight();
+      return v === true ? 1 : clamp(Number(v) || 0, 0, 1);
+    } catch (err) {
+      return 0;
+    }
+  };
 
   // ---------- 粒子池 ----------
   const texture = THREE ? makeSmokeTexture(THREE) : null;
@@ -99,7 +131,7 @@ export function createVehicleDamage({ bus, THREE, scene } = {}) {
     return p;
   }
 
-  function spawnParticle(x, y, z, st) {
+  function spawnParticle(x, y, z, st, color) {
     const p = acquire();
     if (!p) return false;
     p.alive = true;
@@ -114,7 +146,7 @@ export function createVehicleDamage({ bus, THREE, scene } = {}) {
     p.opacity = st.opacity;
     const s = p.sprite;
     s.position.set(x + (Math.random() - 0.5) * 0.3, y, z + (Math.random() - 0.5) * 0.3);
-    s.material.color.setHex(st.color);
+    s.material.color.setHex(color);
     s.material.opacity = st.opacity;
     s.material.rotation = Math.random() * Math.PI * 2;
     s.scale.setScalar(st.size0);
@@ -224,6 +256,7 @@ export function createVehicleDamage({ bus, THREE, scene } = {}) {
         const st = SMOKE_STAGE[e.stage];
         e.emitAcc += st.rate * dt;
         if (e.emitAcc < 1) continue;
+        const color = smokeColor(e.stage, e.stage === 3 ? nightLevel() : 0);
         const spec = v.spec || {};
         const fx = Math.sin(v.yaw || 0);
         const fz = Math.cos(v.yaw || 0);
@@ -233,7 +266,7 @@ export function createVehicleDamage({ bus, THREE, scene } = {}) {
         const hy = (v.pos.y || 0) + (spec.height ?? 1.45) * 0.8;
         while (e.emitAcc >= 1) {
           e.emitAcc -= 1;
-          if (!spawnParticle(hx, hy, hz, st)) {
+          if (!spawnParticle(hx, hy, hz, st, color)) {
             e.emitAcc = 0;
             break;
           }

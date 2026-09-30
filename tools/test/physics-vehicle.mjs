@@ -1,22 +1,51 @@
-// D2c2 物理核心（二）無頭驗證：車輛射線懸吊、NPC 剛體、碰撞事件路由
+// D2c2 物理核心（二）無頭驗證：車輛射線懸吊、NPC 剛體、碰撞事件路由；Phase 3 A3 車輛手感 / 機車倒地 / 視覺傾斜 / 轉接器 / 撞人拋飛
 // 用法：
 //   node tools/test/physics-vehicle.mjs             完整版（真的 import rapier 跑物理；需要 dist/rapier.mjs）
 //   node tools/test/physics-vehicle.mjs --no-rapier 只跑不需要 rapier 的純邏輯（手感推導、mock 物件、d.ts 簽名核對）
-// exit code：0 = 全部通過、1 = 有斷言失敗、2 = 完整版找不到 rapier
-// 車型數值直接從 src/vehicle.js 的 VEHICLE_TYPES 原始碼解析（該檔 import three，不能在 node 直接載入）
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+//   SWEEP=1 node tools/test/physics-vehicle.mjs     完整版 + 「照遊戲流程」撞行人的接觸增益掃描（印網格結果；可用
+//                                                   SWEEP_V=1,1.2,1.4 SWEEP_H=0.9,1,1.1 SWEEP_KMH=30,60 SWEEP_MODE=hold,coast,brake 覆寫格點）
+// exit code：0 = 全部通過、1 = 有斷言失敗、2 = 完整版找不到 rapier；最後一行印 PASS n/n 或 FAIL k/n
+// 車型數值直接從 src/vehicle.js 的 VEHICLE_TYPES 原始碼解析；vehicle.js 本身（VehicleManager / Vehicle）以 JSON import hook + document 替身載入
+// 工作區沒有 rapier d.ts 時：mock 用內建 enum 值，d.ts 簽名核對略過（不計分）
+import { register } from 'node:module';
+
+const JSON_HOOK = `
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import {
-  VehicleBody, deriveVehicleSpec, chassisLayout, suspensionFor, frictionSlipFor, engineAccel, driveCommand, steerLimit,
+export async function load(url, context, next) {
+  if (url.endsWith('.json')) {
+    return { format: 'module', shortCircuit: true, source: 'export default ' + readFileSync(fileURLToPath(url), 'utf8') + ';' };
+  }
+  return next(url, context);
+}`;
+register(`data:text/javascript,${encodeURIComponent(JSON_HOOK)}`, import.meta.url);
+const ctx2d = new Proxy({}, {
+  get: (_, k) => (k === 'measureText' ? () => ({ width: 100 }) : () => {}),
+  set: () => true,
+});
+globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ctx2d, style: {} }) };
+
+const { readFileSync, readdirSync, existsSync } = await import('node:fs');
+const { dirname, join } = await import('node:path');
+const { fileURLToPath } = await import('node:url');
+const {
+  VehicleBody, deriveVehicleSpec, chassisLayout, suspensionFor, frictionSlipFor, engineAccel, driveCommand, steerLimit, targetYawRate, latAccelMax,
+  effectiveTopSpeed, visualTiltTarget, stepTilt, leanAngle,
   rotateVec, yawQuat, yawOf, rollOf, upOf, wheelRayGroups, membershipOf, filterOf, makeGroups, HANDLING, SUSPENSION, COM_DROP, GRAVITY,
-  ROLL_ASSIST_MAX_ROLL, OVERTURN_PROMPT_SEC,
-} from '../../src/physics/vehicle-body.js';
-import {
+  ROLL_ASSIST_MAX_ROLL, OVERTURN_PROMPT_SEC, FALL, VISUAL_TILT, slideSpeedStep,
+} = await import('../../src/physics/vehicle-body.js');
+const {
   createNpcCar, createPedestrianBody, setActiveByDistance, attachNpcReactions,
   NPC_WRECK_IMPULSE, NPC_WRECK_MIN_SEC, PED_MASS, PED_SETTLE_SEC, pedLaunch, pedLaunchFlight,
-} from '../../src/physics/npc-bodies.js';
-import { createContactRouter, HIT_THRESHOLDS, REARM_SEC } from '../../src/physics/contacts.js';
+  PED_LIFT_TIERS, PED_CONTACT_GAIN_V, PED_CONTACT_GAIN_H, PED_MAX_LAUNCH_SPEED, PED_MAX_LAUNCH_VERTICAL, PED_VERTICAL_KEEP, pedContactTuning, pedFlightEff,
+} = await import('../../src/physics/npc-bodies.js');
+const { createContactRouter, HIT_THRESHOLDS, REARM_SEC } = await import('../../src/physics/contacts.js');
+const THREE = await import('three');
+const { VehicleManager, VEHICLE_TYPES, driveControls, nearestRoadPose, FALL_OUT_DEPTH } = await import('../../src/vehicle.js');
+const { InterpolatedBody, PhysicsWorld } = await import('../../src/physics/world.js');
+const { GROUPS } = await import('../../src/physics/groups.js');
+const { VEHICLE_KNOCKDOWN_SPEED } = await import('../../src/combat.js');
+const { loadVehicleModels } = await import('../../src/vehicle-model.js');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DTS = join(ROOT, 'node_modules', '@dimforge', 'rapier3d-compat', 'dist');
@@ -25,6 +54,14 @@ const DT = 1 / 60;
 const KMH50 = 50 / 3.6;
 const DEG = Math.PI / 180;
 const TYPES = ['sedan', 'suv', 'taxi', 'scooter'];
+const SWEEP = process.env.SWEEP === '1';
+const HAS_DTS = existsSync(DTS);
+// 無 d.ts 時的 enum 後備（@dimforge/rapier3d-compat 0.x 的數值）
+const FALLBACK_ENUMS = new Map([
+  ['RigidBodyType', { Dynamic: 0, Fixed: 1, KinematicPositionBased: 2, KinematicVelocityBased: 3 }],
+  ['ActiveEvents', { NONE: 0, COLLISION_EVENTS: 1, CONTACT_FORCE_EVENTS: 2 }],
+  ['QueryFilterFlags', { EXCLUDE_FIXED: 1, EXCLUDE_KINEMATIC: 2, EXCLUDE_DYNAMIC: 4, EXCLUDE_SENSORS: 8, EXCLUDE_SOLIDS: 16, ONLY_DYNAMIC: 3, ONLY_KINEMATIC: 5, ONLY_FIXED: 6 }],
+]);
 
 let passed = 0;
 let failed = 0;
@@ -74,6 +111,7 @@ function listDts(dir) {
 }
 
 function parseDts() {
+  if (!HAS_DTS) return { classes: null, enums: FALLBACK_ENUMS };
   const classes = new Map();
   const enums = new Map();
   for (const file of listDts(DTS)) {
@@ -264,6 +302,8 @@ class MockCollider {
   }
   parent() { return this._parent; }
   setSolverGroups(g) { this._sg = g; }
+  setFriction(f) { this._friction = f; }
+  friction() { return this._friction ?? this._desc._friction; }
 }
 
 class MockVehicleController {
@@ -401,19 +441,28 @@ function runPureTests(dts) {
   }
 
   console.log('\n[純邏輯] 手感曲線（1D 縱向模型，理想抓地）');
+  // Phase 3 極速上調後的預期（起步 a0 = accel × launchScale 0.55，扭力 1 − u⁴，u = v / vmax）：
+  //   到 u 的時間 T(u) = vmax / a0 × ½(atanh u + atan u)；T(0.9) = 1.10 × vmax / a0
+  //   sedan 42 / 4.40 → 10.5 s、taxi 40 / 4.07 → 10.8 s、suv 39 / 3.80 → 11.3 s、scooter 26.4 / 4.68 → 6.2 s → 視窗由 10 s 放寬為 15 s
+  //   0→50 km/h：sedan 3.2 s、taxi 3.4 s、suv 3.7 s、scooter 3.1 s（仍在 2.5–5.5）
+  check('極速 / 質量對齊參考作：轎車 42、計程車 40、休旅 39、機車 26.4、公車 22 m/s；1300 / 1350 / 1750 / 125 / 11000 kg',
+    VT.sedan.maxSpeed === 42 && VT.taxi.maxSpeed === 40 && VT.suv.maxSpeed === 39 && VT.scooter.maxSpeed === 26.4 && VT.bus.maxSpeed === 22 &&
+      VT.sedan.mass === 1300 && VT.taxi.mass === 1350 && VT.suv.mass === 1750 && VT.scooter.mass === 125 && VT.bus.mass === 11000,
+    `機車 ${f2(VT.scooter.maxSpeed * 3.6)} km/h、公車 ${f2(VT.bus.maxSpeed * 3.6)} km/h`);
+  check('加速度依參考作比例（accel ÷ 參考值 = 1.25）', [['sedan', 6.4], ['taxi', 5.9], ['suv', 5.5], ['scooter', 6.8], ['bus', 2.7]].every(([t, r]) => near(VT[t].accel / r, 1.25, 0.01)));
   for (const t of TYPES) {
     const spec = deriveVehicleSpec(VT[t]);
     const n = spec.twoWheeler ? 2 : 4;
     let v = 0;
     let t50 = null;
     let vmaxSeen = 0;
-    for (let i = 0; i < 600; i++) {
+    for (let i = 0; i < 900; i++) {
       const cmd = driveCommand(spec, { throttle: 1, brake: 0 }, v, DT);
       v += ((cmd.engineForce * n) / spec.mass) * DT;
       vmaxSeen = Math.max(vmaxSeen, v);
       if (t50 === null && v >= KMH50) t50 = (i + 1) * DT;
     }
-    check(`${t}：0→50 km/h ${f2(t50)} s 在 2.5–5.5、10 s 達極速 ${f2(v / spec.maxSpeed * 100)}% ≥ 90%、不超速`,
+    check(`${t}：0→50 km/h ${f2(t50)} s 在 2.5–5.5、15 s 達極速 ${f2(v / spec.maxSpeed * 100)}% ≥ 90%、不超速`,
       t50 >= 2.5 && t50 <= 5.5 && v >= 0.9 * spec.maxSpeed && vmaxSeen <= spec.maxSpeed * 1.001);
     // 煞車：衝量 × 輪數 / (m·dt) = spec.brake
     const b = driveCommand(spec, { throttle: 0, brake: 1 }, KMH50, DT);
@@ -441,8 +490,34 @@ function runPureTests(dts) {
     check(`${t}：前進中打倒車 = 煞車（引擎力 0）`, rev.engineForce === 0 && rev.brakeImpulse > 0);
   }
 
-  console.log('\n[純邏輯] 轉向上限');
-  for (const t of TYPES) {
+  {
+    // 公車（不在 TYPES 的完整情境內）：a0 = 3.4 × 0.55 = 1.87 m/s²；0→50 km/h u = 0.631 → T = 22 / 1.87 × 0.653 ≈ 7.7 s；T(0.9) ≈ 12.9 s
+    const spec = deriveVehicleSpec(VT.bus);
+    let v = 0;
+    let t50 = null;
+    for (let i = 0; i < 1200; i++) {
+      v += ((driveCommand(spec, { throttle: 1, brake: 0 }, v, DT).engineForce * 4) / spec.mass) * DT;
+      if (t50 === null && v >= KMH50) t50 = (i + 1) * DT;
+    }
+    check(`bus：0→50 km/h ${f2(t50)} s 在 6–10（重車）、20 s 達極速 ${f2((v / spec.maxSpeed) * 100)}% ≥ 90%`, t50 >= 6 && t50 <= 10 && v >= 0.9 * spec.maxSpeed);
+  }
+  {
+    // 損壞降功率：引擎力 × k、有效極速 × (0.5 + 0.5k)；k = 0 踩油門 = 滑行阻力
+    const spec = deriveVehicleSpec(VT.sedan);
+    const full = driveCommand(spec, { throttle: 1, brake: 0 }, 0, DT);
+    const half = driveCommand(spec, { throttle: 1, brake: 0 }, 0, DT, 0.5);
+    const dead = driveCommand(spec, { throttle: 1, brake: 0 }, 5, DT, 0);
+    const over = driveCommand(spec, { throttle: 1, brake: 0 }, effectiveTopSpeed(spec, 0.5) + 1, DT, 0.5);
+    check(`powerScale：0.5 → 引擎力減半、有效極速 ${f2(effectiveTopSpeed(spec, 0.5))} m/s（超過即限速煞車）；0 → 無動力、滑行 ${HANDLING.coastDecel} m/s²`,
+      near(half.engineForce, full.engineForce / 2, 1e-9) && near(effectiveTopSpeed(spec, 0.5), 0.75 * spec.maxSpeed, 1e-9) &&
+        over.engineForce === 0 && near((over.brakeImpulse * 4) / (spec.mass * DT), HANDLING.overspeedDecel, 1e-9) &&
+        dead.engineForce === 0 && near((dead.brakeImpulse * 4) / (spec.mass * DT), HANDLING.coastDecel, 1e-9));
+  }
+
+  console.log('\n[純邏輯] 轉向上限（高速轉向遞減）');
+  // 目標偏航率 = min(既有街機曲線 turnRate × clamp(v/4) / (1 + v/18), maxLatAccel / v)；手煞車不套側向上限（保留甩尾）
+  // 預期：低速（側向加速度未達上限）與既有手感相同；極速滿舵的穩態側向加速度 = maxLatAccel（低於抓地上限 → 可控）
+  for (const t of [...TYPES, 'bus']) {
     const spec = deriveVehicleSpec(VT[t]);
     let mono = true;
     let prev = Infinity;
@@ -452,13 +527,45 @@ function runPureTests(dts) {
       prev = a;
     }
     let maxErr = 0;
-    for (const v of [8, 15, 20]) {
+    for (const v of [8, 15, 20, spec.maxSpeed]) {
       const legacy = (spec.turnRate * Math.min(1, v / 4)) / (1 + v / 18);
+      const want = Math.min(legacy, latAccelMax(spec) / v);
       const phys = (v * Math.tan(steerLimit(spec, v))) / spec.wheelbase;
-      maxErr = Math.max(maxErr, Math.abs(phys - legacy) / legacy);
+      maxErr = Math.max(maxErr, Math.abs(phys - want) / want);
     }
-    check(`${t}：轉角上限隨速度遞減、≤ ${HANDLING.maxWheelAngle} rad、偏航率與既有手感誤差 ${f2(maxErr * 100)}% < 5%`, mono && maxErr < 0.05,
-      `低速 ${f3(steerLimit(spec, 1))} / 極速 ${f3(steerLimit(spec, spec.maxSpeed))} rad`);
+    const vmax = spec.maxSpeed;
+    const latTop = (vmax * vmax * Math.tan(steerLimit(spec, vmax))) / spec.wheelbase;
+    const legacyTop = (vmax * spec.turnRate) / (1 + vmax / 18);
+    const grip = GRAVITY * frictionSlipFor(spec, chassisLayout(spec));
+    const hbKeeps = steerLimit(spec, 19.4, true) > steerLimit(spec, 19.4) || near(targetYawRate(spec, 19.4, true), targetYawRate(spec, 19.4), 1e-12);
+    check(`${t}：轉角隨速度遞減、偏航率誤差 ${f2(maxErr * 100)}% < 5%、極速滿舵側向 ${f2(latTop)} m/s²（舊曲線 ${f2(legacyTop)}）≤ 上限 ${latAccelMax(spec)} < 抓地 ${f2(grip)}、手煞車不受限`,
+      mono && maxErr < 0.05 && latTop <= latAccelMax(spec) * 1.001 && latAccelMax(spec) < grip && hbKeeps,
+      `低速 ${f3(steerLimit(spec, 1))} / 極速 ${f3(steerLimit(spec, vmax))} rad`);
+  }
+
+  console.log('\n[純邏輯] 視覺傾斜（懸吊 pitch / roll、機車 lean）');
+  {
+    const car = deriveVehicleSpec(VT.sedan);
+    const bike = deriveVehicleSpec(VT.scooter);
+    const brake = visualTiltTarget(car, -18, 0);
+    const accel = visualTiltTarget(car, 4, 0);
+    const turn = visualTiltTarget(car, 0, 10);
+    // 預期：煞車 −18 × 0.004 = 0.072 rad → 上限 3.5°；加速 4 → −0.016 rad（車頭抬）；左彎 10 m/s² → +0.045 rad（車頂倒向右 = 彎外）
+    check(`汽車：煞車點頭 ${f2(brake.pitch / DEG)}°（上限 3.5°）、加速抬頭 ${f2(accel.pitch / DEG)}°、左彎車身外傾 ${f2(turn.roll / DEG)}°`,
+      near(brake.pitch, VISUAL_TILT.pitchMax, 1e-9) && near(accel.pitch, -0.016, 1e-9) && near(turn.roll, 0.045, 1e-9));
+    const lean = visualTiltTarget(bike, 0, 6.5);
+    const leanMax = visualTiltTarget(bike, 0, -40);
+    // 預期：機車左彎 6.5 m/s² → 向左傾 atan(6.5 / 9.81) = 33.5°（roll 負）；右彎 40 m/s² → 上限 35°
+    check(`機車 lean：左彎 6.5 m/s² → ${f2(-lean.roll / DEG)}°（33.5°）、右彎 40 m/s² → ${f2(leanMax.roll / DEG)}°（上限 35°）`,
+      near(-lean.roll, Math.atan(6.5 / GRAVITY), 1e-9) && near(leanMax.roll, 35 * DEG, 1e-9) && near(leanAngle(1e3), 35 * DEG, 1e-9));
+    const st = { pitch: 0, roll: 0, pitchVel: 0, rollVel: 0 };
+    let peak = 0;
+    for (let i = 0; i < 90; i++) {
+      stepTilt(st, { pitch: 0.05, roll: -0.1 }, DT);
+      peak = Math.max(peak, st.pitch);
+    }
+    check(`stepTilt：1.5 s 收斂（pitch ${f3(st.pitch)} / roll ${f3(st.roll)}）且有小幅回彈（峰值 ${f3(peak)} > 0.05）`,
+      near(st.pitch, 0.05, 1e-3) && near(st.roll, -0.1, 2e-3) && peak > 0.05 && peak < 0.065);
   }
 
   console.log('\n[純邏輯] 四元數 / collision groups');
@@ -542,7 +649,7 @@ function runPureTests(dts) {
     check('機車防傾：右傾 10° 時施加繞前進軸的反向力矩衝量', tq && tq.z < 0 && Math.abs(tq.x) < 1e-9, `τ·dt = ${f3(tq.z)} N·m·s`);
   }
   {
-    // 汽車翻覆：只在有輪接地且 |roll| < 60° 時回正；翻覆持續 OVERTURN_PROMPT_SEC 後才該提示按 R
+    // 汽車翻覆：只在有輪接地且 |roll| < 60° 時回正；翻覆持續 OVERTURN_PROMPT_SEC 後 isOverturned() 為真（提示按 F 扶起）
     const w = new MockWorld();
     const vb = new VehicleBody(R, w, VT.sedan, { groups: G });
     const vc = [...w._controllers][0];
@@ -558,8 +665,8 @@ function runPureTests(dts) {
     vb.preStep(DT);
     const noTorque61 = vb.body._torques.length === n0;
     const due = vb.overturnedTime >= OVERTURN_PROMPT_SEC - 1e-9;
-    check(`汽車回正輔助：roll 30° 接地 → 施力；roll ${f2(ROLL_ASSIST_MAX_ROLL / DEG + 1)}° → 不施力、${steps} 步後 overturnedTime ${f2(vb.overturnedTime)} s ≥ ${OVERTURN_PROMPT_SEC}（前一步未達）`,
-      t30 === 1 && noTorque61 && due && early);
+    check(`汽車回正輔助：roll 30° 接地 → 施力；roll ${f2(ROLL_ASSIST_MAX_ROLL / DEG + 1)}° → 不施力、${steps} 步後 overturnedTime ${f2(vb.overturnedTime)} s ≥ ${OVERTURN_PROMPT_SEC}（前一步未達）、isOverturned() 同步`,
+      t30 === 1 && noTorque61 && due && early && vb.isOverturned());
     vb.body._q = rollQ(180);
     vb.overturnedTime = 0;
     for (let i = 0; i < 30; i++) vb.preStep(DT);
@@ -573,8 +680,8 @@ function runPureTests(dts) {
     check('重新接地且 roll < 60°：恢復施力、overturnedTime 歸零', vb.body._torques.length === n0 + 1 && vb.overturnedTime === 0);
     vb.body._q = rollQ(180);
     vb.preStep(DT);
-    vb.flip();
-    check('flip() 後 overturnedTime 歸零', vb.overturnedTime === 0);
+    vb.upright();
+    check('upright()（flip 別名）後 overturnedTime 歸零、isOverturned() 為假', vb.overturnedTime === 0 && !vb.isOverturned());
     const sc = new VehicleBody(R, new MockWorld(), VT.scooter, { groups: G });
     sc.body._q = rollQ(70);
     sc.preStep(DT);
@@ -598,6 +705,264 @@ function runPureTests(dts) {
     const released = vb.body._torques.slice(n1).filter((t) => Math.abs(t.y) > 1e-9).length;
     check(`手煞車偏航阻尼：${HANDLING.handbrakeMaxYawRate} rad/s 以下不施力、超出 1 rad/s → τ·dt ${f2(tq.y)}（預期 ${f2(expect)}）、放開手煞車不施力`,
       below === 0 && near(tq.y, expect, 1e-6) && released === 0);
+  }
+
+  console.log('\n[純邏輯] 機車倒地 / 降功率 / 視覺傾斜（mock Rapier）');
+  {
+    // 手煞車 + 15 m/s（≥ 11）+ 滿舵：方向盤 4/s 轉入，第 8 步 |steer| = 0.533 ≥ 0.5 → 倒地
+    const w = new MockWorld();
+    const vb = new VehicleBody(R, w, VT.scooter, { groups: G });
+    const vc = [...w._controllers][0];
+    let calls = 0;
+    vb.onFall = (b) => { if (b === vb) calls++; };
+    vb.setControls({ throttle: 1, steer: 1, handbrake: true });
+    vb.body._lv = { x: 0, y: 0, z: 15 };
+    let fellAt = null;
+    for (let i = 0; i < 30 && fellAt === null; i++) {
+      vb.preStep(DT);
+      if (vb.fallen) fellAt = i + 1;
+    }
+    const expectStep = Math.ceil(FALL.handbrakeSteer / (HANDLING.steerRate * DT)) + 1;
+    vb.preStep(DT);
+    const noEngine = vc._wheels.every((wh) => wh.engine === 0 && wh.brake > 0);
+    let early = true;
+    while (vb.fallenTime < OVERTURN_PROMPT_SEC - DT - 1e-9) {
+      vb.preStep(DT);
+      if (vb.isOverturned()) early = false;
+    }
+    vb.preStep(DT);
+    check(`機車 手煞車 + 15 m/s + 滿舵：第 ${fellAt} 步倒地（預期 ${expectStep}）、onFall ${calls} 次、倒地後無動力且磨地煞車、${OVERTURN_PROMPT_SEC} s 後 isOverturned`,
+      fellAt === expectStep && calls === 1 && noEngine && early && vb.isOverturned());
+    check(`倒地網格側躺：roll ${f2(vb.visual.roll / DEG)}°（向左倒 = −80°）`, near(vb.visual.roll, -VISUAL_TILT.fallenRoll, 1e-9));
+    const y0 = vb.body._t.y;
+    vb.upright();
+    check('upright()：機車抬高 0.3 m、清除倒地與視覺傾斜', !vb.fallen && !vb.isOverturned() && near(vb.body._t.y, y0 + 0.3, 1e-9) && vb.visual.roll === 0);
+  }
+  {
+    // 側向加速度：20 m/s × 0.5 rad/s = 10 m/s² ≥ 8.8 持續 ≥ 0.12 s（ceil(0.12 × 60) = 第 8 步）→ 倒地；0.3 rad/s（6 m/s²）3 s 不倒；汽車不判倒地
+    const run = (spec, yawRate, n) => {
+      const vb = new VehicleBody(R, new MockWorld(), spec, { groups: G });
+      vb.setControls({ throttle: 1 });
+      vb.body._lv = { x: 0, y: 0, z: 20 };
+      vb.body._av = { x: 0, y: yawRate, z: 0 };
+      let at = null;
+      for (let i = 0; i < n && at === null; i++) {
+        vb.preStep(DT);
+        if (vb.fallen) at = i + 1;
+      }
+      return { at, vb };
+    };
+    const a = run(VT.scooter, 0.5, 60);
+    const b = run(VT.scooter, 0.3, 180);
+    const c = run(VT.sedan, 0.8, 60);
+    check(`機車側向 10 m/s²：第 ${a.at} 步倒地（預期 ${Math.ceil(FALL.latSec / DT - 1e-9)}）、向左倒；6 m/s² 3 s 不倒（視覺 lean ${f2(-b.vb.visual.roll / DEG)}° ≈ ${f2(Math.atan(6 / GRAVITY) / DEG)}°）；汽車不判倒地`,
+      a.at === Math.ceil(FALL.latSec / DT - 1e-9) && a.vb._fallSide === 1 && b.at === null && near(-b.vb.visual.roll, Math.atan(6 / GRAVITY), 0.01) && c.at === null);
+  }
+  {
+    // 實測修正：76 km/h 手煞 + 滿舵倒地後不得倒退滑行；倒地後 1.5 s 內停下、滑行 ≤ 10 m（mock 不積分位置，由測試依 linvel 積分）
+    // 兩種情境：車頭仍朝前（forwardSpeed 正）、甩尾後車頭朝後（forwardSpeed 負，即實測的 −17 km/h 倒退滑行）
+    const slide = (yaw) => {
+      const vb = new VehicleBody(R, new MockWorld(), VT.scooter, { groups: G, yaw });
+      const v0 = 76 / 3.6;
+      vb.body._lv = { x: 0, y: 0, z: v0 };
+      vb.body._av = { x: 0, y: 2.5, z: 0 };
+      vb._fall(1);
+      const fric = vb.collider.friction();
+      let dist = 0;
+      let stopAt = null;
+      let grew = 0;
+      let reversed = 0;
+      let prev = v0;
+      for (let i = 0; i < 180; i++) {
+        vb.preStep(DT);
+        const lv = vb.body._lv;
+        const sp = Math.hypot(lv.x, lv.z);
+        if (sp > prev + 1e-9) grew++;
+        if (lv.z < -1e-9) reversed++;
+        prev = sp;
+        dist += sp * DT;
+        if (stopAt === null && sp === 0) stopAt = (i + 1) * DT;
+      }
+      const spin = Math.abs(vb.body._av.y);
+      vb.upright();
+      return { dist, stopAt, grew, reversed, fric, spin, fricAfter: vb.collider.friction(), fwd0: yaw };
+    };
+    const a = slide(0);
+    const b = slide(Math.PI);
+    const ok = (r) => r.stopAt !== null && r.stopAt <= 1.5 && r.dist <= 10 && r.grew === 0 && r.reversed === 0;
+    check(`機車 76 km/h 倒地滑行：車頭朝前 ${a.stopAt === null ? '未停' : f2(a.stopAt) + ' s'} 停、滑 ${f2(a.dist)} m；甩尾車頭朝後 ${b.stopAt === null ? '未停' : f2(b.stopAt) + ' s'} 停、滑 ${f2(b.dist)} m（≤ 1.5 s / ≤ 10 m、速度只減不增、不倒退）`,
+      ok(a) && ok(b));
+    check(`倒地：底盤摩擦 ${a.fric} → 扶起還原 ${a.fricAfter}；打轉角速度 2.5 → ${f3(a.spin)} rad/s（3 s 後）`,
+      a.fric === FALL.slideFriction && a.fricAfter === 0.5 && a.spin < 0.01);
+    let s = 76 / 3.6;
+    let n = 0;
+    while (s > 0 && n < 1000) {
+      s = slideSpeedStep(s, DT);
+      n++;
+    }
+    check(`slideSpeedStep：21.1 m/s 以 ${FALL.slideGroundDecel} m/s² + ${FALL.slideDamping}/s 阻尼 ${f2(n * DT)} s 歸零、單調遞減且不為負`, n * DT <= 1.5 && s === 0 && slideSpeedStep(0, DT) === 0);
+  }
+  {
+    // 懸吊視覺：20 → 17 m/s 持續煞車（−18 m/s²）→ 點頭（pitch 正）；左轉 10 m/s² → 車身向右（roll 正）
+    const w = new MockWorld();
+    const vb = new VehicleBody(R, w, VT.sedan, { groups: G });
+    const vc = [...w._controllers][0];
+    let v = 20;
+    vb.body._av = { x: 0, y: 0.5, z: 0 };
+    for (let i = 0; i < 60; i++) {
+      vb.body._lv = { x: 0, y: 0, z: v };
+      vb.preStep(DT);
+      v -= 18 * DT;
+    }
+    check(`汽車煞車 + 左彎：量測縱向 ${f2(vb.accLong)} m/s²、側向 ${f2(vb.accLat)} m/s²；網格 pitch ${f2(vb.visual.pitch / DEG)}°（點頭）、roll ${f2(vb.visual.roll / DEG)}°（外傾）`,
+      near(vb.accLong, -18, 0.5) && vb.visual.pitch > 2 * DEG && vb.visual.roll > 0 && vb.visual.roll <= VISUAL_TILT.rollMax * 1.2);
+    vb.setPowerScale(0.4);
+    vb.setControls({ throttle: 1 });
+    vb.body._lv = { x: 0, y: 0, z: 0 };
+    vb.preStep(DT);
+    const sum = vc._wheels.reduce((acc, wh) => acc + wh.engine, 0);
+    vb.setPowerScale(0);
+    vb.preStep(DT);
+    const dead = vc._wheels.every((wh) => wh.engine === 0);
+    vb.setPowerScale(7);
+    check(`setPowerScale：0.4 → ΣF ${sum.toFixed(0)} N = 0.4 × 全力；0 → 無引擎力；超出範圍 clamp 到 1`,
+      near(sum, 0.4 * vb.spec.mass * engineAccel(vb.spec, 0), 1e-6) && dead && vb.powerScale === 1);
+  }
+
+  console.log('\n[純邏輯] VehicleManager / Vehicle 轉接器（mock Rapier + 替身 PhysicsWorld）');
+  {
+    const before = [];
+    const after = [];
+    const w = new MockWorld();
+    const pw = {
+      world: w, alpha: 0,
+      onBeforeStep: (cb) => before.push(cb), onAfterStep: (cb) => after.push(cb),
+      register: (b) => new InterpolatedBody(b), unregister() {},
+      step(dt) { before.forEach((f) => f(dt)); after.forEach((f) => f(dt)); },
+    };
+    const router = createContactRouter(R, { world: w, eventQueue: new MockEventQueue() });
+    const events = [];
+    const bus = { emit: (name, payload) => events.push({ name, payload }) };
+    const scene = new THREE.Scene();
+    const terrain = { querySurface: () => ({ y: 0 }) };
+    const vm = new VehicleManager(scene, [{ type: 'sedan', color: '#c03030', x: 0, y: 0, z: 0, yaw: 0 }, { type: 'scooter', color: '#3050c0', x: 10, y: 0, z: 0, yaw: 0 }],
+      terrain, { RAPIER: R, pw, router, groups: G }, { bus });
+    const [sedan, scooter] = vm.vehicles;
+    check('停放車 kinematic、無 glb 時 spec.mass 取 VEHICLE_TYPES（參考作質量）', sedan.body.kinematic && scooter.body.kinematic && sedan.body.spec.mass === 1300 && scooter.body.spec.mass === 125);
+    const taxi = vm.adopt({ type: 'taxi', color: '#f5c400', x: 5, y: 0, z: 5, yaw: 1, vx: 3, vz: 4 });
+    const lv = taxi.body.body.linvel();
+    check('adopt(pose)：建立可駕駛車（dynamic、沿用速度 3 / 4 m/s、登記碰撞路由、列入 vehicles）',
+      vm.vehicles.length === 3 && !taxi.body.kinematic && lv.x === 3 && lv.z === 4 && router.entityOf(taxi.body.collider.handle) === taxi.body &&
+        near(taxi.yaw, 1, 1e-9) && taxi.body.spec.mass === 1350);
+    const h1 = taxi.honk();
+    const h2 = taxi.honk();
+    for (let i = 0; i < 12; i++) pw.step(DT); // 0.2 s
+    const h3 = taxi.honk();
+    for (let i = 0; i < 12; i++) pw.step(DT); // 0.4 s
+    const h4 = taxi.honk();
+    const ev = events.filter((e) => e.name === 'vehicle:horn');
+    const p0 = ev[0] && ev[0].payload;
+    check(`honk()：冷卻 0.4 s（響 / 擋 / 0.2 s 擋 / 0.4 s 響 = ${[h1, h2, h3, h4].join(' / ')}）、emit vehicle:horn ${ev.length} 次、payload { vehicle, x, z, dirX, dirZ } = 車頭方向`,
+      h1 && !h2 && !h3 && h4 && ev.length === 2 && p0.vehicle === taxi && near(p0.dirX, Math.sin(1), 1e-9) && near(p0.dirZ, Math.cos(1), 1e-9) &&
+        Number.isFinite(p0.x) && Number.isFinite(p0.z));
+    const quiet = new VehicleManager(new THREE.Scene(), [{ type: 'sedan', x: 0, y: 0, z: 0, yaw: 0 }], terrain, { RAPIER: R, pw: { ...pw, world: new MockWorld() }, router, groups: G });
+    check('未注入 bus：honk() 照常回傳 true、不丟例外', quiet.vehicles[0].honk() === true);
+    taxi.setPowerScale(0.25);
+    check('vehicle.setPowerScale → VehicleBody.powerScale', taxi.powerScale === 0.25);
+    // 機車倒地：騎乘中手煞車 + 15 m/s + 滿舵 → vehicle.onFall 與 vehicles.onFall 各一次；1.5 s 後 isOverturned、findOverturned 找得到、findNearby 不給騎
+    const got = [];
+    scooter.onFall = (v) => got.push(['v', v]);
+    vm.onFall = (v) => got.push(['m', v]);
+    vm.drive(scooter, true);
+    scooter.setControls(driveControls({ x: -1, y: 1 }, true));
+    scooter.body.body.setLinvel({ x: 0, y: 0, z: 15 }, true);
+    for (let i = 0; i < 12; i++) pw.step(DT);
+    const fellNow = scooter.fallen && !scooter.isOverturned();
+    for (let i = 0; i < 90; i++) pw.step(DT);
+    const near0 = { x: scooter.pos.x + 1.2, z: scooter.pos.z };
+    check(`機車倒地：onFall（vehicle ${got.filter((g) => g[0] === 'v').length} 次 / manager ${got.filter((g) => g[0] === 'm').length} 次）、倒下即 fallen、1.5 s 後 isOverturned、findOverturned 找到、findNearby 排除`,
+      got.length === 2 && got.every((g) => g[1] === scooter) && fellNow && scooter.isOverturned() && vm.findOverturned(near0) === scooter && vm.findNearby(near0) !== scooter);
+    scooter.body.visual.roll = 0.3;
+    scooter.syncBody(0);
+    const meshUp = new THREE.Vector3(0, 1, 0).applyQuaternion(scooter.mesh.quaternion);
+    const q = scooter.body.body.rotation();
+    const bodyUp = upOf(q);
+    const tilt = Math.acos(Math.min(1, meshUp.x * bodyUp.x + meshUp.y * bodyUp.y + meshUp.z * bodyUp.z));
+    check(`syncBody：網格疊加視覺傾斜（roll 0.3 rad → 網格與剛體 up 夾角 ${f3(tilt)}），剛體姿態不變`, near(tilt, 0.3, 1e-6) && near(bodyUp.y, 1, 1e-9));
+    vm.drive(scooter, false); // 整合者在 onFall 裡讓騎士下車
+    scooter.upright();
+    check('vehicle.upright()：清除倒地、isOverturned 假、可再上車（findNearby）', !scooter.fallen && !scooter.isOverturned() && vm.findNearby(near0, 5) !== null);
+    sedan.body.overturnedTime = 2;
+    const over = sedan.isOverturned();
+    sedan.flip();
+    check('汽車 isOverturned（overturnedTime ≥ 1.5）；flip() 為 upright 別名', over && !sedan.isOverturned());
+    const removed = vm.remove(taxi);
+    check('remove(vehicle)：自 vehicles 移除、剛體 / 控制器 / 路由 / 網格釋放', removed && vm.vehicles.length === 2 && router.entityOf(taxi.body?.collider?.handle ?? -1) === null &&
+      taxi.mesh.parent === null && !vm.remove(taxi));
+  }
+
+  console.log('\n[純邏輯] 掉出世界回收（mock Rapier + 替身 PhysicsWorld）');
+  {
+    // 道路：一條東西向（x 軸方向）路，寬 12 m；nearestRoadPose 取中心線最近點往右偏半路寬 × 0.5（面向 +Z 時左方 +X → 向東行駛右側為 +Z）
+    const roads = [{ hw: 6, pts: [{ x: -100, z: 50 }, { x: 100, z: 50 }] }, { hw: 4, pts: [{ x: 500, z: 500 }, { x: 500, z: 600 }] }];
+    const pose = nearestRoadPose(roads, 10, 40, Math.PI / 2);
+    const back = nearestRoadPose(roads, 10, 40, -Math.PI / 2);
+    check(`nearestRoadPose：最近路段中心線 (10, 50) → 往行進右側偏 3 m、yaw 沿路（東 ${f2(pose.yaw)} / 反向西 ${f2(back.yaw)}）；無道路回 null`,
+      near(pose.x, 10, 1e-9) && near(pose.z, 53, 1e-9) && near(pose.yaw, Math.PI / 2, 1e-9) && near(back.z, 47, 1e-9) && near(Math.abs(back.yaw), Math.PI / 2, 1e-9) &&
+        nearestRoadPose([], 0, 0) === null);
+    const before = [];
+    const after = [];
+    const w = new MockWorld();
+    const pw = {
+      world: w, alpha: 0,
+      onBeforeStep: (cb) => before.push(cb), onAfterStep: (cb) => after.push(cb),
+      register: (b) => new InterpolatedBody(b), unregister() {},
+      step(dt) { before.forEach((f) => f(dt)); after.forEach((f) => f(dt)); },
+    };
+    const router = createContactRouter(R, { world: w, eventQueue: new MockEventQueue() });
+    const events = [];
+    const bus = { emit: (name, payload) => events.push({ name, payload }) };
+    const terrain = { querySurface: () => ({ y: 2 }) };
+    const vm = new VehicleManager(new THREE.Scene(), [{ type: 'sedan', x: 0, y: 2, z: 40, yaw: 0 }, { type: 'suv', x: 20, y: 2, z: 40, yaw: 0 }, { type: 'taxi', x: 30, y: 2, z: 40, yaw: 0 }],
+      terrain, { RAPIER: R, pw, router, groups: G }, { bus, roads });
+    const [car, idle, parked] = vm.vehicles;
+    vm.drive(car, true);
+    idle.body.setKinematic(false); // 被撞醒的無人車
+    const cy = car.body.layout.centerY;
+    // 沒掉出世界（地面下 19 m）不動；玩家車掉到地面下 25 m、帶速度與翻滾 → 下一步重置
+    car.body.body._t = { x: 12, y: 2 - 19 + cy, z: 40 };
+    pw.step(DT);
+    const kept = vm.recovered === 0;
+    car.body.body._t = { x: 12, y: 2 - (FALL_OUT_DEPTH + 5) + cy, z: 40 };
+    car.body.body._q = { x: Math.sin(0.8), y: 0, z: 0, w: Math.cos(0.8) };
+    car.body.body._lv = { x: 3, y: -40, z: 1 };
+    car.body.body._av = { x: 2, y: 1, z: 0 };
+    idle.body.body._t = { x: 25, y: -200, z: 40 };
+    idle.body.body._lv = { x: 0, y: -60, z: 0 };
+    parked.body.body._t = { x: 30, y: -200, z: 40 }; // kinematic 停放車不查（不會掉）
+    pw.step(DT);
+    car.syncBody(0);
+    const t = car.body.body._t;
+    const up = upOf(car.body.body._q);
+    const lv = car.body.body._lv;
+    const ev = events.filter((e) => e.name === 'vehicle:recovered');
+    check(`玩家駕駛中的車掉到地面下 ${FALL_OUT_DEPTH + 5} m → 重置到最近道路 (${f2(t.x)}, ${f2(t.z)})、輪底 = 地面 ${f2(t.y - cy)}、直立 up.y ${f3(up.y)}、速度歸零、仍可駕駛（dynamic）；地面下 19 m 不處理`,
+      kept && near(t.x, 12, 1e-9) && near(t.z, 53, 1e-9) && near(t.y - cy, 2, 1e-9) && near(up.y, 1, 1e-9) && lv.x === 0 && lv.y === 0 && lv.z === 0 &&
+        !car.body.kinematic && car.driven && near(car.pos.y, 2, 1e-6));
+    const it = idle.body.body._t;
+    check(`無人車掉出世界 → 重置到道路 (${f2(it.x)}, ${f2(it.z)}) 並停放（kinematic）；kinematic 停放車不處理；vehicle:recovered ${ev.length} 次（driven 旗標 ${ev.map((e) => e.payload.driven).join(' / ')}）`,
+      near(it.x, 25, 1e-9) && near(it.z, 53, 1e-9) && idle.body.kinematic && parked.body.body._t.y === -200 && vm.recovered === 2 && ev.length === 2 &&
+        ev.some((e) => e.payload.vehicle === car && e.payload.driven) && ev.some((e) => e.payload.vehicle === idle && !e.payload.driven));
+    // 沒給 roads：重置到原 x / z 的地面；座標為 NaN（數值爆掉）也回收
+    const vm2 = new VehicleManager(new THREE.Scene(), [{ type: 'scooter', x: 5, y: 2, z: 5, yaw: 0 }], terrain, { RAPIER: R, pw: { ...pw, onBeforeStep() {}, onAfterStep: (cb) => after.push(cb) }, router, groups: G });
+    const sc = vm2.vehicles[0];
+    vm2.drive(sc, true);
+    sc.body._fall(1);
+    sc.body.body._t = { x: 5, y: NaN, z: 5 };
+    pw.step(DT);
+    const st = sc.body.body._t;
+    check(`未注入 roads：原地 (${f2(st.x)}, ${f2(st.z)}) 貼地重置；y 為 NaN 也回收；倒地狀態清除`,
+      vm2.recovered === 1 && near(st.x, 5, 1e-9) && near(st.z, 5, 1e-9) && near(st.y - sc.body.layout.centerY, 2, 1e-9) && !sc.fallen);
   }
 
   console.log('\n[純邏輯] NPC 車 / 行人（mock Rapier）');
@@ -632,9 +997,9 @@ function runPureTests(dts) {
         !(filterOf(sg) & mOf('VEHICLE')) && !(filterOf(sg) & mOf('NPC_CAR')) && (filterOf(sg) & mOf('WORLD')) && ped.isGhost &&
         (ped.collider._desc._events & dts.enums.get('ActiveEvents').COLLISION_EVENTS));
     const first = ped.hit({ impulse: 99999, dir: { x: 0, y: 0, z: 1 } });
-    check('hit → Dynamic、yawOnly 只開 Y 軸旋轉、恢復實體碰撞、衝量上限 70 kg × 12 m/s',
+    check(`hit → Dynamic、yawOnly 只開 Y 軸旋轉、恢復實體碰撞、水平衝量上限 70 kg × ${PED_MAX_LAUNCH_SPEED} m/s`,
       first && ped.isDown && ped.body._type === RBT.Dynamic && ped.body._rot.join() === 'false,true,false' && ped.collider._sg === G.PEDESTRIAN &&
-        near(ped.body._lv.z, 12, 1e-9));
+        near(ped.body._lv.z, PED_MAX_LAUNCH_SPEED, 1e-9));
     let r = ped.settleCheck(DT);
     const movingNotSettled = !r.settled;
     ped.body._lv = { x: 0.1, y: 0, z: 0 };
@@ -664,22 +1029,51 @@ function runPureTests(dts) {
     check('rotationMode free 允許三軸旋轉；未知模式丟錯', free.body._rot.join() === 'true,true,true' && threw);
   }
   {
-    // 被車撞上拋分級：30 km/h 拋高 0.6–1.0 m、落地前水平飛 5–9 m（平地拋體近似；修正前一律 lift 0.25）
+    // 被車撞上拋（Phase 3：接觸增益拆成垂直 / 水平兩個倍率，實際套在 hit() 施加的初速；FX1 起水平 / 垂直分開鉗制）
+    // 30 km/h 預期（npc-bodies.js 檔內推導）：基準水平 8.33 × 0.74 = 6.17、向上 6.17 × 0.62 = 3.82 m/s；
+    //   施加 = 水平 × H(1.0) = 6.17、向上 × V(1.3) = 4.97 m/s；估算再乘 pedFlightEff（追撞差速 Δv 2.16 → 垂直 0.73、水平 1.05 × 車速）
+    //   → 有效向上 3.62 → 拋高 0.67 m、飛 6.46 m（宿主 7c V1.3/H1.0 實測 0.67 / 6.44；目標 0.6–0.9 m、5–9 m）
+    // 60 km/h（FX1 目標 0.9–1.6 m、12–20 m）：高速級水平 16.67 × 0.87 = 14.5（上限 20 不鉗）、向上 14.5 × 0.34 × 1.3 = 6.41（上限 7 不鉗）
+    //   → Δv 2.17 → 有效倍率 0.73 → 拋高約 1.11 m、飛約 16.7 m（舊版被 12 / 5.5 兩個上限鉗住，宿主實測只有 0.32 / 9.05）
     const KMH30 = 30 / 3.6;
     const fl = pedLaunchFlight(PED_MASS * KMH30);
-    const old = { apex: (0.25 * KMH30) ** 2 / (2 * GRAVITY), distance: (KMH30 * 2 * 0.25 * KMH30) / GRAVITY };
-    check(`30 km/h 撞行人：拋高 ${f2(fl.apex)} m（0.6–1.0）、水平飛 ${f2(fl.distance)} m（5–9）；修正前 ${f2(old.apex)} m / ${f2(old.distance)} m`,
-      fl.apex >= 0.6 && fl.apex <= 1.0 && fl.distance >= 5 && fl.distance <= 9);
+    check(`30 km/h 撞行人（估算）：拋高 ${f2(fl.apex)} m（0.6–0.9）、水平飛 ${f2(fl.distance)} m（5–9）`,
+      fl.apex >= 0.6 && fl.apex <= 0.9 && fl.distance >= 5 && fl.distance <= 9);
     const tiers = [20, 40, 60].map((k) => pedLaunchFlight((PED_MASS * k) / 3.6));
-    check(`上拋隨車速遞增：20 / 40 / 60 km/h 拋高 ${tiers.map((t) => f2(t.apex)).join(' / ')} m、飛 ${tiers.map((t) => f2(t.distance)).join(' / ')} m`,
-      tiers[0].apex < fl.apex && fl.apex < tiers[1].apex && tiers[1].apex <= tiers[2].apex);
+    check(`上拋隨車速不遞減：20 / 30 / 40 / 60 km/h 拋高 ${[tiers[0], fl, tiers[1], tiers[2]].map((t) => f2(t.apex)).join(' / ')} m、飛 ${[tiers[0], fl, tiers[1], tiers[2]].map((t) => f2(t.distance)).join(' / ')} m`,
+      tiers[0].apex < fl.apex && fl.apex < tiers[1].apex && tiers[1].apex <= tiers[2].apex && fl.distance < tiers[1].distance && tiers[1].distance < tiers[2].distance);
+    const l60 = pedLaunch(PED_MASS * 60 / 3.6);
+    check(`60 km/h 撞行人（估算）：施加水平 ${f2(l60.horizontal)}（< 上限 ${PED_MAX_LAUNCH_SPEED}）、向上 ${f2(l60.vertical)}（< 上限 ${PED_MAX_LAUNCH_VERTICAL}）→ 拋高 ${f2(tiers[2].apex)} m（0.9–1.6）、飛 ${f2(tiers[2].distance)} m（12–20）`,
+      l60.horizontal < PED_MAX_LAUNCH_SPEED && l60.vertical < PED_MAX_LAUNCH_VERTICAL &&
+        tiers[2].apex >= 0.9 && tiers[2].apex <= 1.6 && tiers[2].distance >= 12 && tiers[2].distance <= 20);
+    const eff30 = pedFlightEff(PED_MASS * KMH30);
+    check(`pedFlightEff 對齊宿主 7c 數據：30 km/h 垂直 ${f3(eff30.v)}（實測換算 0.73）、拳擊 1 / 1`,
+      Math.abs(eff30.v - 0.73) < 0.02 && pedFlightEff(120).v === 1 && pedFlightEff(120).h === 1);
+    // 分開鉗制：水平碰上限不會壓垂直；垂直鉗制後至少保留未鉗制值 × PED_VERTICAL_KEEP（上拋隨車速遞增、不再變定值）
+    const sweepKmh = [43, 45, 50, 60, 80, 100, 150];
+    const launches = sweepKmh.map((k) => pedLaunch(PED_MASS * k / 3.6));
+    const hi = launches[launches.length - 1];
+    const rawHi = (150 / 3.6) * PED_LIFT_TIERS[3].carry * PED_LIFT_TIERS[3].lift * PED_CONTACT_GAIN_V;
+    check(`水平 / 垂直分開鉗制：${sweepKmh.join(' / ')} km/h 水平 ${launches.map((l) => f2(l.horizontal)).join(' / ')}、向上 ${launches.map((l) => f2(l.vertical)).join(' / ')} m/s（高速級內遞增；150 km/h 保留 ${PED_VERTICAL_KEEP}）`,
+      launches.every((l, i) => i === 0 || l.horizontal >= launches[i - 1].horizontal) &&
+        launches.slice(1).every((l, i, a) => i === 0 || l.vertical >= a[i - 1].vertical) &&
+        hi.horizontal === PED_MAX_LAUNCH_SPEED && near(hi.vertical, Math.max(PED_MAX_LAUNCH_VERTICAL, rawHi * PED_VERTICAL_KEEP), 1e-9));
     const punch = pedLaunch(120);
-    check(`拳擊擊倒（120 N·s）上拋維持 0.25 倍：${f3(punch.vertical)} m/s`, near(punch.vertical, (120 / PED_MASS) * 0.25, 1e-9));
+    check(`拳擊擊倒（120 N·s）不套接觸增益、上拋維持 0.25 倍：${f3(punch.vertical)} m/s`, near(punch.vertical, (120 / PED_MASS) * 0.25, 1e-9) && near(punch.horizontal, 120 / PED_MASS, 1e-9));
     const w = new MockWorld();
     const ped = createPedestrianBody(R, w, { x: 0, y: 0, z: 0, yaw: 0 }, { groups: G });
     ped.hit({ impulse: PED_MASS * KMH30, dir: { x: 0, y: 0, z: 1 } });
-    const l30 = pedLaunch(PED_MASS * KMH30);
-    check(`hit(30 km/h) 初速：水平 ${f2(ped.body._lv.z)}、向上 ${f2(ped.body._lv.y)} m/s`, near(ped.body._lv.z, l30.horizontal, 1e-9) && near(ped.body._lv.y, l30.vertical, 1e-9));
+    const base = KMH30 * PED_LIFT_TIERS[2].carry;
+    check(`hit(30 km/h) 施加初速：水平 ${f2(ped.body._lv.z)} = 基準 × H ${PED_CONTACT_GAIN_H}、向上 ${f2(ped.body._lv.y)} = 基準 × lift × V ${PED_CONTACT_GAIN_V}`,
+      near(ped.body._lv.z, base * PED_CONTACT_GAIN_H, 1e-9) && near(ped.body._lv.y, base * PED_LIFT_TIERS[2].lift * PED_CONTACT_GAIN_V, 1e-9));
+    const saved = { ...pedContactTuning };
+    pedContactTuning.v = 0.5;
+    pedContactTuning.h = 4;
+    const tuned = createPedestrianBody(R, w, { x: 0, y: 0, z: 0, yaw: 0 }, { groups: G });
+    tuned.hit({ impulse: PED_MASS * KMH30, dir: { x: 1, y: 0, z: 0 } });
+    Object.assign(pedContactTuning, saved);
+    check(`pedContactTuning 執行期調參（SWEEP 用）：V 0.5 / H 4 → 向上 ${f2(tuned.body._lv.y)}、水平 ${f2(tuned.body._lv.x)}（上限 ${PED_MAX_LAUNCH_SPEED}，不影響向上）`,
+      near(tuned.body._lv.y, base * PED_LIFT_TIERS[2].lift * 0.5, 1e-9) && tuned.body._lv.x === PED_MAX_LAUNCH_SPEED);
   }
   {
     const w = new MockWorld();
@@ -757,6 +1151,10 @@ function runPureTests(dts) {
   }
 
   console.log('\n[純邏輯] d.ts 簽名核對（mock 經手的每個 API）');
+  if (!dts.classes) {
+    console.log(`  – 略過：找不到 ${DTS}（工作區未提供 rapier；${calls.size} 個 API 由宿主核對）`);
+    return;
+  }
   let bad = [];
   for (const c of calls.values()) {
     const api = dts.classes.get(c.cls);
@@ -864,14 +1262,14 @@ async function runRapierTests() {
       check(`${t} 靜置 3 s：輪全接地、roll ${f2(roll)}° pitch ${f2(pitch)}° < 2°、懸吊壓縮 [${comp.map(f3).join(', ')}] m 在 0.02–${f2(vb.susp.maxTravel)}`,
         s.wheels.every((w) => w.inContact) && roll < 2 && pitch < 2 && comp.every((c) => c > 0.02 && c < vb.susp.maxTravel));
     }
-    // 2. 全油門直線 10 秒
+    // 2. 全油門直線 15 秒（Phase 3 極速上調：1D 模型到 90% 極速需 6.2–11.3 s，見純邏輯段推導；起點移到 z = −580 讓 15 s 不撞牆）
     {
-      const { env, vb } = fresh(t, { x: LANE_X.flat, z: -300 });
+      const { env, vb } = fresh(t, { x: LANE_X.flat, z: -580 });
       stepAll(env, [vb], 30);
       vb.setControls({ throttle: 1 });
       let t50 = null;
       let vmax = 0;
-      stepAll(env, [vb], 600, (i) => {
+      stepAll(env, [vb], 900, (i) => {
         const v = vb.forwardSpeed();
         vmax = Math.max(vmax, v);
         if (t50 === null && v >= KMH50) t50 = (i + 1) * DT;
@@ -879,7 +1277,7 @@ async function runRapierTests() {
       r.t50 = t50;
       r.vmax = vmax;
       const err = Math.abs(vmax - vb.spec.maxSpeed) / vb.spec.maxSpeed;
-      check(`${t} 全油門 10 s：最高 ${f2(vmax)} m/s vs maxSpeed ${vb.spec.maxSpeed}（差 ${f2(err * 100)}% < 10%）、0→50 km/h ${t50 === null ? '未達' : f2(t50) + ' s'}`,
+      check(`${t} 全油門 15 s：最高 ${f2(vmax)} m/s vs maxSpeed ${vb.spec.maxSpeed}（差 ${f2(err * 100)}% < 10%）、0→50 km/h ${t50 === null ? '未達' : f2(t50) + ' s'}`,
         err < 0.1 && t50 !== null);
     }
     // 3. 全速 + 滿舵 5 秒
@@ -889,11 +1287,15 @@ async function runRapierTests() {
       setForwardSpeed(vb, vb.spec.maxSpeed);
       vb.setControls({ throttle: 1, steer: 1 });
       let minUp = 1;
-      stepAll(env, [vb], 300, () => {
+      let maxLat = 0;
+      stepAll(env, [vb], 300, (i) => {
         minUp = Math.min(minUp, upOf(vb.body.rotation()).y);
+        if (i > 60) maxLat = Math.max(maxLat, Math.abs(vb.accLat));
       });
       r.minUp = minUp;
-      check(`${t} 全速 + 滿舵 5 s：最低 up.y = ${f3(minUp)} > 0.5（不翻${t === 'scooter' ? '、不倒' : ''}）`, minUp > 0.5);
+      // 高速轉向遞減：穩態側向加速度 ≈ maxLatAccel（容許 30% 超出：輪胎滑移 / 暫態），機車不觸發倒地（6.5 < 8.8）
+      check(`${t} 全速 + 滿舵 5 s：最低 up.y = ${f3(minUp)} > 0.5（不翻${t === 'scooter' ? '、不倒地' : ''}）、穩態側向 ${f2(maxLat)} m/s² ≤ 1.3 × ${latAccelMax(vb.spec)}`,
+        minUp > 0.5 && !vb.fallen && maxLat <= 1.3 * latAccelMax(vb.spec));
     }
     // 4. 煞車距離 50 → 0
     {
@@ -973,11 +1375,11 @@ async function runRapierTests() {
       if (dueAt === null && vb.overturnedTime >= OVERTURN_PROMPT_SEC - 1e-9) dueAt = (i + 1) * DT;
     });
     const upEnd = upOf(vb.body.rotation()).y;
-    check(`sedan 倒扣 3 s：不自動翻回（最終 up.y ${f3(upEnd)} < 0）、${dueAt === null ? '未達提示' : f2(dueAt) + ' s 起可提示按 R'}（≥ ${OVERTURN_PROMPT_SEC} s）`,
-      upEnd < 0 && dueAt !== null && dueAt >= OVERTURN_PROMPT_SEC - 1e-9);
-    vb.flip();
+    check(`sedan 倒扣 3 s：不自動翻回（最終 up.y ${f3(upEnd)} < 0）、${dueAt === null ? '未達提示' : f2(dueAt) + ' s 起 isOverturned（提示按 F 扶起）'}（≥ ${OVERTURN_PROMPT_SEC} s）`,
+      upEnd < 0 && dueAt !== null && dueAt >= OVERTURN_PROMPT_SEC - 1e-9 && vb.isOverturned());
+    vb.upright();
     stepAll(env, [vb], 120);
-    check(`按 R（flip）後轉正：up.y ${f3(upOf(vb.body.rotation()).y)} > 0.95、overturnedTime ${f2(vb.overturnedTime)}`, upOf(vb.body.rotation()).y > 0.95 && vb.overturnedTime === 0);
+    check(`按 F（upright）後轉正：up.y ${f3(upOf(vb.body.rotation()).y)} > 0.95、overturnedTime ${f2(vb.overturnedTime)}`, upOf(vb.body.rotation()).y > 0.95 && vb.overturnedTime === 0 && !vb.isOverturned());
   }
   {
     const { env, vb } = fresh('sedan', { x: LANE_X.flat, z: -200, y: 0.6 });
@@ -985,6 +1387,67 @@ async function runRapierTests() {
     stepAll(env, [vb], 180);
     const upEnd = upOf(vb.body.rotation()).y;
     check(`sedan 側傾 40° 放下 3 s：回正 up.y ${f3(upEnd)} > 0.95`, upEnd > 0.95);
+  }
+
+  // 6c. 機車：60 km/h 手煞車 + 滿舵 → 倒地（onFall）、1.5 s 後 isOverturned、upright 後站穩；40 km/h 一般過彎不倒、視覺 lean ≤ 35°
+  {
+    const { env, vb } = fresh('scooter', { x: LANE_X.flat, z: -300 });
+    stepAll(env, [vb], 30);
+    setForwardSpeed(vb, 60 / 3.6);
+    let falls = 0;
+    vb.onFall = () => falls++;
+    vb.setControls({ throttle: 0, steer: 1, handbrake: true });
+    let fellAt = null;
+    let dueAt = null;
+    stepAll(env, [vb], 150, (i) => {
+      if (fellAt === null && vb.fallen) fellAt = (i + 1) * DT;
+      if (dueAt === null && vb.isOverturned()) dueAt = (i + 1) * DT;
+    });
+    check(`scooter 60 km/h 手煞車 + 滿舵：${fellAt === null ? '未倒地' : f2(fellAt) + ' s 倒地'}（≤ 0.5 s）、onFall ${falls} 次、${dueAt === null ? '未達' : f2(dueAt) + ' s'} isOverturned（倒地後 1.5 s）、末速 ${f2(Math.abs(vb.forwardSpeed()))} m/s`,
+      fellAt !== null && fellAt <= 0.5 && falls === 1 && dueAt !== null && near(dueAt - fellAt, OVERTURN_PROMPT_SEC, 2 * DT));
+    vb.upright();
+    vb.setControls({});
+    stepAll(env, [vb], 60);
+    check(`scooter upright 後 1 s：站穩 up.y ${f3(upOf(vb.body.rotation()).y)} > 0.95、未倒地`, upOf(vb.body.rotation()).y > 0.95 && !vb.fallen);
+    const b = fresh('scooter', { x: LANE_X.flat, z: -300 });
+    stepAll(b.env, [b.vb], 30);
+    setForwardSpeed(b.vb, 40 / 3.6);
+    b.vb.setControls({ throttle: 0.5, steer: -1 });
+    let maxLean = 0;
+    stepAll(b.env, [b.vb], 180, () => {
+      maxLean = Math.max(maxLean, Math.abs(b.vb.visual.roll));
+    });
+    check(`scooter 40 km/h 滿舵右彎 3 s：不倒地、視覺 lean 最大 ${f2(maxLean / DEG)}°（10–35°）`, !b.vb.fallen && maxLean >= 10 * DEG && maxLean <= 35 * DEG + 1e-9);
+  }
+
+  // 6d. 實測修正（需宿主執行）：機車 76 km/h 全左轉 + 手煞 → 倒地後 1.5 s 內停下、滑行 ≤ 10 m、水平速度不增加（不倒退加速）
+  {
+    const { env, vb } = fresh('scooter', { x: LANE_X.flat, z: -300 });
+    stepAll(env, [vb], 30);
+    setForwardSpeed(vb, 76 / 3.6);
+    vb.setControls({ throttle: 0, steer: 1, handbrake: true });
+    let fellAt = null;
+    let p0 = null;
+    let stopAt = null;
+    let grew = 0;
+    let prev = Infinity;
+    let minFwd = 0;
+    stepAll(env, [vb], 240, (i) => {
+      if (!vb.fallen) return;
+      const lv = vb.body.linvel();
+      const sp = Math.hypot(lv.x, lv.z);
+      if (fellAt === null) {
+        fellAt = (i + 1) * DT;
+        p0 = { ...vb.body.translation() };
+      } else if (sp > prev + 0.05) grew++;
+      prev = sp;
+      minFwd = Math.min(minFwd, vb.forwardSpeed());
+      if (stopAt === null && sp < 0.3) stopAt = (i + 1) * DT - fellAt;
+    });
+    const p1 = vb.body.translation();
+    const dist = p0 ? Math.hypot(p1.x - p0.x, p1.z - p0.z) : Infinity;
+    check(`scooter 76 km/h 全左轉 + 手煞：${fellAt === null ? '未倒地' : f2(fellAt) + ' s 倒地'}、倒地後 ${stopAt === null ? '未停' : f2(stopAt) + ' s'} 停（≤ 1.5）、滑行 ${f2(dist)} m（≤ 10）、水平速度回升 ${grew} 步、最低 forwardSpeed ${f2(minFwd * 3.6)} km/h`,
+      fellAt !== null && stopAt !== null && stopAt <= 1.5 && dist <= 10 && grew === 0);
   }
 
   // 7. 車撞 NPC 車、車撞行人
@@ -1039,7 +1502,9 @@ async function runRapierTests() {
       pedHits.length === 1 && ped.isDown && settle.settled && settle.clearToStand);
   }
 
-  // 7b. 30 km/h 撞行人：實際拋高與落地前水平距離（目標 0.6–1.0 m、5–9 m；修正前拋高 0.17–0.28 m）
+  // 7b. 30 km/h 撞行人（參考流程：VehicleBody 直接給速度、撞後立即全煞）。Phase 2 以此定案 carry / lift（0.67 m、8.45 m）；
+  // Phase 3 起目標改由 7c「照遊戲流程」判定，本情境只做健全性檢查。套 V 1.3 後預期（有效垂直倍率 0.95、水平 1.85，Phase 2 實測）：
+  //   向上 4.97 × 0.95 = 4.72 → 拋高約 1.14 m、飛距約 11 m → 斷言放寬為拋高 0.3–1.6 m、飛距 3–16 m
   {
     const env = buildWorld(RAPIER, G);
     env.router = createContactRouter(RAPIER, env.world, env.eventQueue);
@@ -1069,9 +1534,25 @@ async function runRapierTests() {
       if (flight === null && apex > 0.05 && p.y <= y0 + 0.02) flight = Math.abs(p.z - z0);
       return flight === null;
     });
-    check(`車撞行人 30 km/h（真物理）：拋高 ${f2(apex)} m（0.6–1.0）、落地前水平飛 ${flight === null ? '未落地' : f2(flight) + ' m'}（5–9）`,
-      apex >= 0.6 && apex <= 1.0 && flight !== null && flight >= 5 && flight <= 9);
+    check(`車撞行人 30 km/h（參考流程，真物理）：拋高 ${f2(apex)} m（0.3–1.6）、落地前水平飛 ${flight === null ? '未落地' : f2(flight) + ' m'}（3–16）`,
+      apex >= 0.3 && apex <= 1.6 && flight !== null && flight >= 3 && flight <= 16);
   }
+
+  // 7c. 照遊戲流程撞行人：行人 = traffic.js 生成的剛體設定（createPedestrianBody + GROUPS + router、yawOnly），
+  //     撞擊經 traffic → combat → actor.body.knockdown 的同一條路（相對速度 > VEHICLE_KNOCKDOWN_SPEED 才倒、只倒一次、水平化方向）；
+  //     玩家車 = VehicleManager 建立（真 manifest / glb 規格、ccd 關、PhysicsWorld 子步），driveControls 加速到目標車速後定速撞上；
+  //     撞後駕駛行為 mode：hold（繼續定速，玩家常見）/ coast（放油門）/ brake（全煞）。目標（hold）：
+  //       30 km/h 拋高 0.6–0.9 m、飛 5–9 m（V 1.3 / H 1.0 宿主實測 0.67 / 6.44）
+  //       60 km/h 拋高 0.9–1.6 m、飛 12–20 m，且兩者都大於 30 km/h（FX1 前被上限鉗住只有 0.32 / 9.05；FX1 估算 1.11 / 16.7）
+  await loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch });
+  const flow = (o) => gameFlowHit(RAPIER, o);
+  const r30 = flow({ kmh: 30, mode: 'hold' });
+  const r60 = flow({ kmh: 60, mode: 'hold' });
+  check(`遊戲流程 30 km/h（hold，V ${pedContactTuning.v} / H ${pedContactTuning.h}）：撞擊 ${f2(r30.impactKmh)} km/h、拋高 ${f2(r30.apex)} m（0.6–0.9）、飛 ${fmtFlight(r30)}（5–9）`,
+    r30.hit && inTarget(30, r30));
+  check(`遊戲流程 60 km/h（hold）：撞擊 ${f2(r60.impactKmh)} km/h、拋高 ${f2(r60.apex)} m（0.9–1.6 且 > 30 km/h）、飛 ${fmtFlight(r60)}（12–20 且 > 30 km/h）`,
+    r60.hit && inTarget(60, r60) && r60.apex > r30.apex && r60.flight > (r30.flight ?? Infinity));
+  if (SWEEP) runSweep(flow);
 
   // 8. 1000 步平均耗時（10 台車 + 20 行人）
   {
@@ -1095,10 +1576,132 @@ async function runRapierTests() {
   }
 }
 
+// ================= 照遊戲流程撞行人（7c）與接觸增益掃描 =================
+
+const ROOT_PUBLIC = join(ROOT, 'public');
+// vehicle-model.js 的 fetch 替身：從 public/ 讀 manifest 與 glb
+async function fsFetch(url) {
+  const buf = readFileSync(join(ROOT_PUBLIC, url.replace(/^\.\//, '')));
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => (url.endsWith('.json') ? 'application/json' : 'model/gltf-binary') },
+    json: async () => JSON.parse(buf.toString('utf8')),
+    arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+  };
+}
+
+const fmtFlight = (r) => (r.flight === null ? '未落地' : `${f2(r.flight)} m`);
+// 7c / SWEEP 共用目標：30 km/h 以下拋高 0.6–0.9 m、飛 5–9 m；更快（60 km/h）拋高 0.9–1.6 m、飛 12–20 m
+const FLOW_TARGETS = { 30: { apex: [0.6, 0.9], flight: [5, 9] }, 60: { apex: [0.9, 1.6], flight: [12, 20] } };
+function inTarget(kmh, r) {
+  const t = FLOW_TARGETS[kmh <= 30 ? 30 : 60];
+  return r.apex >= t.apex[0] && r.apex <= t.apex[1] && r.flight !== null && r.flight >= t.flight[0] && r.flight <= t.flight[1];
+}
+
+// o = { kmh, mode: 'hold'|'coast'|'brake', gainV?, gainH?, type = 'sedan' }；回傳 { hit, impactKmh, apex, flight, rest }
+function gameFlowHit(RAPIER, { kmh, mode = 'hold', gainV, gainH, type = 'sedan' }) {
+  const saved = { ...pedContactTuning };
+  if (gainV !== undefined) pedContactTuning.v = gainV;
+  if (gainH !== undefined) pedContactTuning.h = gainH;
+  const pw = new PhysicsWorld(RAPIER);
+  try {
+    const ground = pw.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    pw.world.createCollider(RAPIER.ColliderDesc.cuboid(400, 0.5, 400).setTranslation(0, -0.5, 0)
+      .setCollisionGroups(GROUPS.WORLD).setSolverGroups(GROUPS.WORLD).setFriction(1), ground);
+    const router = createContactRouter(RAPIER, pw);
+    pw.onAfterStep((dt) => router.drain(dt));
+    const physics = { RAPIER, pw, router, groups: GROUPS };
+    pw.stepOnce();
+    const target = kmh / 3.6;
+    // 起點到行人留足加速距離（起步 4.4 m/s² 級：60 km/h 約 45 m）
+    const startZ = -150;
+    const pedZ = startZ + 30 + target * target * 0.5;
+    const vm = new VehicleManager(new THREE.Scene(), [{ type, x: 0, y: 0, z: startZ, yaw: 0 }], { querySurface: () => ({ y: 0 }) }, physics);
+    const car = vm.vehicles[0];
+    vm.drive(car, true);
+    // 行人：同 traffic._spawnPed 的剛體設定；撞擊路徑同 traffic → combat.onVehicleHit → actor.body.knockdown
+    const ped = createPedestrianBody(RAPIER, pw, { x: 0, y: 0, z: pedZ, yaw: Math.PI / 2 }, { groups: GROUPS, router });
+    let hitInfo = null;
+    router.onVehicleHitPedestrian(({ vehicle, ped: body, impulse, relSpeed, dir }) => {
+      if (body !== ped || ped.isDown || !(relSpeed > VEHICLE_KNOCKDOWN_SPEED)) return;
+      const iv = { x: dir.x * impulse, y: dir.y * impulse, z: dir.z * impulse };
+      const j = Math.hypot(iv.x, iv.y, iv.z);
+      const h = Math.hypot(iv.x, iv.z);
+      const d = h > 1e-6 ? { x: iv.x / h, y: 0, z: iv.z / h } : { x: 0, y: 0, z: 1 };
+      hitInfo = { impactKmh: Math.abs(vehicle.forwardSpeed()) * 3.6, relSpeed };
+      ped.hit({ impulse: j, dir: d });
+    });
+    pw.onBeforeStep(() => {
+      if (!ped.isDown) ped.setPose(0, 0, pedZ, Math.PI / 2);
+    });
+    let y0 = null;
+    let p0 = null;
+    let apex = 0;
+    let flight = null;
+    let after = 0;
+    for (let frame = 0; frame < 60 * 20; frame++) {
+      const v = car.body.forwardSpeed();
+      let throttle = Math.max(0, Math.min(1, (target - v) * 1.5 + 0.15)); // 定速：接近目標車速時收油
+      let handbrake = false;
+      if (hitInfo && mode === 'coast') throttle = 0;
+      if (hitInfo && mode === 'brake') {
+        throttle = -1;
+        handbrake = false;
+      }
+      car.setControls(driveControls({ x: 0, y: throttle }, handbrake));
+      pw.step(DT);
+      if (!ped.isDown) continue;
+      const p = ped.body.translation();
+      if (y0 === null) {
+        y0 = p.y;
+        p0 = { x: p.x, z: p.z };
+      }
+      apex = Math.max(apex, p.y - y0);
+      if (flight === null && apex > 0.05 && p.y <= y0 + 0.02) flight = Math.hypot(p.x - p0.x, p.z - p0.z);
+      if (++after > 60 * 4) break;
+    }
+    const pe = ped.body.translation();
+    return {
+      hit: !!hitInfo,
+      impactKmh: hitInfo ? hitInfo.impactKmh : 0,
+      apex,
+      flight,
+      rest: p0 ? Math.hypot(pe.x - p0.x, pe.z - p0.z) : 0,
+    };
+  } finally {
+    Object.assign(pedContactTuning, saved);
+    pw.dispose();
+  }
+}
+
+// SWEEP=1：V × H × 車速 × 駕駛行為 網格；✓ = 落在 FLOW_TARGETS（30 km/h 拋高 0.6–0.9、飛 5–9；60 km/h 拋高 0.9–1.6、飛 12–20）
+function runSweep(flow) {
+  const list = (key, def) => (process.env[key] ? process.env[key].split(',').map((x) => x.trim()).filter(Boolean) : def);
+  const Vs = list('SWEEP_V', ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5']).map(Number);
+  const Hs = list('SWEEP_H', ['0.9', '1.0', '1.1', '1.2', '1.3']).map(Number);
+  const speeds = list('SWEEP_KMH', ['30', '60']).map(Number);
+  const modes = list('SWEEP_MODE', ['hold', 'coast', 'brake']);
+  console.log(`\n[SWEEP] 照遊戲流程撞行人：V ${Vs.join(',')} × H ${Hs.join(',')} × ${speeds.join('/')} km/h × ${modes.join('/')}（拋高 m / 飛距 m / 靜止距 m）`);
+  console.log('  kmh  mode   V     H     撞擊km/h  拋高   飛距    靜止距  判定');
+  for (const kmh of speeds) {
+    for (const mode of modes) {
+      for (const V of Vs) {
+        for (const H of Hs) {
+          const r = flow({ kmh, mode, gainV: V, gainH: H });
+          const ok = inTarget(kmh, r);
+          console.log(`  ${String(kmh).padStart(3)}  ${mode.padEnd(5)}  ${V.toFixed(2)}  ${H.toFixed(2)}  ${f2(r.impactKmh).padStart(7)}  ${f2(r.apex).padStart(5)}  ${(r.flight === null ? '—' : f2(r.flight)).padStart(6)}  ${f2(r.rest).padStart(6)}  ${r.hit ? (ok ? '✓' : '·') : '未撞'}`);
+        }
+      }
+    }
+  }
+}
+
 // ================= 主程式 =================
 
 console.log(`D2c2 physics-vehicle 無頭驗證（${NO_RAPIER ? '--no-rapier：只跑純邏輯' : '完整版'}）`);
 runPureTests(parseDts());
 if (!NO_RAPIER) await runRapierTests();
 console.log(`\n結果：${passed} 通過 / ${failed} 失敗${NO_RAPIER ? '（完整版 Rapier 情境未執行）' : ''}`);
+console.log(failed ? `FAIL ${failed}/${passed + failed}` : `PASS ${passed}/${passed}`);
 process.exit(failed ? 1 : 0);

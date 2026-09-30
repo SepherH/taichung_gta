@@ -166,6 +166,11 @@ body {
 }
 
 /* ---------- HUD ---------- */
+/* 版面分區（桌機；觸控橫向 / 直向在下方「觸控 HUD」段重排）：
+   左上 FPS 小字 + 新手提示卡；右上 時間 · 金錢；左下 地名 + 圓形小地圖 + 血條；右下 駕駛時路牌 + 車名 + 時速錶；
+   中下 互動提示膠囊（bottom 96px）與常駐按鍵提示（bottom 24px，左右讓開小地圖與時速錶）；授權標示在最底角（見下段）。
+   --hud-scale（hud.setUiScale 寫入）縮放各角落群組：transform 以所貼的角為原點，中間兩列的左右邊界隨之推算。
+   所有尺寸寫成明確數值：tools/test/attribution.mjs 依這些數值推算各尺寸下的矩形並檢查互不重疊 */
 #hud {
   position: fixed;
   inset: 0;
@@ -173,15 +178,151 @@ body {
   pointer-events: none;
 }
 
+#fps {
+  position: absolute;
+  left: calc(8px + env(safe-area-inset-left));
+  top: calc(6px + env(safe-area-inset-top));
+  width: 64px;
+  height: 14px;
+  font-size: 11px;
+  line-height: 14px;
+  opacity: 0.75;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+}
+
+/* 新手提示卡：可關（×），hud.js 控制顯示與自動收起 */
+#hint-card {
+  position: absolute;
+  left: calc(16px + env(safe-area-inset-left));
+  top: calc(26px + env(safe-area-inset-top));
+  width: 300px;
+  max-height: 140px;
+  overflow: hidden;
+  padding: 10px 40px 10px 14px;
+  background: rgba(10, 15, 36, 0.82);
+  border-left: 4px solid #ffd23f;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-size: 14px;
+  line-height: 1.55;
+  transform: scale(var(--hud-scale, 1));
+  transform-origin: top left;
+  pointer-events: auto;
+}
+
+#hint-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 32px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+#hint-close:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* 右上：時間 · 金錢 */
+#status {
+  position: absolute;
+  right: calc(16px + env(safe-area-inset-right));
+  top: calc(16px + env(safe-area-inset-top));
+  max-width: 220px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 12px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 18px;
+  font-size: 18px;
+  font-weight: bold;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  transform: scale(var(--hud-scale, 1));
+  transform-origin: top right;
+}
+
+.status-sep {
+  opacity: 0.6;
+}
+
+#money {
+  color: #8fe388;
+}
+
+/* 金錢變動：狀態列下方跳出 +/−（hud.js 每次變動重播 .pop） */
+#money-delta {
+  position: absolute;
+  right: 12px;
+  top: 40px;
+  width: 140px;
+  height: 20px;
+  font-size: 16px;
+  line-height: 20px;
+  text-align: right;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
+#money-delta.gain {
+  color: #8fe388;
+}
+
+#money-delta.loss {
+  color: #ff7b6b;
+}
+
+#money-delta.pop {
+  animation: money-pop 1.8s ease-out forwards;
+}
+
+@keyframes money-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px) scale(1.25);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* 左下：地名 + 圓形小地圖 + 綠色血條（高度 26 + 6 + 200 + 8 + 12 = 252） */
 #minimap-wrap {
   position: absolute;
-  left: 18px;
-  bottom: 18px;
+  left: calc(18px + env(safe-area-inset-left));
+  bottom: calc(18px + env(safe-area-inset-bottom));
   width: 200px;
+  height: 252px;
+  display: flex;
+  flex-direction: column;
+  transform: scale(var(--hud-scale, 1));
+  transform-origin: bottom left;
 }
 
 #minimap {
   display: block;
+  flex: none;
   width: 200px;
   height: 200px;
   border-radius: 50%;
@@ -189,11 +330,14 @@ body {
 }
 
 #location {
-  margin-bottom: 8px;
+  flex: none;
+  height: 26px;
+  margin-bottom: 6px;
   padding: 4px 10px;
   background: rgba(0, 0, 0, 0.55);
   border-radius: 4px;
   font-size: 15px;
+  line-height: 18px;
   font-weight: bold;
   text-align: center;
   white-space: nowrap;
@@ -201,133 +345,223 @@ body {
   text-overflow: ellipsis;
 }
 
-#speed {
+#health {
+  flex: none;
+  height: 12px;
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+#health-fill {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, #6fe06a, #2f9e3a);
+  transition: width 0.25s;
+}
+
+#health.low #health-fill {
+  background: linear-gradient(180deg, #ff8a6a, #d23a2a);
+  animation: hp-low 1s ease-in-out infinite;
+}
+
+@keyframes hp-low {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 右下（駕駛）：藍底白字路牌 + 車名 + 圓形時速錶（高度 30 + 6 + 20 + 4 + 136 = 196） */
+#drive-panel {
   position: absolute;
-  right: 28px;
-  bottom: 24px;
-  font-size: 56px;
+  right: calc(24px + env(safe-area-inset-right));
+  bottom: calc(28px + env(safe-area-inset-bottom));
+  width: 220px;
+  height: 196px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-end;
+  transform: scale(var(--hud-scale, 1));
+  transform-origin: bottom right;
+}
+
+#road-sign {
+  flex: none;
+  max-width: 100%;
+  height: 30px;
+  margin-bottom: 6px;
+  padding: 0 12px;
+  border: 2px solid #fff;
+  border-radius: 5px;
+  background: #1a56b8;
+  box-shadow: 0 0 0 2px #1a56b8, 0 3px 10px rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 26px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#vehicle-label {
+  flex: none;
+  max-width: 100%;
+  height: 20px;
+  margin-bottom: 4px;
+  font-size: 14px;
+  font-weight: bold;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
+#speedo {
+  position: relative;
+  flex: none;
+  width: 136px;
+  height: 136px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.6) 55%, rgba(0, 0, 0, 0.35) 100%);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+#speedo svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.speedo-track,
+#speedo-arc {
+  fill: none;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.speedo-track {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+
+#speedo-arc {
+  stroke: #ffd23f;
+  transition: stroke-dasharray 0.15s;
+}
+
+#drive-panel.hot #speedo-arc {
+  stroke: #ff6b3d;
+}
+
+.speedo-read {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+#speed-num {
+  font-size: 40px;
   font-weight: 900;
   font-style: italic;
-  text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.6);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
-#speed .unit {
-  margin-left: 6px;
-  font-size: 20px;
-  font-style: normal;
+.speedo-read .unit {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.8;
 }
 
-#clock {
+/* 中下：互動提示膠囊（整列透明，膠囊置中；左右讓開小地圖與時速錶） */
+#prompt {
   position: absolute;
-  top: 16px;
-  left: 18px;
-  padding: 4px 12px;
-  background: rgba(0, 0, 0, 0.5);
-  border-radius: 4px;
-  font-size: 20px;
+  left: calc(18px + 222px * var(--hud-scale, 1) + env(safe-area-inset-left));
+  right: calc(24px + 236px * var(--hud-scale, 1) + env(safe-area-inset-right));
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  height: calc(44px * var(--hud-scale, 1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#prompt-text {
+  max-width: 100%;
+  max-height: 100%;
+  padding: 6px 20px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid rgba(255, 210, 63, 0.85);
+  border-radius: 999px;
+  font-size: calc(17px * var(--hud-scale, 1));
   font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-#help {
+/* 底部常駐按鍵提示（內容由 hud.setControlsHint 產生；左右邊界同 #prompt） */
+#ctrl-hint {
   position: absolute;
-  top: 16px;
-  right: 16px;
-  width: 270px;
-  padding: 10px 14px;
-  background: rgba(0, 0, 0, 0.55);
-  border-radius: 6px;
-  font-size: 13px;
-  line-height: 1.55;
+  left: calc(18px + 222px * var(--hud-scale, 1) + env(safe-area-inset-left));
+  right: calc(24px + 236px * var(--hud-scale, 1) + env(safe-area-inset-right));
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  height: calc(26px * var(--hud-scale, 1));
+  font-size: calc(13px * var(--hud-scale, 1));
+  line-height: calc(26px * var(--hud-scale, 1));
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.95);
 }
 
-#help.collapsed {
-  width: auto;
-}
-
-#help.collapsed .help-body {
+#ctrl-hint:empty {
   display: none;
 }
 
-.help-title {
-  font-weight: bold;
-  font-size: 14px;
-}
-
-.help-key {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 0 6px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  border-radius: 3px;
-  font-size: 12px;
-}
-
-.help-group {
-  margin-top: 8px;
-  color: #ffd23f;
-  font-weight: bold;
-}
-
-#help ul {
-  margin: 2px 0 0;
-  padding-left: 18px;
-}
-
-#help b {
-  color: #fff;
-}
-
-#prompt {
-  position: absolute;
-  left: 50%;
-  bottom: 22%;
-  transform: translateX(-50%);
-  padding: 8px 18px;
-  background: rgba(0, 0, 0, 0.65);
-  border: 1px solid rgba(255, 210, 63, 0.8);
-  border-radius: 6px;
-  font-size: 18px;
-  font-weight: bold;
-}
-
-/* 步行常駐按鍵提示（右下；駕駛時由 hud.js 隱藏，該處改顯示時速） */
-#ctrl-hint {
-  position: absolute;
-  right: 16px;
-  bottom: 24px;
-  padding: 4px 12px;
-  background: rgba(0, 0, 0, 0.5);
-  border-radius: 4px;
-  font-size: 14px;
-}
-
-#ctrl-hint b {
+#ctrl-hint b,
+#touch-hint b {
   display: inline-block;
   min-width: 1.4em;
   padding: 0 4px;
   border: 1px solid rgba(255, 255, 255, 0.6);
   border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
   color: #ffd23f;
+  line-height: 1.35;
   text-align: center;
 }
 
+/* 訊息（中上；上緣在提示卡下方） */
 #toast {
   position: absolute;
   left: 50%;
-  top: 14%;
+  top: calc(26px + 160px * var(--hud-scale, 1) + env(safe-area-inset-top));
   transform: translateX(-50%);
-  max-width: min(640px, 80vw);
+  width: max-content;
+  max-width: min(640px, calc(100vw - 32px));
+  max-height: calc(96px * var(--hud-scale, 1));
+  overflow: hidden;
   padding: 10px 18px;
   background: rgba(0, 0, 0, 0.6);
   border-radius: 6px;
-  font-size: 16px;
+  font-size: calc(16px * var(--hud-scale, 1));
   line-height: 1.5;
   text-align: center;
 }
 
 /* ---------- 授權標示（ODbL 要求常駐；貼最邊角、小字半透明、不吃指標事件） ---------- */
-/* 桌機：右下角。左下有小地圖（left/bottom 18px 起）；右下的 #ctrl-hint / #speed 底緣在 bottom 24px，
-   本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊 */
+/* 桌機：右下角。左下是小地圖群組（left/bottom 18px 起）；右下的時速錶群組底緣在 bottom 28px、常駐按鍵提示底緣在 bottom 24px，
+   本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊（tools/test/attribution.mjs 以規則數值逐尺寸推算） */
 #attribution {
   position: fixed;
   right: calc(8px + env(safe-area-inset-right));
@@ -411,6 +645,48 @@ body.touch.swipe-mask {
   animation: swipe-hint 1.2s ease-in-out infinite;
 }
 
+/* 「不用全螢幕，直接玩」（mobile.js 建立）：點一下關閉遮罩，本次分頁不再出現 */
+#swipe-skip {
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 0 20px;
+  border: 2px solid #fff;
+  border-radius: 22px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-size: 16px;
+  touch-action: manipulation;
+}
+
+/* 遮罩顯示 4 秒後網址列仍收不起來：縮成畫面上緣的小提示（中線右移 40px：避開左上小地圖 / 小鈕與右上喇叭鈕），不擋操作也不擋授權標示 */
+#swipe-up.mini {
+  inset: auto;
+  top: calc(6px + env(safe-area-inset-top));
+  left: calc(50% + 40px);
+  transform: translateX(-50%);
+  gap: 2px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  font-weight: normal;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#swipe-up.mini .swipe-arrow {
+  display: none;
+}
+
+#swipe-up.mini #swipe-skip {
+  min-height: 36px;
+  margin-top: 0;
+  padding: 0 12px;
+  font-size: 12px;
+  pointer-events: auto;
+}
+
 @keyframes swipe-hint {
   0%,
   100% {
@@ -479,61 +755,153 @@ body.touch.swipe-mask {
   }
 }
 
-/* 觸控 HUD 重新配置 */
+/* 觸控 HUD 重新配置（橫向）。觸控層位置（touch.js slot，數值在本檔下方）：
+   左上小鈕 tl1–tl3 x 140–300 / y 12–60；右上小鈕 top1–3 右側 16–204 / y 12–68；右下按鈕群右側 24–238 / 底 24–222；
+   駕駛時右半區上方是下車 / 手煞一列（134–194px）、其下踏板（上緣 202px）。HUD 分區：
+   左上 小地圖 + 血條 + 地名（x 10–130、y 10–172）；FPS 在小鈕正下方；左半欄（x 140 ～ 中線 −4）由上而下：
+   提示膠囊（76–120）→ 訊息（124–188）→ 新手提示卡（192–288，只在步行）；駕駛時時速錶群組貼中線左側、底 40px；
+   右上 時間 · 金錢在右上小鈕下方（76–126）；底部左半 觸控按鍵提示（底 14–35），授權標示在其下（底 1–12）。
+   觸控時 --hud-scale 由 hud.js 限制 ≤ 1，所以縮放只會讓群組往所貼的角收小，不會蓋到觸控鈕 */
+body.touch #fps {
+  left: calc(140px + env(safe-area-inset-left));
+  top: calc(60px + env(safe-area-inset-top));
+  font-size: 10px;
+}
+
+body.touch #hint-card {
+  left: calc(140px + env(safe-area-inset-left));
+  right: calc(50% + 4px);
+  top: calc(192px + env(safe-area-inset-top));
+  width: auto;
+  max-height: 96px;
+  padding: 8px 46px 8px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* 觸控按鈕至少 44px */
+body.touch #hint-close {
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  font-size: 22px;
+  line-height: 44px;
+}
+
+body.touch #status {
+  right: calc(16px + env(safe-area-inset-right));
+  top: calc(76px + env(safe-area-inset-top));
+  height: 30px;
+  padding: 0 10px;
+  font-size: 15px;
+}
+
+body.touch #money-delta {
+  right: 10px;
+  top: 32px;
+  height: 18px;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+/* 小地圖 + 血條 + 地名（高度 120 + 6 + 8 + 6 + 22 = 162） */
 body.touch #minimap-wrap {
   left: calc(10px + env(safe-area-inset-left));
   top: calc(10px + env(safe-area-inset-top));
   bottom: auto;
   width: 120px;
+  height: 162px;
+  transform-origin: top left;
 }
 
 body.touch #minimap {
+  order: 1;
   width: 120px;
   height: 120px;
 }
 
+body.touch #health {
+  order: 2;
+  height: 8px;
+  margin-top: 6px;
+}
+
 body.touch #location {
-  position: fixed;
-  left: 50%;
-  top: calc(8px + env(safe-area-inset-top));
-  max-width: 40vw;
-  margin: 0;
-  transform: translateX(-50%);
-  font-size: 14px;
+  order: 3;
+  height: 22px;
+  margin: 6px 0 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 16px;
 }
 
-body.touch #clock {
-  left: 50%;
-  top: calc(38px + env(safe-area-inset-top));
-  transform: translateX(-50%);
-  padding: 2px 10px;
-  font-size: 14px;
+/* 駕駛：中線左側、底 40px（高度 22 + 4 + 14 + 4 + 76 = 120） */
+body.touch #drive-panel {
+  right: calc(50% + 12px);
+  bottom: calc(40px + env(safe-area-inset-bottom));
+  width: 130px;
+  height: 120px;
 }
 
-body.touch #speed {
-  left: 50%;
-  right: auto;
-  top: calc(62px + env(safe-area-inset-top));
-  bottom: auto;
-  transform: translateX(-50%);
-  font-size: 30px;
+body.touch #road-sign {
+  height: 22px;
+  margin-bottom: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
-body.touch #speed .unit {
-  font-size: 14px;
+body.touch #vehicle-label {
+  height: 14px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 14px;
 }
 
-body.touch #toast {
-  top: calc(104px + env(safe-area-inset-top));
-  max-width: min(520px, 60vw);
-  font-size: 14px;
+body.touch #speedo {
+  width: 76px;
+  height: 76px;
+}
+
+body.touch #speed-num {
+  font-size: 22px;
+}
+
+body.touch .speedo-read .unit {
+  font-size: 9px;
 }
 
 body.touch #prompt {
-  font-size: 16px;
+  left: calc(140px + env(safe-area-inset-left));
+  right: calc(50% + 4px);
+  top: calc(76px + env(safe-area-inset-top));
+  bottom: auto;
+  height: 44px;
 }
 
-body.touch #help,
+body.touch #prompt-text {
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: normal;
+  text-align: center;
+}
+
+body.touch #toast {
+  left: calc(140px + env(safe-area-inset-left));
+  right: calc(50% + 4px);
+  top: calc(124px + env(safe-area-inset-top));
+  transform: none;
+  width: auto;
+  max-width: none;
+  max-height: 64px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 body.touch #ctrl-hint {
   display: none;
 }
@@ -541,20 +909,102 @@ body.touch #ctrl-hint {
 body.touch #touch-hint {
   display: block;
   position: absolute;
-  left: 50%;
-  bottom: calc(8px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  padding: 2px 10px;
+  left: calc(10px + env(safe-area-inset-left));
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  max-width: calc(50% - 20px);
+  height: 21px;
+  padding: 2px 8px;
   background: rgba(0, 0, 0, 0.4);
   border-radius: 4px;
   font-size: 12px;
-  opacity: 0.8;
+  line-height: 17px;
+  opacity: 0.85;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* 觸控：左下角。右下是觸控按鈕群（底緣 bottom 24px 起、橫跨右側約 240px），左上是小地圖；
-   搖桿預設圈位於 top 70% ± 64px，底緣距畫面底仍有數十 px；#touch-hint 在正下方置中（bottom 8px 起），
-   本標示壓低到其下緣以下（bottom 1px、行高 11px） */
+body.touch #touch-hint:empty {
+  display: none;
+}
+
+/* 觸控直向：右半在步行時只有底部按鈕群（上緣 = 底 222px）、駕駛時是下車 / 手煞一列（134–194px）+ 踏板（上緣 202px），HUD 改排：
+   右上 時間 · 金錢（寬度讓開左上小地圖）；左半欄 提示膠囊（180–240）→ 訊息（246–326）→ 觸控按鍵提示（332–368，兩行）；
+   新手提示卡（只在步行）放右半 132–272；駕駛時時速錶群組在左下（底 40px，高 88px，橫排） */
+@media (orientation: portrait) {
+  body.touch #status {
+    max-width: min(220px, calc(100vw - 160px));
+  }
+
+  body.touch #prompt {
+    left: calc(10px + env(safe-area-inset-left));
+    right: calc(50% + 4px);
+    top: calc(180px + env(safe-area-inset-top));
+    height: 60px;
+  }
+
+  body.touch #toast {
+    left: calc(10px + env(safe-area-inset-left));
+    right: calc(50% + 4px);
+    top: calc(246px + env(safe-area-inset-top));
+    max-height: 80px;
+  }
+
+  body.touch #touch-hint {
+    top: calc(332px + env(safe-area-inset-top));
+    bottom: auto;
+    height: 36px;
+    padding: 2px 6px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: normal;
+  }
+
+  body.touch #hint-card {
+    left: calc(50% + 4px);
+    right: calc(10px + env(safe-area-inset-right));
+    top: calc(132px + env(safe-area-inset-top));
+    max-height: 140px;
+    transform-origin: top right;
+  }
+
+  body.touch #drive-panel {
+    left: calc(10px + env(safe-area-inset-left));
+    right: calc(50% + 4px);
+    width: auto;
+    height: 88px;
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    grid-template-rows: 1fr auto auto 1fr;
+    column-gap: 8px;
+    align-items: start;
+    transform-origin: bottom left;
+  }
+
+  body.touch #speedo {
+    grid-column: 1;
+    grid-row: 1 / 5;
+    align-self: center;
+    width: 80px;
+    height: 80px;
+  }
+
+  body.touch #road-sign {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  body.touch #vehicle-label {
+    grid-column: 2;
+    grid-row: 3;
+    margin-bottom: 0;
+  }
+}
+
+/* 觸控：左下角。右下是觸控按鈕群（底緣 bottom 24px 起、橫跨右側約 240px），駕駛踏板底緣在 bottom 16px，左上是小地圖；
+   #touch-hint 改在左下、底緣 bottom 14px（Phase 2 置中時在寬 < 810px 橫向與本標示水平重疊約 4px，現改為上下分列），
+   本標示壓低到其下緣以下（bottom 1px、行高 11px → 頂緣約 12px） */
 body.touch #attribution {
   left: calc(10px + env(safe-area-inset-left));
   right: auto;
@@ -604,6 +1054,13 @@ body.touch.playing #touch-ui {
 
 #tstick-base.active {
   opacity: 1;
+}
+
+/* 直向：搖桿靜止位置移到攻擊鈕（上緣 = 底 216px）上方，底緣 = 底 226px，360×640 到 430×932 都不重疊 */
+@media (orientation: portrait) {
+  #tstick-base {
+    top: calc(100% - 290px);
+  }
 }
 
 #tstick-head {
@@ -721,4 +1178,147 @@ body.touch-drive .tbtn[data-show="walk"] {
 
 .tbtn.slot-top3 {
   right: calc(148px + env(safe-area-inset-right));
+}
+
+/* 左上三顆小鈕（暫停 / 地圖 / 手機預留）：排在小地圖（120px）右側，≥ 44px */
+.tbtn.slot-tl1,
+.tbtn.slot-tl2,
+.tbtn.slot-tl3 {
+  top: calc(12px + env(safe-area-inset-top));
+  width: 48px;
+  height: 48px;
+  font-size: 13px;
+}
+
+.tbtn.slot-tl1 {
+  left: calc(140px + env(safe-area-inset-left));
+}
+
+.tbtn.slot-tl2 {
+  left: calc(196px + env(safe-area-inset-left));
+}
+
+.tbtn.slot-tl3 {
+  left: calc(252px + env(safe-area-inset-left));
+}
+
+.tbtn[hidden] {
+  display: none;
+}
+
+/* 窄直向（寬 ≤ 400px，如 360×640）：左上小鈕間距收為 4px、右上小鈕縮為 48px 並貼右 12px，
+   駕駛時喇叭（top1）與預留的手機鈕（tl3）不重疊（原本 360 寬時重疊 12px） */
+@media (orientation: portrait) and (max-width: 400px) {
+  .tbtn.slot-tl2 {
+    left: calc(192px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-tl3 {
+    left: calc(244px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-top1,
+  .tbtn.slot-top2,
+  .tbtn.slot-top3 {
+    width: 48px;
+    height: 48px;
+  }
+
+  .tbtn.slot-top1 {
+    right: calc(12px + env(safe-area-inset-right));
+  }
+}
+
+/* 駕駛：下車（sec2）/ 手煞（sec3）移到踏板上方一列（134–194px，右半區內；手煞在油門上方），不與踏板重疊 */
+body.touch-drive .tbtn.slot-sec2,
+body.touch-drive .tbtn.slot-sec3 {
+  top: calc(134px + env(safe-area-inset-top));
+  bottom: auto;
+  width: 60px;
+  height: 60px;
+}
+
+body.touch-drive .tbtn.slot-sec2 {
+  right: calc(104px + env(safe-area-inset-right));
+}
+
+body.touch-drive .tbtn.slot-sec3 {
+  right: calc(16px + env(safe-area-inset-right));
+}
+
+/* 駕駛踏板：右半區兩大塊（左煞車、右油門），步行隱藏；駕駛時隱藏視角區。
+   上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px） */
+#touch-pedals {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  display: none;
+  gap: 12px;
+  box-sizing: border-box;
+  padding: calc(202px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) 12px;
+}
+
+body.touch-drive #touch-pedals {
+  display: flex;
+}
+
+body.touch-drive #touch-look {
+  display: none;
+}
+
+.tpedal {
+  position: relative;
+  flex: 1;
+  min-width: 44px;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.25);
+  touch-action: none;
+}
+
+#pedal-brake {
+  border-color: rgba(255, 110, 90, 0.7);
+}
+
+#pedal-gas {
+  border-color: rgba(120, 230, 120, 0.7);
+}
+
+.tpedal-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 0;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.tpedal-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  text-align: center;
+  font-weight: bold;
+  color: #fff;
+  pointer-events: none;
+}
+
+.tpedal.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 直向提示的「仍用直向遊玩」鈕（mobile.js 建立） */
+#portrait-ok {
+  min-height: 44px;
+  padding: 0 20px;
+  border: 2px solid #fff;
+  border-radius: 22px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  touch-action: manipulation;
 }

@@ -1,4 +1,5 @@
 // 存檔：localStorage 讀寫、版本遷移、清洗驗證、備份 / 損毀保留，以及定時自動存檔
+// 損毀處理：主鍵壞、.bak 好 → recovered；兩者皆壞 → corrupt-reset（最後一份原文留在 .corrupt，壞掉的主鍵 / .bak 清掉）
 // storage 由呼叫端注入（介面同 localStorage：getItem / setItem / removeItem）；未注入時用 globalThis.localStorage，
 // 仍不可用（node、停用儲存）時退回記憶體；所有讀寫都 try/catch，不向外丟例外
 
@@ -140,6 +141,9 @@ export function createSaveStore({ storage, key = 'tcgta.save', now = () => Date.
     }
     if (main.kind === 'empty' && bak.kind === 'empty') return { data: defaultSave(), status: 'new' };
     if (main.kind === 'empty' && bak.kind === 'bad') set(CORRUPT, bak.raw);
+    // 主檔與備份都救不回：原文已留在 .corrupt，清掉壞槽，下次啟動不再重複報損毀（開新局存檔後也不會被壞 .bak 蓋回）
+    if (main.kind === 'bad') remove(key);
+    if (bak.kind === 'bad') remove(BAK);
     return { data: defaultSave(), status: 'corrupt-reset' };
   }
 

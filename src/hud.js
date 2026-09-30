@@ -1,43 +1,122 @@
-// HUD：左下小地圖、所在位置、時速、時間、右上操作提示（H 收合）、右下步行常駐按鍵提示、上車提示、地點提示
-// 鏡頭靈敏度切換（input.js：桌機 O 鍵 / 觸控「靈敏度」鈕）由本檔訂閱並以 toast 顯示目前檔位
-// 觸控裝置（body.touch）版面由 style.css 重新配置；本檔負責依 state.driving 切換觸控按鈕配置、把鍵盤提示改成觸控用語
+// HUD：右上時間 · 金錢（+/− 跳動）、左下圓形小地圖 + 地名 + 綠色血條、右下駕駛時圓形時速錶 + 車名 + 藍底路牌路名、
+// 中下互動提示膠囊、左上新手提示卡（可關、每張只出現一次）與 FPS 小字、底部常駐按鍵提示、訊息 toast
+// 版面（桌機 / 觸控橫向 / 觸控直向）全部在 style.css「HUD」段；本檔只切 class 與填文字，不寫死任何鍵位文字
+//
+// 接線（整合層 main.js）：
+//   const hud = new HUD();                         // 可傳 { storage }（預設安全包裝的 localStorage）
+//   hud.update(dt, state)                           // 每幀；state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers,
+//                                                   //   money, hp, hpMax, vehicleLabel, roadName }（新欄位可省略）
+//   hud.setMoney(money, delta) / hud.setHealth(hp, hpMax) / hud.setPrompt(text | null)
+//   hud.showHint(id, text)                          // 同 id 只出現一次（localStorage 'tcgta.hints.seen'）；回傳是否排入
+//   hud.setHintsEnabled(settings.get('showHints')) / hud.resetHints()
+//   hud.setControlsHint([{ keys, desc }])           // 由 KEYMAP_HELP / TOUCH_HELP 產生後傳入
+//   hud.setFps(fps | null)                          // null = 隱藏
+//   hud.setUiScale(k)                               // 寫 CSS 變數 --ui-scale / --tg-ui-scale；HUD 用 --hud-scale（觸控或小螢幕 ≤ 1）
+// 觸控裝置（body.touch）：本檔依 state.driving 切換觸控按鈕配置；提示文字「按 F …」改指向「上車 / 下車」鈕；
+//   觸控駕駛中版面沒有提示卡的位置，新手提示延到下車後才顯示
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
 import { setTouchMode } from './touch.js';
-import { onSensitivityChange } from './input.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
 const PLACE_TOAST = '📍 '; // main.js 進場地名 toast 的前綴：與地名 pill 同名時不重複顯示（見 toast()）
-const SENS_TOAST_SEC = 2; // 靈敏度 toast 顯示秒數
-const SENS_KIND_LABEL = { mouse: '滑鼠', touch: '觸控' };
+export const HINTS_KEY = 'tcgta.hints.seen'; // localStorage：已看過的新手提示 id（JSON 陣列）
+const HINT_SEC = 12; // 提示卡自動收起秒數
+const HINT_GAP_SEC = 0.6; // 連續提示之間的間隔
+const MONEY_DELTA_SEC = 1.8; // 金錢 +/− 顯示秒數
+const SPEEDO_MAX = 160; // 時速錶滿格（km/h）
+const SPEEDO_HOT = 0.8; // 超過滿格此比例改警示色
+const HP_LOW = 0.3; // 血量低於此比例改警示色
+const SMALL_SCREEN = 700; // 視窗短邊小於此值（px；手機、小視窗）時介面縮放上限 1，放大後的角落群組才不會互相擠到
+const TOUCH_BTN_LABEL = { walk: '上車', drive: '下車' }; // 對應 touch.js 的 tb-enter / tb-exit 文字
+
+// localStorage 安全包裝：無痕 / 停用儲存 / node 無 window 時回 null
+function defaultStorage() {
+  try {
+    return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// 整數加千分位（不依賴 toLocaleString 的地區設定）
+export function formatMoney(n) {
+  const v = Math.round(Number(n) || 0);
+  const s = String(Math.abs(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${v < 0 ? '−' : ''}NT$ ${s}`;
+}
+
+// 觸控版提示文字：「按 F 上車（…）」→「點「上車」鈕 上車（…）」（駕駛中指向「下車」鈕）
+export function touchPromptText(text, driving) {
+  return text.replace(/按\s*F\s*/g, `點「${TOUCH_BTN_LABEL[driving ? 'drive' : 'walk']}」鈕 `);
+}
 
 export class HUD {
-  constructor() {
-    this.root = document.getElementById('hud');
-    this.locationEl = document.getElementById('location');
-    this.speedEl = document.getElementById('speed');
-    this.speedNum = document.getElementById('speed-num');
-    this.clockEl = document.getElementById('clock');
-    this.helpEl = document.getElementById('help');
-    this.promptEl = document.getElementById('prompt');
-    this.ctrlHintEl = document.getElementById('ctrl-hint'); // 步行常駐按鍵提示（觸控版由 style.css 隱藏，改看「揮拳」鈕）
-    this._lastDriving = null;
-    this.toastEl = document.getElementById('toast');
-    this.minimap = document.getElementById('minimap');
+  constructor({ storage = defaultStorage() } = {}) {
+    const $ = (id) => document.getElementById(id);
+    this.root = $('hud');
+    this.locationEl = $('location');
+    this.driveEl = $('drive-panel');
+    this.speedNum = $('speed-num');
+    this.speedArc = $('speedo-arc');
+    this.vehicleLabelEl = $('vehicle-label');
+    this.roadSignEl = $('road-sign');
+    this.roadNameEl = $('road-name');
+    this.clockEl = $('clock');
+    this.moneyEl = $('money');
+    this.moneyDeltaEl = $('money-delta');
+    this.healthEl = $('health');
+    this.healthFill = $('health-fill');
+    this.promptEl = $('prompt');
+    this.promptText = $('prompt-text');
+    this.toastEl = $('toast');
+    this.fpsEl = $('fps');
+    this.hintCard = $('hint-card');
+    this.hintText = $('hint-text');
+    this.ctrlHintEl = $('ctrl-hint'); // 桌機底部按鍵提示（觸控版由 style.css 隱藏）
+    this.touchHintEl = $('touch-hint'); // 觸控底部提示（桌機隱藏）
+    this.minimap = $('minimap');
     this.mctx = this.minimap.getContext('2d');
-    this._lastLocation = '';
-    this._lastPrompt = null;
-    this._toastTimer = 0;
-    this._pendingPlace = null; // 待判斷的進場地名 toast（等本幀 pill 更新後再決定）
     this.touch = isTouch();
     this.enterBtn = null; // 觸控「上車」鈕：附近有車時加上 .ready 提示
+    this.storage = storage;
+    this._lastDriving = null;
+    this._lastLocation = '';
+    this._lastPrompt = null;
+    this._rawPrompt = null;
+    this._toastTimer = 0;
+    this._pendingPlace = null; // 待判斷的進場地名 toast（等本幀 pill 更新後再決定）
+    this._clock = '';
+    this._money = null;
+    this._moneyDeltaTimer = 0;
+    this._hp = null;
+    this._hpMax = null;
+    this._speed = null;
+    this._vehicleLabel = null;
+    this._roadName = null;
+    this._fps = null;
+    this._uiScale = 1;
+    // 新手提示
+    this._hintsEnabled = true;
+    this._hintsSeen = this._loadSeen();
+    this._hintQueue = []; // [{ id, text }]
+    this._hintCurrent = null;
+    this._hintTimer = 0;
+    this._hintGap = 0;
+    const close = $('hint-close');
+    if (close) {
+      close.addEventListener('click', (e) => {
+        if (e && e.preventDefault) e.preventDefault();
+        this._closeHint();
+      });
+    }
     this.mapCanvas = this._buildMap();
-    onSensitivityChange(({ kind, level }) => {
-      this.toast(`鏡頭靈敏度（${SENS_KIND_LABEL[kind]}）：${level.label}（×${level.mul}）`, SENS_TOAST_SEC);
-    });
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('resize', () => this._applyScale());
+    }
   }
 
   _buildMap() {
@@ -123,28 +202,28 @@ export class HUD {
     this.root.classList.toggle('hidden', !v);
   }
 
-  toggleHelp() {
-    this.helpEl.classList.toggle('collapsed');
-  }
-
+  // ---------- 互動提示膠囊 ----------
   setPrompt(text) {
-    if (text === this._lastPrompt) return;
-    this._lastPrompt = text;
+    const raw = text || null;
+    this._rawPrompt = raw;
+    let shown = raw;
+    if (this.touch && shown) shown = touchPromptText(shown, !!this._lastDriving);
     if (this.touch) {
-      // main.js 的提示文案是「按 F 上車（…）」，觸控時改指向按鈕
-      if (text) text = text.replace(/^按 F /, '點「上車」鈕 ');
       if (!this.enterBtn) this.enterBtn = document.getElementById('tb-enter');
-      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!text);
+      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!raw && !this._lastDriving);
     }
-    if (text) {
-      this.promptEl.textContent = text;
+    if (shown === this._lastPrompt) return;
+    this._lastPrompt = shown;
+    if (shown) {
+      this.promptText.textContent = shown;
       this.promptEl.classList.remove('hidden');
     } else {
       this.promptEl.classList.add('hidden');
     }
   }
 
-  // 進場地名 toast（PLACE_TOAST 開頭）與頂部地名 pill 重複：先暫存，update() 更新 pill 後，
+  // ---------- 訊息 toast ----------
+  // 進場地名 toast（PLACE_TOAST 開頭）與地名 pill 重複：先暫存，update() 更新 pill 後，
   // 只有「pill 看不到（隱藏 / 不在版面上）或被截斷、或 pill 顯示的不是這個地名」時才顯示，其餘 toast 照常立即顯示
   toast(text, seconds = 6) {
     if (text.startsWith(PLACE_TOAST)) {
@@ -160,14 +239,181 @@ export class HUD {
     this._toastTimer = seconds;
   }
 
-  // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers }
-  update(dt, state) {
-    if (this.touch) setTouchMode(state.driving ? 'drive' : 'walk');
-    if (state.driving !== this._lastDriving) {
-      this._lastDriving = state.driving;
-      if (this.ctrlHintEl) this.ctrlHintEl.classList.toggle('hidden', state.driving);
+  // ---------- 金錢 / 血量 ----------
+  // delta 省略時以上次金額推算；delta 為 0 不跳動
+  setMoney(money, delta) {
+    const m = Math.round(Number(money));
+    if (!Number.isFinite(m)) return;
+    const d = delta === undefined || delta === null ? (this._money === null ? 0 : m - this._money) : Math.round(Number(delta) || 0);
+    if (m !== this._money) {
+      this._money = m;
+      this.moneyEl.textContent = formatMoney(m);
     }
-    if (state.location !== this._lastLocation) {
+    if (!d) return;
+    const el = this.moneyDeltaEl;
+    el.textContent = `${d > 0 ? '+' : '−'}${formatMoney(Math.abs(d))}`;
+    el.classList.toggle('gain', d > 0);
+    el.classList.toggle('loss', d < 0);
+    el.classList.remove('hidden');
+    // 重播跳動動畫：移除 class 後讀一次版面再加回
+    el.classList.remove('pop');
+    void el.offsetWidth;
+    el.classList.add('pop');
+    this._moneyDeltaTimer = MONEY_DELTA_SEC;
+  }
+
+  setHealth(hp, hpMax) {
+    const max = Number(hpMax) > 0 ? Number(hpMax) : this._hpMax || 100;
+    const v = Math.max(0, Math.min(max, Number(hp) || 0));
+    if (v === this._hp && max === this._hpMax) return;
+    this._hp = v;
+    this._hpMax = max;
+    const k = v / max;
+    this.healthFill.style.width = `${(k * 100).toFixed(1)}%`;
+    this.healthEl.classList.toggle('low', k < HP_LOW);
+  }
+
+  // ---------- 新手提示卡 ----------
+  _loadSeen() {
+    try {
+      const raw = this.storage && this.storage.getItem(HINTS_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []);
+    } catch (err) {
+      return new Set();
+    }
+  }
+
+  _saveSeen() {
+    try {
+      if (this.storage) this.storage.setItem(HINTS_KEY, JSON.stringify([...this._hintsSeen]));
+    } catch (err) {
+      // 儲存不可用：只記在記憶體
+    }
+  }
+
+  // 同 id 只出現一次（跨次遊玩記在 localStorage）；已看過 / 已排隊 / 提示關閉時回傳 false
+  showHint(id, text) {
+    if (!this._hintsEnabled || !id || !text) return false;
+    const key = String(id);
+    if (this._hintsSeen.has(key)) return false;
+    if ((this._hintCurrent && this._hintCurrent.id === key) || this._hintQueue.some((h) => h.id === key)) return false;
+    this._hintQueue.push({ id: key, text: String(text) });
+    this._pumpHints();
+    return true;
+  }
+
+  setHintsEnabled(on) {
+    this._hintsEnabled = !!on;
+    if (!this._hintsEnabled) {
+      // 尚未顯示的提示直接丟棄（之後重新開啟時可再依情境出現）
+      this._hintQueue.length = 0;
+      if (this._hintCurrent) this._closeHint();
+    }
+  }
+
+  resetHints() {
+    this._hintsSeen.clear();
+    this._hintQueue.length = 0;
+    if (this._hintCurrent) this._closeHint();
+    try {
+      if (this.storage) this.storage.removeItem(HINTS_KEY);
+    } catch (err) {
+      // 忽略
+    }
+  }
+
+  // 觸控駕駛中沒有提示卡的位置（左半欄給時速錶），延到下車後
+  _hintBlocked() {
+    return this.touch && !!this._lastDriving;
+  }
+
+  _pumpHints() {
+    if (this._hintCurrent || this._hintGap > 0 || !this._hintQueue.length || this._hintBlocked()) return;
+    const h = this._hintQueue.shift();
+    this._hintCurrent = h;
+    this._hintTimer = HINT_SEC;
+    this._hintsSeen.add(h.id);
+    this._saveSeen();
+    this.hintText.textContent = h.text;
+    this.hintCard.classList.remove('hidden');
+  }
+
+  _closeHint() {
+    this._hintCurrent = null;
+    this._hintTimer = 0;
+    this._hintGap = HINT_GAP_SEC;
+    this.hintCard.classList.add('hidden');
+  }
+
+  // ---------- 底部按鍵提示 / FPS / 介面縮放 ----------
+  // items：[{ keys, desc }]（由 core/actions 的 KEYMAP_HELP / TOUCH_HELP 產生）；桌機與觸控容器寫同樣內容，由 CSS 決定顯示哪個
+  setControlsHint(items) {
+    const list = Array.isArray(items) ? items.filter((it) => it && (it.keys || it.desc)) : [];
+    for (const el of [this.ctrlHintEl, this.touchHintEl]) {
+      if (!el) continue;
+      el.textContent = '';
+      list.forEach((it, i) => {
+        if (i > 0) el.appendChild(document.createTextNode(' · '));
+        if (it.keys) {
+          const b = document.createElement('b');
+          b.textContent = String(it.keys);
+          el.appendChild(b);
+        }
+        if (it.desc) el.appendChild(document.createTextNode(`${it.keys ? ' ' : ''}${it.desc}`));
+      });
+      el.classList.toggle('hidden', !list.length);
+    }
+  }
+
+  setFps(fps) {
+    if (fps === null || fps === undefined || !Number.isFinite(Number(fps))) {
+      this._fps = null;
+      this.fpsEl.classList.add('hidden');
+      return;
+    }
+    const v = Math.round(Number(fps));
+    this.fpsEl.classList.remove('hidden');
+    if (v === this._fps) return;
+    this._fps = v;
+    this.fpsEl.textContent = `${v} FPS`;
+  }
+
+  // k：settings.uiScale（0.8–1.3）；--ui-scale / --tg-ui-scale 原值寫入（選單用），HUD 自己的 --hud-scale 在觸控或小螢幕上限 1（避免蓋到觸控鈕）
+  setUiScale(k) {
+    const v = Number(k);
+    if (!Number.isFinite(v) || v <= 0) return;
+    this._uiScale = v;
+    this._applyScale();
+  }
+
+  _applyScale() {
+    if (typeof document === 'undefined' || !document.documentElement) return;
+    const st = document.documentElement.style;
+    const w = typeof window !== 'undefined' ? window.innerWidth : 0;
+    const h = typeof window !== 'undefined' ? window.innerHeight : 0;
+    const small = this.touch || (w > 0 && h > 0 && Math.min(w, h) < SMALL_SCREEN);
+    const hud = small ? Math.min(1, this._uiScale) : this._uiScale;
+    st.setProperty('--ui-scale', String(this._uiScale));
+    st.setProperty('--tg-ui-scale', String(this._uiScale));
+    st.setProperty('--hud-scale', String(hud));
+  }
+
+  // ---------- 每幀 ----------
+  // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers, money, hp, hpMax, vehicleLabel, roadName }
+  update(dt, state) {
+    const driving = !!state.driving;
+    if (this.touch) setTouchMode(driving ? 'drive' : 'walk');
+    if (driving !== this._lastDriving) {
+      this._lastDriving = driving;
+      this.driveEl.classList.toggle('hidden', !driving);
+      // 觸控提示文字依模式指向「上車 / 下車」鈕：以原文重算
+      if (this.touch) {
+        this._lastPrompt = undefined;
+        this.setPrompt(this._rawPrompt);
+      }
+    }
+    if (state.location !== undefined && state.location !== this._lastLocation) {
       this._lastLocation = state.location;
       this.locationEl.textContent = state.location;
     }
@@ -176,18 +422,67 @@ export class HUD {
       this._pendingPlace = null;
       if (!this._pillShows(p.name)) this._showToast(p.text, p.seconds);
     }
-    if (state.driving) {
-      this.speedEl.classList.remove('hidden');
-      this.speedNum.textContent = String(Math.round(state.speedKmh));
-    } else {
-      this.speedEl.classList.add('hidden');
+    if (driving) this._updateDrive(state);
+    if (state.time !== undefined) {
+      const clock = state.fast ? `${state.time} ⏩` : String(state.time);
+      if (clock !== this._clock) {
+        this._clock = clock;
+        this.clockEl.textContent = clock;
+      }
     }
-    this.clockEl.textContent = state.fast ? `${state.time} ⏩` : state.time;
+    if (Number.isFinite(state.money) && Math.round(state.money) !== this._money) this.setMoney(state.money);
+    if (Number.isFinite(state.hp)) this.setHealth(state.hp, state.hpMax);
     if (this._toastTimer > 0) {
       this._toastTimer -= dt;
       if (this._toastTimer <= 0) this.toastEl.classList.add('hidden');
     }
-    this._drawMinimap(state);
+    if (this._moneyDeltaTimer > 0) {
+      this._moneyDeltaTimer -= dt;
+      if (this._moneyDeltaTimer <= 0) this.moneyDeltaEl.classList.add('hidden');
+    }
+    this._updateHints(dt);
+    if (Number.isFinite(state.x) && Number.isFinite(state.z)) this._drawMinimap(state);
+  }
+
+  _updateDrive(state) {
+    const kmh = Math.max(0, Math.round(Math.abs(Number(state.speedKmh) || 0)));
+    if (kmh !== this._speed) {
+      this._speed = kmh;
+      this.speedNum.textContent = String(kmh);
+      const k = Math.min(1, kmh / SPEEDO_MAX);
+      this.speedArc.setAttribute('stroke-dasharray', `${(k * 100).toFixed(1)} 100`);
+      this.driveEl.classList.toggle('hot', k >= SPEEDO_HOT);
+    }
+    const label = state.vehicleLabel ? String(state.vehicleLabel) : '';
+    if (label !== this._vehicleLabel) {
+      this._vehicleLabel = label;
+      this.vehicleLabelEl.textContent = label;
+    }
+    const road = state.roadName ? String(state.roadName) : '';
+    if (road !== this._roadName) {
+      this._roadName = road;
+      this.roadNameEl.textContent = road;
+      this.roadSignEl.classList.toggle('hidden', !road);
+    }
+  }
+
+  _updateHints(dt) {
+    if (this._hintCurrent) {
+      // 觸控上車時收起目前提示（位置讓給時速錶），放回佇列最前面、下車後重新顯示
+      if (this._hintBlocked()) {
+        const h = this._hintCurrent;
+        this._hintsSeen.delete(h.id);
+        this._saveSeen();
+        this._closeHint();
+        this._hintQueue.unshift(h);
+      } else {
+        this._hintTimer -= dt;
+        if (this._hintTimer <= 0) this._closeHint();
+      }
+    } else if (this._hintGap > 0) {
+      this._hintGap -= dt;
+    }
+    this._pumpHints();
   }
 
   // 地名 pill 是否完整顯示 name：文字相同、HUD 與 pill 在版面上可見、未被 ellipsis 截斷

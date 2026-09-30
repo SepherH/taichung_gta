@@ -165,6 +165,116 @@ function applySign(mesh, text) {
   mesh.userData.signText = text;
 }
 
+// ---------- 深色玻璃修正（老虎城店面玻璃） ----------
+// 沿革：Phase 2 白天亮度約 9–11（幾乎全黑）→ 第一版只在自發光偏暗時補最低自發光，但 glb 自帶 emissive 0x594a35 主導顏色，
+//   亮度 76 卻整面平塗棕色 (88,75,54)，不像玻璃（瀏覽器實測）。
+// 原因：場景沒有環境貼圖（scene.environment），金屬面只反射環境 → 沒環境就全黑；glb 的暖色自發光又把整面塗成棕色。
+// 現行做法：只套用在 DARK_GLASS_FILES 列出的模型（其他地標的玻璃目前正常，不動），材質判定（任一成立）：
+//   ⓪ 名稱符合 GLASS_FORCE_RE（tiger_shopfront_glass：已知的店面玻璃，不看顏色）；
+//   ① 名稱含 glass / window / 玻璃 / 櫥窗 / 店面（不分大小寫）且顏色偏暗（亮度 < GLASS_DARK_LUMA）；
+//   ② 名稱不明但「透明（transparent 或 opacity < 1 或 transmission > 0）+ 顏色很暗 + metalness ≥ GLASS_METAL_MIN」。
+// 覆寫（不改 public/models 下的檔；數值皆為絕對值，重複套用結果不變）：
+//   底色 GLASS_COLOR 冷深藍灰、metalness GLASS_METALNESS、roughness GLASS_ROUGHNESS、envMap = 簡單天空漸層（glassEnvMap，
+//   或呼叫端傳入場景現有環境）→ 白天是帶天空反射的藍灰玻璃；
+//   自發光改成暖色店內燈光 GLASS_NIGHT_EMISSIVE、拿掉 glb 的 emissiveMap，強度交給 registerNight（白天 0、夜間最高 GLASS_NIGHT_INTENSITY）；
+//   opacity 至少 GLASS_OPACITY（避免透出室內的黑）、transmission 歸零。
+const DARK_GLASS_FILES = new Set(['tiger_city.glb']);
+const GLASS_FORCE_RE = /tiger_shopfront_glass/i;
+const GLASS_NAME_RE = /glass|window|玻璃|櫥窗|店面/i;
+const GLASS_DARK_LUMA = 0.12; // 線性亮度
+const GLASS_METAL_MIN = 0.5;
+const GLASS_COLOR = new THREE.Color(0x566a7e); // 冷深藍灰（sRGB）：metalness 0.75 下 F0 約 0.12，反射天空後約 sRGB 90 上下
+const GLASS_METALNESS = 0.75;
+const GLASS_ROUGHNESS = 0.12;
+const GLASS_ENV_INTENSITY = 1;
+const GLASS_NIGHT_EMISSIVE = new THREE.Color(0xffb46e); // 夜間店內暖光（sRGB）
+const GLASS_NIGHT_INTENSITY = 0.3;
+const GLASS_OPACITY = 0.88;
+// 天空漸層環境貼圖（equirect，由上到下：天頂藍 → 地平線淺灰藍 → 地面深灰）；MeshStandardMaterial 渲染時由 three 轉成 PMREM
+const ENV_W = 64;
+const ENV_H = 32;
+const ENV_ZENITH = new THREE.Color(0x6fa6d8);
+const ENV_HORIZON = new THREE.Color(0xdde6ee);
+const ENV_GROUND = new THREE.Color(0x3c4046);
+let envMapCache = null;
+
+function linearLuma(c) {
+  return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+}
+
+// 玻璃用的天空漸層環境貼圖（共用一張）
+export function glassEnvMap() {
+  if (envMapCache) return envMapCache;
+  const data = new Uint8Array(ENV_W * ENV_H * 4);
+  const c = new THREE.Color();
+  const rgb = { r: 0, g: 0, b: 0 };
+  for (let j = 0; j < ENV_H; j++) {
+    // DataTexture 第 0 列在 v = 0（equirect 最下方 = 正下方）
+    const v = (j + 0.5) / ENV_H;
+    if (v >= 0.5) c.copy(ENV_HORIZON).lerp(ENV_ZENITH, Math.pow((v - 0.5) * 2, 0.6));
+    else c.copy(ENV_HORIZON).lerp(ENV_GROUND, Math.min(1, (0.5 - v) * 6));
+    c.getRGB(rgb, THREE.SRGBColorSpace); // 線性空間內插、以 sRGB 存（貼圖 colorSpace = sRGB）
+    for (let i = 0; i < ENV_W; i++) {
+      const k = (j * ENV_W + i) * 4;
+      data[k] = Math.round(rgb.r * 255);
+      data[k + 1] = Math.round(rgb.g * 255);
+      data[k + 2] = Math.round(rgb.b * 255);
+      data[k + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, ENV_W, ENV_H, THREE.RGBAFormat);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  envMapCache = tex;
+  return tex;
+}
+
+// 是否為要修正的深色玻璃材質（判定依據見上方註解）
+export function isDarkGlass(mat) {
+  if (!mat || !mat.color || !mat.isMeshStandardMaterial) return false;
+  if (GLASS_FORCE_RE.test(mat.name || '')) return true;
+  const dark = linearLuma(mat.color) < GLASS_DARK_LUMA;
+  if (!dark) return false;
+  if (GLASS_NAME_RE.test(mat.name || '')) return true;
+  const see = mat.transparent || mat.opacity < 1 || (mat.transmission || 0) > 0;
+  return see && (mat.metalness || 0) >= GLASS_METAL_MIN;
+}
+
+// 就地覆寫模型內的深色玻璃材質；envMap 預設為 glassEnvMap()（可傳場景現有環境）。回傳修正的材質數（同一材質只算一次）
+export function fixDarkGlass(root, { envMap = null } = {}) {
+  const done = new Set();
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const mat of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (!mat || done.has(mat) || !(mat.userData.darkGlassFixed || isDarkGlass(mat))) continue;
+      done.add(mat);
+      mat.color.copy(GLASS_COLOR);
+      mat.metalness = GLASS_METALNESS;
+      mat.roughness = GLASS_ROUGHNESS;
+      mat.envMap = envMap || glassEnvMap();
+      mat.envMapIntensity = GLASS_ENV_INTENSITY;
+      if (mat.emissive) {
+        mat.emissive.copy(GLASS_NIGHT_EMISSIVE);
+        mat.emissiveMap = null;
+        if (!mat.userData.darkGlassNight) {
+          // 白天 0（不讓暖色主導）、夜間由日夜系統調到 GLASS_NIGHT_INTENSITY
+          mat.emissiveIntensity = 0;
+          registerNight(mat, GLASS_NIGHT_INTENSITY);
+          mat.userData.darkGlassNight = true;
+        }
+      }
+      if (mat.transparent || mat.opacity < 1) mat.opacity = Math.max(mat.opacity, GLASS_OPACITY);
+      if ('transmission' in mat) mat.transmission = 0;
+      mat.userData.darkGlassFixed = true;
+      mat.needsUpdate = true;
+    }
+  });
+  return done.size;
+}
+
 // 整理模型：陰影、招牌、夜間發光
 function prepareModel(root) {
   const signs = [];
@@ -181,7 +291,8 @@ function prepareModel(root) {
       return;
     }
     for (const mat of Array.isArray(o.material) ? o.material : [o.material]) {
-      if (!mat || seen.has(mat) || !mat.emissive) continue;
+      // 已修正的深色玻璃在 fixDarkGlass 內以夜間暖光上限登記過 registerNight，這裡不重複登記（否則 glb 原強度會蓋過）
+      if (!mat || seen.has(mat) || !mat.emissive || mat.userData.darkGlassFixed) continue;
       seen.add(mat);
       const lit = mat.emissiveMap || mat.emissive.r + mat.emissive.g + mat.emissive.b > 0.01;
       if (lit && mat.emissiveIntensity > 0) registerNight(mat, Math.max(1, mat.emissiveIntensity));
@@ -191,8 +302,8 @@ function prepareModel(root) {
 }
 
 // 載入所有地標模型；回傳 Map<id, { entry, object }>（OSM way id 為數字 key、字串 id 原樣；object 已擺到世界座標，尚未加入場景）
-// onProgress(done, total, name)：每完成一個模型呼叫一次
-export async function loadLandmarkModels(onProgress = () => {}) {
+// onProgress(done, total, name)：每完成一個模型呼叫一次；options.envMap：老虎城玻璃的反射環境（預設 glassEnvMap 天空漸層）
+export async function loadLandmarkModels(onProgress = () => {}, { envMap = null } = {}) {
   const result = new Map();
   const list = await fetchManifest(`${MODEL_DIR}manifest.json`);
   if (!list) return result;
@@ -214,6 +325,7 @@ export async function loadLandmarkModels(onProgress = () => {}) {
         root.userData.landmark = e;
         root.userData.datum = datumOf(e);
         root.updateMatrixWorld(true);
+        if (DARK_GLASS_FILES.has(e.file)) root.userData.darkGlassFixed = fixDarkGlass(root, { envMap });
         prepareModel(root);
         result.set(entryKey(e), { entry: e, object: root });
       } catch (err) {

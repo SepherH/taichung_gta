@@ -24,9 +24,13 @@ export const PARKED_TYPES = [
 ];
 export const PARKED_RADIUS = 150;
 
-export const TRAFFIC_CAR_COUNT = 8;
-// 行人密度：以玩家（鏡頭焦點）為中心半徑 80 m 內維持的目標人數，依效能分級（mobile.js qualityTier：high 桌機 / low 手機）
-export const PED_TARGET = { high: 50, low: 30 };
+// 車流 / 行人預算的相容表：Traffic 未注入 budget（core/quality.js qualityBudget 物件）時，舊的 crowd 字串 'high' | 'low'
+// 對應這兩列（同主控裁決後的畫質表 high / low 列；正式數值以 core/quality.js 為準，本表只給舊呼叫端與無頭測試）
+// cars：車流總台數（含公車 ≤ 2、機車約 motorbikeShare）；peds：行人目標人數；pedNear / pedFar：完整骨架 / 替身分界半徑（m）
+export const TRAFFIC_BUDGET_FALLBACK = {
+  low: { id: 'low', peds: 40, cars: 18, pedNear: 30, pedFar: 70, motorbikeShare: 0.4 },
+  high: { id: 'high', peds: 140, cars: 45, pedNear: 50, pedFar: 110, motorbikeShare: 0.4 },
+};
 // 行人生成加權的百貨門口（OSM way id）：新光三越、老虎城購物中心、Top City 台中大遠百
 export const CROWD_MALL_IDS = [148849083, 150999799, 224955652];
 

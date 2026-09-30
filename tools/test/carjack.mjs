@@ -2,7 +2,8 @@
 // C3 搶車 + 車輛耐久 / 冒煙無頭驗證：假 bus / 假 vehicle / 假 adapters，不需 Rapier、不需 vehicle.js / traffic.js 本體
 // 用法：node tools/test/carjack.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // 項目：canStart 距離 / 車速 / 車門側；搶車時間線各 adapter 呼叫時刻、取消分支、事件；
-//   耐久：各速度扣值落在目標區間、門檻 setPowerScale 與事件各一次、去重、機車係數、粒子池上限、120 m 外不產生粒子
+//   耐久：各速度扣值落在目標區間、門檻 setPowerScale 與事件各一次、去重、機車係數、粒子池上限、120 m 外不產生粒子；
+//   熄火濃煙深灰且夜間（注入 isNight）提亮；contacts router 撞牆 relSpeed 取撞擊前速度（假 world / 事件序列，同牆同速重撞扣值差 ±25% 內）
 import { register } from 'node:module';
 
 const JSON_HOOK = `
@@ -27,7 +28,8 @@ globalThis.document = {
 
 const THREE = await import('three');
 const { createCarjack, doorPoint } = await import('../../src/carjack.js');
-const { createVehicleDamage, MAX_PARTICLES } = await import('../../src/vehicle-damage.js');
+const { createVehicleDamage, MAX_PARTICLES, SMOKE_STAGE, SMOKE_NIGHT_COLOR, smokeColor, impactDamage } = await import('../../src/vehicle-damage.js');
+const { createContactRouter, impactSpeed, PREV_STEPS } = await import('../../src/physics/contacts.js');
 
 let passed = 0;
 let failed = 0;
@@ -350,6 +352,125 @@ function oneHit(relSpeed, opts = {}, kind = 'static') {
   dmg2.detach(far);
   check('detach 後 healthOf 為 null、onImpact 回 0', dmg2.healthOf(far) === null && dmg2.onImpact(far, { relSpeed: 30 }) === 0);
   dmg2.dispose();
+}
+
+// ======================= 熄火濃煙顏色（夜間提亮）=======================
+{
+  const lum = (hex) => (0.2126 * ((hex >> 16) & 0xff) + 0.7152 * ((hex >> 8) & 0xff) + 0.0722 * (hex & 0xff)) / 255;
+  const hex = (v) => '0x' + v.toString(16).padStart(6, '0');
+  check('熄火濃煙（stage 3）改為深灰 0x3a3a3a（原 0x161616）', SMOKE_STAGE[3].color === 0x3a3a3a && lum(SMOKE_STAGE[3].color) > lum(0x161616) * 2,
+    `亮度 ${f2(lum(0x161616))} → ${f2(lum(SMOKE_STAGE[3].color))}`);
+  check('smokeColor：白天 / 未注入 = 0x3a3a3a、夜間 1 = SMOKE_NIGHT_COLOR、0.5 介於之間、stage 1 / 2 不受夜間影響',
+    smokeColor(3, 0) === 0x3a3a3a && smokeColor(3, 1) === SMOKE_NIGHT_COLOR && lum(smokeColor(3, 0.5)) > lum(0x3a3a3a) && lum(smokeColor(3, 0.5)) < lum(SMOKE_NIGHT_COLOR) &&
+      smokeColor(1, 1) === SMOKE_STAGE[1].color && smokeColor(2, 1) === SMOKE_STAGE[2].color && smokeColor(3, 9) === SMOKE_NIGHT_COLOR,
+    `0 → ${hex(smokeColor(3, 0))}、0.5 → ${hex(smokeColor(3, 0.5))}、1 → ${hex(smokeColor(3, 1))}`);
+  check('夜間濃煙仍比白煙暗（仍是黑灰煙）', lum(SMOKE_NIGHT_COLOR) < lum(SMOKE_STAGE[1].color) * 0.5);
+  // 實際粒子顏色：熄火車在相機旁冒煙 1 s，取第一顆可見粒子的顏色
+  const spriteColor = (opts) => {
+    const scene = new THREE.Scene();
+    const d = createVehicleDamage({ bus: makeBus(), THREE, scene, ...opts });
+    const v = makeVehicle();
+    d.attach(v);
+    d.onImpact(v, { relSpeed: 60 });
+    for (let i = 0; i < 60; i++) d.update(1 / 60, 0, 0);
+    const sp = scene.children.find((c) => c.isSprite && c.visible);
+    const c = sp ? sp.material.color.getHex() : null;
+    d.dispose();
+    return c;
+  };
+  const cNone = spriteColor({});
+  const cDay = spriteColor({ isNight: () => false });
+  const cNight = spriteColor({ isNight: () => true });
+  const cHalf = spriteColor({ isNight: () => 0.5 });
+  const cThrow = spriteColor({ isNight: () => { throw new Error('x'); } });
+  check('粒子顏色：未注入 / 白天 / isNight 丟例外 = 固定深灰；夜間 = 提亮；0.5 = 中間值',
+    cNone === 0x3a3a3a && cDay === 0x3a3a3a && cThrow === 0x3a3a3a && cNight === SMOKE_NIGHT_COLOR && cHalf === smokeColor(3, 0.5),
+    [cNone, cDay, cNight, cHalf, cThrow].map((c) => (c === null ? '無' : hex(c))).join(' / '));
+}
+
+// ======================= contacts router：撞牆 relSpeed 取撞擊前速度 =======================
+// 假 Rapier world / EventQueue：collider handle 1 = 玩家車（kind 'vehicle'）、2 = 牆（未註冊 = 世界）
+// 每個序列：以 v0 朝 +Z 開 10 步 → 接觸後第 1..k 步車速依 after[] 變化（解算後已被擋停 / 回彈），第 k 步才送出超過門檻的接觸力事件
+{
+  const DT = 1 / 60;
+  const MASS = 1400;
+  function runSequence({ v0, after, n, impulse = null }) {
+    const body = { v: { x: 0, y: 0, z: v0 }, linvel() { return { ...this.v }; }, translation: () => ({ x: 0, y: 0, z: 0 }), mass: () => MASS };
+    const wallBody = { linvel: () => ({ x: 0, y: 0, z: 0 }), translation: () => ({ x: 0, y: 0, z: 3 }) };
+    const world = {
+      timestep: DT,
+      getCollider: (h) => (h === 1 ? { parent: () => body } : h === 2 ? { parent: () => wallBody } : null),
+    };
+    let pending = [];
+    const queue = {
+      drainContactForceEvents(cb) {
+        for (const e of pending) cb(e);
+        pending = [];
+      },
+      drainCollisionEvents() {},
+    };
+    const router = createContactRouter({}, world, queue);
+    const vehicle = { kind: 'vehicle', owner: makeVehicle({ mass: MASS }) };
+    router.register({ handle: 1 }, vehicle);
+    const hits = [];
+    router.onVehicleHitWorld((e) => hits.push(e));
+    for (let i = 0; i < 10; i++) router.drain(DT);
+    after.forEach((vz, i) => {
+      body.v = { x: 0, y: 0, z: vz };
+      if (i === after.length - 1) {
+        const dv = Math.abs(v0 - vz);
+        pending.push({
+          collider1: () => 2, collider2: () => 1,
+          totalForceMagnitude: () => (impulse ?? MASS * dv) / DT,
+          maxForceDirection: () => ({ ...n }),
+        });
+      }
+      router.drain(DT);
+    });
+    const hit = hits[0] || null;
+    const d = createVehicleDamage({ bus: makeBus() });
+    d.attach(vehicle.owner);
+    const delta = hit ? d.onImpact(vehicle.owner, { relSpeed: hit.relSpeed, kind: 'static', byPlayer: true }) : 0;
+    const vNow = after[after.length - 1];
+    return { hit, delta, oldDelta: impactDamage(vehicle.owner, Math.abs(vNow), 'static') };
+  }
+  const tilt = (deg, axis = 'x', sign = -1) => {
+    const r = (deg * Math.PI) / 180;
+    return axis === 'x' ? { x: Math.sin(r), y: 0, z: sign * Math.cos(r) } : { x: 0, y: Math.sin(r), z: sign * Math.cos(r) };
+  };
+  const v50 = kmh(50);
+  // 同一面牆、約 50 km/h 正面撞停：事件時點（接觸第 1–3 步）、解算後殘速 / 回彈、法向正負號與小角度雜訊各不相同
+  const seqs = [
+    { name: '第 1 步停住', v0: v50, after: [0], n: { x: 0, y: 0, z: -1 } },
+    { name: '第 1 步殘速 0.8、法向偏 8°', v0: v50, after: [0.8], n: tilt(8) },
+    { name: '第 2 步才過門檻、法向反號', v0: v50, after: [7, 0.3], n: { x: 0, y: 0, z: 1 } },
+    { name: '第 3 步回彈 −1.5、法向上仰 12°', v0: v50, after: [10, 4, -1.5], n: tilt(12, 'y') },
+    { name: '第 1 步回彈 −2.5', v0: v50, after: [-2.5], n: tilt(6, 'x', 1) },
+    { name: '48 km/h 第 2 步停住', v0: kmh(48), after: [5, 0], n: { x: 0, y: 0, z: -1 } },
+    { name: '52 km/h 第 1 步停住', v0: kmh(52), after: [0.2], n: tilt(4) },
+  ];
+  const res = seqs.map((q) => ({ ...q, ...runSequence(q) }));
+  const deltas = res.map((r) => r.delta);
+  const mean = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+  const lo = Math.min(...deltas);
+  const hi = Math.max(...deltas);
+  const old = res.map((r) => r.oldDelta);
+  check(`同牆約 50 km/h 撞停 ${res.length} 種事件序列都發 onVehicleHitWorld`, res.every((r) => !!r.hit));
+  check('扣值差異在平均 ±25% 內（修正前以事件當下速度算，差十幾倍）', lo >= mean * 0.75 && hi <= mean * 1.25 && lo > 0,
+    `修正後 ${deltas.map((x) => x.toFixed(0)).join(' / ')}（平均 ${mean.toFixed(0)}、範圍 ${(lo / mean * 100 - 100).toFixed(0)}%～+${(hi / mean * 100 - 100).toFixed(0)}%）；舊算法 ${old.map((x) => x.toFixed(0)).join(' / ')}`);
+  const exact = res[0];
+  check('relSpeed = 撞擊前速度的法向分量（第 1 步停住 → 13.89 m/s）', Math.abs(exact.hit.relSpeed - v50) < 1e-6, `relSpeed ${f2(exact.hit.relSpeed)}`);
+  check('撞牆 dir 朝遠離牆面（−Z），事件當下已停住也定得出方向', res.every((r) => r.hit.dir.z < 0), res.map((r) => f2(r.hit.dir.z)).join(' / '));
+  // impactSpeed 純函式：無法向 → |v_prev − v_now|；無歷史 → |v_now|（舊行為）；歷史取最近 PREV_STEPS 步
+  const hist = [{ x: 0, y: 0, z: 8 }, { x: 0, y: 0, z: 12 }];
+  check('impactSpeed：有法向取 max |v·n|、無法向（零向量 / null）取 max |v_prev − v_now|、無歷史退回 |v_now|',
+    Math.abs(impactSpeed(hist, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }) - 12) < 1e-9 &&
+      Math.abs(impactSpeed(hist, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: 0 }) - 11) < 1e-9 &&
+      Math.abs(impactSpeed(hist, { x: 0, y: 0, z: -2 }, null) - 14) < 1e-9 &&
+      Math.abs(impactSpeed([], { x: 3, y: 0, z: 4 }, { x: 0, y: 0, z: 1 }) - 5) < 1e-9 && PREV_STEPS >= 3);
+  // 側擦：沿牆 13.9 m/s 滑行、法向分量 0 → relSpeed ≈ 0（< 4 m/s 不扣），不再以全速計
+  const graze = runSequence({ v0: v50, after: [v50 * 0.98], n: { x: 1, y: 0, z: 0 }, impulse: 2000 });
+  check('側擦（法向垂直行進方向）→ relSpeed ≈ 0、不扣耐久', graze.hit && graze.hit.relSpeed < 1 && graze.delta === 0, graze.hit ? `relSpeed ${f2(graze.hit.relSpeed)}` : '未發事件');
 }
 
 const total = passed + failed;

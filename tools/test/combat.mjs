@@ -1,7 +1,10 @@
 // 無頭驗證 src/combat.js 與 src/npc-ai.js：mock actor / anim / body，手動推進時間
 // 用法：node tools/test/combat.mjs [-v 列出每項斷言]（任一斷言失敗 exit 1）
-import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD, HIT_RADIUS, HIT_HALF_ANGLE, HIT_MAX_DY, KNOCKBACK_DIST, ASSIST_RADIUS, HIT_STOP } from '../../src/combat.js';
-import { NpcBrain, wireCombatToBrains, FIGHT_PUNCH_MIN, FIGHT_PUNCH_MAX, WATCH_MIN_TIME, WATCH_MAX_TIME } from '../../src/npc-ai.js';
+import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD, HIT_RADIUS, HIT_HALF_ANGLE, HIT_MAX_DY, KNOCKBACK_DIST, ASSIST_RADIUS, HIT_STOP, pedKnockdownPayload } from '../../src/combat.js';
+import {
+  NpcBrain, wireCombatToBrains, createBrainGroup, fighterCount, FIGHT_PUNCH_MIN, FIGHT_PUNCH_MAX, WATCH_MIN_TIME, WATCH_MAX_TIME,
+  HORN_SIDESTEP_MIN, HORN_SIDESTEP_MAX, HORN_LOOK_MIN, HORN_LOOK_MAX, HORN_GLARE_MIN, HORN_GLARE_MAX, PANIC_HOPS, MAX_FIGHTERS, DISPERSE_MIN, DISPERSE_MAX, FLEE_MIN_TIME, FLEE_MAX_TIME,
+} from '../../src/npc-ai.js';
 
 let pass = 0;
 let total = 0;
@@ -526,8 +529,374 @@ function punch(sys, att, windowSec = 0.15) {
   ok(was === 'watch' && w.state === 'flee', `圍觀中肇事者逼近 → 逃跑（${was} → ${w.state}）`);
 }
 
-console.log(`combat.mjs：通過 ${pass} / ${total}`);
-if (fails.length) {
-  for (const m of fails) console.log(`  ✗ ${m}`);
-  process.exit(1);
+// ---------- 7. 喇叭（Phase 3）：前方 15 m、±40°；車道上側跳、人行道上看一下、少數瞪人 ----------
+{
+  const horn = { type: 'horn', x: 0, z: 0, dirX: 0, dirZ: 2 }; // 車在原點、朝 +Z 按喇叭（dir 不必是單位向量）
+  // 扇形判斷
+  const at = (x, z) => new NpcBrain({ actor: mockActor(`h-${x}-${z}`, x, z) });
+  const inside = [at(0, 10), at(Math.tan((35 * Math.PI) / 180) * 10, 10), at(0, 14.9)].map((b) => b.hear(horn));
+  const outside = [at(Math.tan((45 * Math.PI) / 180) * 10, 10), at(0, 15.5), at(0, -5), at(20, 0)].map((b) => b.hear(horn));
+  ok(inside.every(Boolean) && !outside.some(Boolean), `喇叭扇形：前方 10 m / 35° / 14.9 m 收到，45° / 15.5 m / 背後 / 側面收不到（${inside}｜${outside}）`);
+
+  // 車道上（無 roadSide：離軸線 < 1.8 m）→ 往垂直方向、自己所在的一側跳開，時間到回 wander
+  const r = at(0.5, 8);
+  r.hear(horn);
+  let it = r.update(FRAME, {});
+  const jumped = it.jump && r.state === 'sidestep' && it.moveX > 0.99 && Math.abs(it.moveZ) < 1e-9 && it.run;
+  let ts = FRAME;
+  while (r.state === 'sidestep' && ts < 5) {
+    r.update(FRAME, {});
+    ts += FRAME;
+  }
+  ok(jumped && r.state === 'wander' && ts >= HORN_SIDESTEP_MIN && ts <= HORN_SIDESTEP_MAX + FRAME, `車道上 → sidestep 起跳、往軸線右側（+X）跑開、${ts.toFixed(2)} s 後回 wander`);
+  const l = at(-0.4, 6);
+  l.hear(horn);
+  it = l.update(FRAME, {});
+  ok(l.state === 'sidestep' && it.moveX < -0.99, '軸線左側的人往左（-X）跳開');
+
+  // roadSide 轉接器：x < 3 視為車道、人行道在 +X；離開車道（且滿 0.45 s）即結束
+  const roadSide = (x, z, out) => {
+    if (x >= 3) return false;
+    out.x = 1;
+    out.z = 0;
+    return true;
+  };
+  const rs = new NpcBrain({ actor: mockActor('h-rs', -1, 9), roadSide });
+  rs.hear(horn);
+  let tr = 0;
+  let movedOk = true;
+  do {
+    it = rs.update(FRAME, {});
+    if (rs.state === 'sidestep') {
+      if (!(it.moveX > 0.99)) movedOk = false;
+      rs.actor.pos.x += it.moveX * 4 * FRAME;
+    }
+    tr += FRAME;
+  } while (rs.state === 'sidestep' && tr < 5);
+  ok(movedOk && rs.state === 'wander' && rs.actor.pos.x >= 3 && tr >= HORN_SIDESTEP_MIN && tr < HORN_SIDESTEP_MAX, `roadSide：軸線左側的人仍依轉接器往人行道（+X）跳開、上人行道即回 wander（${tr.toFixed(2)} s、x=${rs.actor.pos.x.toFixed(2)}）`);
+  const onWalk = new NpcBrain({ actor: mockActor('h-walk', 0, 9), roadSide: () => false });
+  onWalk.hear(horn);
+  onWalk.update(FRAME, {});
+  ok(onWalk.state === 'look' || onWalk.state === 'glare', `roadSide 回 false（人行道）→ 不跳（${onWalk.state}）`);
+  // ctx.roadSide 優先於建構參數
+  const ctxRs = new NpcBrain({ actor: mockActor('h-ctx', 0, 9), roadSide: () => false });
+  ctxRs.hear(horn);
+  ctxRs.update(FRAME, { roadSide });
+  ok(ctxRs.state === 'sidestep', 'ctx.roadSide 優先於建構時的 roadSide');
+
+  // 人行道上（離軸線 3 m）：多數看 0.5–1 s（原地面向車）後回漫步，約 10% 停下瞪人
+  let looks = 0;
+  let glares = 0;
+  let lookOk = true;
+  let glareOk = true;
+  let detail = '';
+  for (let i = 0; i < 400; i++) {
+    const b = new NpcBrain({ actor: mockActor(`ped-h${i}`, 3, 8) });
+    b.hear(horn);
+    it = b.update(FRAME, {});
+    const st = b.state;
+    const face = it.moveX === 0 && it.moveZ === 0 && Math.abs(it.faceYaw - Math.atan2(-3, -8)) < 1e-9;
+    let t = FRAME;
+    while (b.state === st && t < 10) {
+      b.update(FRAME, {});
+      t += FRAME;
+    }
+    if (st === 'look') {
+      looks++;
+      if (!face || b.state !== 'wander' || t < HORN_LOOK_MIN - FRAME || t > HORN_LOOK_MAX + 2 * FRAME) (lookOk = false), (detail = `look ${t.toFixed(2)} face=${face}`);
+    } else if (st === 'glare') {
+      glares++;
+      if (!face || b.state !== 'wander' || t < HORN_GLARE_MIN - FRAME || t > HORN_GLARE_MAX + 2 * FRAME) (glareOk = false), (detail = `glare ${t.toFixed(2)} face=${face}`);
+    } else (lookOk = false), (detail = `非 look / glare：${st}`);
+  }
+  ok(lookOk && looks > 0, `人行道上：看向車 ${HORN_LOOK_MIN}–${HORN_LOOK_MAX} s（原地面向喇叭來源）後回 wander ${detail}`);
+  ok(glareOk && glares >= 20 && glares <= 64, `400 人中停下瞪人 ${glares} 人（${((glares / 400) * 100).toFixed(1)}%，規格 10%）、${HORN_GLARE_MIN}–${HORN_GLARE_MAX} s 後離開`);
+  // 非漫步中不理喇叭；喇叭後被打照常反應
+  const busy = new NpcBrain({ actor: mockActor('h-busy', 0.2, 8) });
+  busy.onWitness({ x: 0, z: 5 });
+  busy.update(FRAME, {});
+  busy.hear(horn);
+  busy.update(FRAME, {});
+  ok(busy.state === 'flee', `逃跑中聽到喇叭不改變（${busy.state}）`);
+  const lk = new NpcBrain({ actor: mockActor('h-lk', 3, 8) });
+  lk.hear(horn);
+  lk.update(FRAME, {});
+  lk.onWitness({ x: 3, z: 6 });
+  lk.update(FRAME, {});
+  ok(lk.state === 'flee' || lk.state === 'watch', `看車中目擊事件照常反應（${lk.state}）`);
 }
+
+// ---------- 8. 恐慌擴散：目擊逃跑者傳給 5 m 內的人，每人一次、每層衰減 ----------
+{
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const player = mockActor('player', 0, -1, 0, { kind: 'player' });
+  sys.register(player);
+  const mk = (id, x, z) => {
+    const b = new NpcBrain({ actor: mockActor(id, x, z) });
+    b.watches = false;
+    b.braveness = 0; // 固定為膽小，避免受害者還手
+    return b;
+  };
+  // 受害者在原點；目擊者 6 m（層 0）→ 10 m（層 1）→ 14 m（層 2）→ 18 m（不再傳到）；另一名 3 m 內的圍觀者不轉傳
+  const victim = mk('victim', 0, 0);
+  const chain = [mk('c0', 6, 0), mk('c1', 10, 0), mk('c2', 14, 0), mk('c3', 18, 0)];
+  const watcher = mk('w', -4, 3);
+  watcher.watches = true;
+  const nearWatcher = mk('nw', -7, 6); // 離受害者 9.2 m（目擊不到）、只在圍觀者 5 m 內：圍觀者不轉傳 → 保持漫步
+  const all = [victim, ...chain, watcher, nearWatcher];
+  const brains = new Map(all.map((b) => [b.actor.id, b]));
+  for (const b of all) sys.register(b.actor);
+  const group = createBrainGroup(brains);
+  wireCombatToBrains(sys, brains, group);
+  const accepts = new Map();
+  for (const b of all) {
+    const orig = b.onPanic.bind(b);
+    b.onPanic = (info) => {
+      const r = orig(info);
+      if (r) accepts.set(b, (accepts.get(b) || 0) + 1);
+      return r;
+    };
+  }
+  let kd = null;
+  sys.on('knockdown', (e) => (kd = e));
+  sys.onVehicleHit({ ped: victim.actor, impulse: { x: 0, y: 50, z: 300 }, relSpeed: 7, vehicle: { pos: { x: 0, z: -3 } } });
+  const firstState = {};
+  const DT3 = 0.05; // 降頻呼叫：任意 dt 仍正確擴散
+  for (let t = 0; t < 3; t += DT3) {
+    clock += DT3;
+    sys.update(DT3);
+    for (const b of all) {
+      b.update(DT3, { combat: sys });
+      if (b.state !== 'wander' && !(b.actor.id in firstState)) firstState[b.actor.id] = { state: b.state, t };
+    }
+  }
+  const st = (b) => (firstState[b.actor.id] || { state: 'wander' }).state;
+  ok(kd && kd.cause === 'vehicle' && st(chain[0]) === 'flee', `被撞 → 8 m 內目擊者逃跑（${st(chain[0])}）`);
+  ok(st(chain[1]) === 'flee' && st(chain[2]) === 'flee', `恐慌經逃跑者往外傳 ${PANIC_HOPS} 層（10 m：${st(chain[1])}、14 m：${st(chain[2])}）`);
+  ok(st(chain[3]) === 'wander', `超過 ${PANIC_HOPS} 層不再傳（18 m：${st(chain[3])}）`);
+  const t1 = firstState.c1 && firstState.c1.t;
+  const t2 = firstState.c2 && firstState.c2.t;
+  ok(t1 > 0 && t2 > t1, `一圈一圈散開：層 1 於 ${t1 && t1.toFixed(2)} s、層 2 於 ${t2 && t2.toFixed(2)} s 開始逃`);
+  ok(st(watcher) === 'watch' && st(nearWatcher) === 'wander', `圍觀者不轉傳恐慌（圍觀者 ${st(watcher)}、旁人 ${st(nearWatcher)}）`);
+  ok([...accepts.values()].every((n) => n === 1), `每人最多收一次恐慌（${[...accepts.entries()].map(([b, n]) => `${b.actor.id}:${n}`).join(' ')}）`);
+
+  // 拳擊打倒 → 逃跑者避開肇事者（玩家）方向：被傳到的人即使在玩家身後也往遠離玩家處跑
+  clock = 0;
+  const sys2 = new CombatSystem({ now });
+  const pl = mockActor('player', 0, 0, 0, { kind: 'player' });
+  const v2 = mk('v2', 0, 0.8);
+  const w2 = mk('w2', 0, 6); // 目擊者：在受害者前方
+  const r2 = mk('r2', 0, 2.5); // 被傳到的人：在目擊者與玩家之間，逃跑方向必須遠離玩家（+Z），不是遠離目擊者（-Z）
+  r2.actor.pos.z = 9.5; // 先放在 8 m 外，只能經由恐慌收到
+  const b2 = [v2, w2, r2];
+  const brains2 = new Map(b2.map((b) => [b.actor.id, b]));
+  sys2.register(pl);
+  for (const b of b2) sys2.register(b.actor);
+  wireCombatToBrains(sys2, brains2);
+  let kd2 = null;
+  sys2.on('knockdown', (e) => (kd2 = e));
+  for (let i = 0; i < 3; i++) {
+    clock += 0.6;
+    punch(sys2, pl);
+  }
+  let away = true;
+  let fled = false;
+  for (let i = 0; i < 90; i++) {
+    clock += FRAME;
+    sys2.update(FRAME);
+    for (const b of b2) {
+      const it = b.update(FRAME, { combat: sys2 });
+      if (b === r2 && b.state === 'flee') {
+        fled = true;
+        const dx = b.actor.pos.x - pl.pos.x;
+        const dz = b.actor.pos.z - pl.pos.z;
+        if (it.moveX * dx + it.moveZ * dz <= 0) away = false;
+      }
+    }
+  }
+  ok(kd2 && kd2.cause === 'punch' && fled && away, `拳擊打倒 → 恐慌傳到 9.5 m 的人、逃跑方向遠離肇事者（fled=${fled} away=${away}）`);
+}
+
+// ---------- 9. 還手者成群上限、玩家 hp 0 後散去 ----------
+{
+  const player = mockActor('player', 0, 0, 0, { kind: 'player' });
+  const group = createBrainGroup();
+  const brave = [];
+  for (let i = 0; brave.length < 6; i++) {
+    const b = new NpcBrain({ actor: mockActor(`ped-${i}`, Math.sin(i) * 1.5, Math.cos(i) * 1.5), group });
+    if (b.fights) brave.push(b);
+  }
+  for (const b of brave) group.brains.set(b.actor.id, b);
+  const ctx = { playerInVehicle: false };
+  for (const b of brave.slice(0, 4)) {
+    b.onAttacked({ attacker: player });
+    b.update(FRAME, ctx);
+  }
+  const states = brave.slice(0, 4).map((b) => b.state);
+  ok(states.join() === 'fight,fight,flee,flee' && fighterCount(group, player) === MAX_FIGHTERS, `已有 ${MAX_FIGHTERS} 名還手者時第 3、4 人改逃跑（${states}、計數 ${fighterCount(group, player)}）`);
+  // 已在還手的人再被打：維持還手、不重複計數
+  brave[0].onAttacked({ attacker: player });
+  brave[0].update(FRAME, ctx);
+  ok(brave[0].state === 'fight' && fighterCount(group, player) === 2, '還手者再被打：仍 fight、計數不變');
+  // 一名還手者放棄（玩家跑遠）→ 名額空出，下一個勇敢者可還手
+  const keep = brave[1].actor.pos;
+  brave[1].actor.pos = { x: 50, y: 0, z: 0 };
+  brave[1].update(FRAME, ctx);
+  brave[1].actor.pos = keep;
+  brave[4].onAttacked({ attacker: player });
+  brave[4].update(FRAME, ctx);
+  ok(brave[1].state === 'wander' && brave[4].state === 'fight' && fighterCount(group, player) === 2, `還手者離開後名額釋出（${brave[1].state} / ${brave[4].state}、計數 ${fighterCount(group, player)}）`);
+  // 還手中的行人被呼叫端回收（移出 brains）→ 計數自動剔除，不會永久佔名額
+  const tmp = new NpcBrain({ actor: mockActor('ped-recycled', 0, 1), group });
+  tmp.braveness = 1;
+  group.brains.set(tmp.actor.id, tmp);
+  group.brains.delete(brave[4].actor.id);
+  const cnt1 = fighterCount(group, player);
+  tmp.onAttacked({ attacker: player });
+  tmp.update(FRAME, ctx);
+  group.brains.set(brave[4].actor.id, brave[4]);
+  ok(cnt1 === 1 && tmp.state === 'fight', `還手者被回收後計數剔除（${cnt1}）、名額給下一人（${tmp.state}）`);
+  tmp._enter('wander');
+  group.brains.delete(tmp.actor.id);
+
+  // 玩家 hp 0 倒地 → 還手者停手、2–4 s 內散去
+  player.hp = 0;
+  const combat = { isDown: (a) => a === player, requestPunch: () => true };
+  const fighters = [brave[0], brave[4]];
+  const doneAt = new Map();
+  let punched = false;
+  for (let t = 0; t < 6; t += FRAME) {
+    for (const b of fighters) {
+      const it = b.update(FRAME, { combat, playerInVehicle: false });
+      if (it.wantPunch || it.moveX !== 0 || it.moveZ !== 0) punched = true;
+      if (b.state !== 'fight' && !doneAt.has(b)) doneAt.set(b, t);
+    }
+  }
+  const times = fighters.map((b) => doneAt.get(b));
+  ok(times.every((t) => t !== undefined && t >= DISPERSE_MIN - FRAME && t <= DISPERSE_MAX + FRAME) && !punched, `玩家 hp 0：還手者不再出拳 / 追擊，${times.map((t) => (t === undefined ? '—' : t.toFixed(2))).join(' / ')} s 後散去（${DISPERSE_MIN}–${DISPERSE_MAX} s）`);
+  ok(fighters.every((b) => b.state === 'wander') && fighterCount(group, player) === 0, '散去後回 wander、還手計數歸零');
+  // 玩家仍倒地（hp 0）時被打的勇敢者不加入還手
+  const late = brave[5];
+  late.onAttacked({ attacker: player });
+  late.update(FRAME, { combat, playerInVehicle: false });
+  ok(late.state === 'flee', `玩家倒地中新被打的勇敢者改逃跑（${late.state}）`);
+  player.hp = 100;
+}
+
+// ---------- 10. knockdown payload（cause / attacker / byPlayer / x z）與 ped:knockdown 轉換 ----------
+{
+  clock = 0;
+  const player = mockActor('player', 0, 0, 0, { kind: 'player' });
+  const driverCar = { pos: { x: 3, z: 3 } };
+  const sys = new CombatSystem({ now, vehicleDriver: (v) => (v === driverCar ? player : null) });
+  const a = mockActor('pa', 0, 0.8);
+  const b = mockActor('pb', 5, 5);
+  const c = mockActor('pc', 9, 9);
+  const d = mockActor('pd', 12, 12);
+  for (const x of [player, a, b, c, d]) sys.register(x);
+  const kds = [];
+  sys.on('knockdown', (e) => kds.push(e));
+  for (let i = 0; i < 3; i++) {
+    clock += 0.6;
+    punch(sys, player);
+  }
+  sys.onVehicleHit({ ped: b, impulse: { x: 0, y: 0, z: 1 }, relSpeed: 7, vehicle: driverCar });
+  sys.onVehicleHit({ ped: c, impulse: { x: 0, y: 0, z: 1 }, relSpeed: 7, vehicle: { pos: { x: 0, z: 0 } } });
+  sys.onVehicleHit({ ped: d, impulse: { x: 0, y: 0, z: 1 }, relSpeed: 7, vehicle: { pos: { x: 0, z: 0 } }, driver: player });
+  const [kp, kv, kn, kdrv] = kds;
+  ok(kds.length === 4 && kp.cause === 'punch' && kp.attacker === player && kp.byPlayer === true && kp.x === a.pos.x && kp.z === a.pos.z, `拳擊 knockdown：cause punch、attacker 玩家、byPlayer、x/z（${kp && kp.cause}）`);
+  ok(kv.cause === 'vehicle' && kv.attacker === player && kv.byPlayer === true && kv.x === 5 && kv.z === 5, '車撞 knockdown：vehicleDriver 解析出玩家駕駛 → byPlayer true');
+  ok(kn.cause === 'vehicle' && kn.attacker === null && kn.byPlayer === false, '車流車撞人（無駕駛 actor）→ attacker null、byPlayer false');
+  ok(kdrv.attacker === player && kdrv.byPlayer === true, 'onVehicleHit 的 driver 參數優先');
+  const pk = pedKnockdownPayload(kv);
+  ok(pk && pk.ped === b && pk.cause === 'vehicle' && pk.byPlayer === true && pk.x === 5 && pk.z === 5 && Object.keys(pk).sort().join() === 'byPlayer,cause,ped,x,z', `pedKnockdownPayload → 契約 ped:knockdown { ${pk && Object.keys(pk).join(', ')} }`);
+  ok(pedKnockdownPayload({ target: player, cause: 'punch' }) === null, '玩家倒地不轉成 ped:knockdown');
+}
+
+// ---------- 11. 任意 dt 與效能：120 名行人每幀 think 成本、暫存重用 ----------
+{
+  // 大 dt（降頻呼叫）：閃避至少輸出一次側跳意圖；逃跑時長仍以秒計
+  const dd = new NpcBrain({ actor: mockActor('dt-dodge', 0, 0) });
+  const it = dd.update(0.5, { vehicles: [{ x: 0.2, z: -2.5, vx: 0, vz: 12 }] });
+  const dodgeOk = dd.state === 'dodge' && it.jump && it.moveX < 0;
+  const scratch = dd.dodgeDir === dd.dodge;
+  dd.update(0.5, {});
+  ok(dodgeOk && dd.state === 'flee' && scratch, `dt 0.5 s：閃避當次仍輸出側跳、下次轉 flee、閃避方向重用暫存（${dd.state}）`);
+  const hs = new NpcBrain({ actor: mockActor('dt-horn', 0.3, 8) });
+  hs.hear({ type: 'horn', x: 0, z: 0, dirX: 0, dirZ: 1 });
+  const ih = hs.update(1, {});
+  ok(hs.state === 'sidestep' && ih.moveX > 0.99 && ih.jump, 'dt 1 s：喇叭側跳當次仍輸出移動意圖');
+  for (const dt of [0.1, 0.25]) {
+    const f = new NpcBrain({ actor: mockActor(`dt-flee-${dt}`, 0, 0) });
+    f.watches = false;
+    f.onWitness({ x: 1, z: 0 });
+    let t = 0;
+    do {
+      f.update(dt, {});
+      t += dt;
+    } while (f.state === 'flee' && t < 30);
+    ok(t >= FLEE_MIN_TIME - 1e-9 && t <= FLEE_MAX_TIME + dt + 1e-9, `dt ${dt} s 呼叫：逃跑 ${t.toFixed(2)} s 後回 wander（${FLEE_MIN_TIME}–${FLEE_MAX_TIME} s + 一個 dt）`);
+  }
+
+  // 效能：120 人（1/4 逃跑中、若干還手 / 圍觀），每幀全部 think + 2 台高速車 + 偶發喇叭 / 事件
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const player = mockActor('player', 0, 0, 0, { kind: 'player' });
+  sys.register(player);
+  const brains = new Map();
+  for (let i = 0; i < 120; i++) {
+    const b = new NpcBrain({ actor: mockActor(`perf-${i}`, ((i % 12) - 6) * 3, (Math.floor(i / 12) - 5) * 3), heavy: i % 3 === 2 });
+    brains.set(b.actor.id, b);
+    sys.register(b.actor);
+  }
+  wireCombatToBrains(sys, brains);
+  const list = [...brains.values()];
+  list.forEach((b, i) => {
+    if (i % 4 === 0) b.onAttacked({ attacker: player });
+  });
+  const vehicles = [
+    { x: -20, z: 0, vx: 12, vz: 0 },
+    { x: 0, z: -20, vx: 0, vz: 10 },
+  ];
+  const ctx = { combat: sys, playerInVehicle: false, vehicles };
+  const intents = list.map((b) => b.intent);
+  const FR = 1200;
+  let ms = 0;
+  let maxMs = 0;
+  for (let f = 0; f < FR; f++) {
+    clock += FRAME;
+    for (const v of vehicles) {
+      v.x += v.vx * FRAME;
+      v.z += v.vz * FRAME;
+      if (v.x > 20) v.x = -20;
+      if (v.z > 20) v.z = -20;
+    }
+    if (f % 120 === 0) for (const b of list) b.hear({ type: 'horn', x: vehicles[0].x, z: vehicles[0].z, dirX: 1, dirZ: 0 });
+    if (f === 300) sys.onVehicleHit({ ped: list[60].actor, impulse: { x: 0, y: 0, z: 1 }, relSpeed: 7, vehicle: { pos: { x: 0, z: 0 } } });
+    const t0 = performance.now();
+    for (const b of list) {
+      const i = b.update(FRAME, ctx);
+      const p = b.actor.pos;
+      p.x += i.moveX * (i.run ? 4 : 1.4) * FRAME;
+      p.z += i.moveZ * (i.run ? 4 : 1.4) * FRAME;
+    }
+    const dtMs = performance.now() - t0;
+    if (f >= 60) {
+      ms += dtMs;
+      maxMs = Math.max(maxMs, dtMs);
+    }
+    sys.update(FRAME);
+  }
+  const avg = ms / (FR - 60);
+  const modes = {};
+  for (const b of list) modes[b.state] = (modes[b.state] || 0) + 1;
+  console.log(`INFO  效能（node）：120 名行人每幀全部 think，平均 ${avg.toFixed(4)} ms、最大 ${maxMs.toFixed(3)} ms；結束時狀態 ${JSON.stringify(modes)}`);
+  ok(avg < 0.5, `120 名行人 think 每幀平均 ${avg.toFixed(4)} ms（< 0.5 ms）`);
+  ok(list.every((b, i) => b.intent === intents[i]), '意圖物件每幀重用（不重新配置）');
+}
+
+console.log(`combat.mjs：通過 ${pass} / ${total}`);
+for (const m of fails) console.log(`  ✗ ${m}`);
+console.log(fails.length ? `FAIL ${fails.length}/${total}` : `PASS ${pass}/${total}`);
+if (fails.length) process.exit(1);

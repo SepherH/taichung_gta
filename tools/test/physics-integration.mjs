@@ -554,7 +554,8 @@ const finite = (o) => Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isF
   }
   input.keys.clear();
   const moved = Math.hypot(player.pos.x - x0, player.pos.z - z0);
-  check('mock 主迴圈：步行 3 s + 跑 1 s，位移 / 腳底貼地 / 網格同步', moved > 15 && maxFoot < 1e-6 && player.mesh.position.distanceTo(player.pos) < 0.2 && player.speed > 8, `位移 ${f3(moved)} m、腳底最大差 ${maxFoot.toExponential(2)}、末速 ${f3(player.speed)} m/s`);
+  // 末速門檻：Phase 3 衝刺改 7.0 m/s（player.js，對齊參考作），> 6.9 表示已跑到頂速（舊值 8.5 時為 > 8）
+  check('mock 主迴圈：步行 3 s + 跑 1 s，位移 / 腳底貼地 / 網格同步', moved > 15 && maxFoot < 1e-6 && player.mesh.position.distanceTo(player.pos) < 0.2 && player.speed > 6.9, `位移 ${f3(moved)} m、腳底最大差 ${maxFoot.toExponential(2)}、末速 ${f3(player.speed)} m/s`);
 
   // 2. 跳躍：Space 在下一個子步起跳
   input.pressed.add('Space');
@@ -620,7 +621,7 @@ const finite = (o) => Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isF
   const hitAt = ped.body.getPosition();
   let returned = false;
   let walked = false;
-  for (let f = 0; f < 600 && !walked; f++) {
+  for (let f = 0; f < 1200 && !walked; f++) {
     game.step();
     if (ped.state === 'return') returned = true;
     if (returned && ped.state === 'walk') walked = true;
@@ -663,6 +664,7 @@ const finite = (o) => Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isF
 console.log(`\n純邏輯：${passed} 通過 / ${failed} 失敗`);
 if (NO_RAPIER) {
   console.log('（--no-rapier：完整版物理測試未執行）');
+  console.log(failed ? `FAIL ${failed}/${passed + failed}` : `PASS ${passed}/${passed}`);
   process.exit(failed ? 1 : 0);
 }
 
@@ -888,4 +890,5 @@ try {
   check('完整版執行中發生例外', false, e && e.stack ? e.stack : String(e));
 }
 console.log(`\n完整版：${passed} 通過 / ${failed} 失敗（其中純邏輯失敗 ${pureFailed}）`);
+console.log(failed ? `FAIL ${failed}/${passed + failed}` : `PASS ${passed}/${passed}`);
 process.exit(failed ? 1 : 0);

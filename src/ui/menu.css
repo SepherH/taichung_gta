@@ -1,0 +1,698 @@
+/* 選單樣式（由 src/ui/menu.js import）：開始畫面、暫停選單、設定 / 操作說明 / 統計 / 大地圖、確認對話框
+   全部以 tg- 前綴；z-index 70–79（HUD 最高 60）；介面大小讀 --tg-ui-scale（整合層依 settings.uiScale 設在 :root）
+   橫向 = 左欄 + 右內容；直向（高 ≥ 寬）= 上方可水平捲動的分頁列 + 下方內容；安全區以 env(safe-area-inset-*) 內縮 */
+
+.tg-menu {
+  --tg-s: var(--tg-ui-scale, 1);
+  --tg-accent: #ffd23f;
+  --tg-orange: #f28c1a;
+  --tg-panel: rgba(12, 16, 32, 0.78);
+  --tg-line: rgba(255, 255, 255, 0.14);
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(14px, 1.2vw + 0.6vh, 18px) * var(--tg-s));
+  line-height: 1.45;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overscroll-behavior: contain;
+}
+
+.tg-menu[hidden],
+.tg-menu [hidden] {
+  display: none !important;
+}
+
+/* 開始畫面：半透明，背景是整合層持續渲染的場景環繞 */
+.tg-menu[data-mode='start'] {
+  background: linear-gradient(90deg, rgba(7, 10, 24, 0.82) 0%, rgba(7, 10, 24, 0.45) 55%, rgba(7, 10, 24, 0.15) 100%);
+}
+
+.tg-menu[data-mode='pause'] {
+  background: rgba(6, 9, 20, 0.72);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+.tg-menu-frame {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: calc(14px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom))
+    calc(16px + env(safe-area-inset-left));
+}
+
+/* ---------- 標頭 ---------- */
+.tg-menu-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.tg-menu-title {
+  margin: 0;
+  font-size: calc(clamp(40px, 7vmin, 84px) * var(--tg-s));
+  font-weight: 900;
+  font-style: italic;
+  line-height: 1;
+  letter-spacing: 2px;
+  color: #fff;
+  text-shadow: 4px 4px 0 var(--tg-orange);
+}
+
+.tg-menu-sub {
+  margin-top: 6px;
+  font-size: calc(clamp(16px, 2.4vmin, 24px) * var(--tg-s));
+  font-weight: bold;
+  color: var(--tg-accent);
+  letter-spacing: 4px;
+}
+
+.tg-menu-pausetitle {
+  font-size: calc(clamp(22px, 3.4vmin, 34px) * var(--tg-s));
+  font-weight: 900;
+  letter-spacing: 4px;
+}
+
+.tg-menu[data-mode='start'] .tg-menu-pausetitle,
+.tg-menu[data-mode='pause'] .tg-menu-title,
+.tg-menu[data-mode='pause'] .tg-menu-sub,
+.tg-menu[data-mode='start'] .tg-menu-money {
+  display: none;
+}
+
+.tg-menu-money {
+  padding: 4px 14px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #7dff9a;
+  font-size: calc(clamp(18px, 2.6vmin, 26px) * var(--tg-s));
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 主體：左欄 + 右內容 ---------- */
+.tg-menu-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.tg-menu-nav {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: calc(clamp(180px, 22vw, 260px) * var(--tg-s));
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tg-menu-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: var(--tg-panel);
+  border: 1px solid var(--tg-line);
+}
+
+/* 開始畫面：主清單時只有左欄（垂直置中），子頁時只有內容 */
+.tg-menu[data-mode='start'] .tg-menu-body {
+  align-items: center;
+}
+
+.tg-menu[data-mode='start'][data-sub='0'] .tg-menu-content,
+.tg-menu[data-mode='start'][data-sub='1'] .tg-menu-nav {
+  display: none;
+}
+
+.tg-menu[data-mode='start'][data-sub='1'] .tg-menu-body {
+  align-items: stretch;
+}
+
+.tg-menu[data-mode='start'][data-sub='1'] .tg-menu-content {
+  max-width: 880px;
+}
+
+.tg-menu[data-mode='start'] .tg-menu-nav {
+  width: calc(clamp(220px, 28vw, 340px) * var(--tg-s));
+}
+
+.tg-page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--tg-line);
+}
+
+.tg-menu[data-mode='pause'][data-sub='0'] .tg-page-head {
+  display: none;
+}
+
+.tg-page-title {
+  margin: 0;
+  font-size: 1.2em;
+}
+
+.tg-page-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 12px 14px;
+}
+
+/* 地圖頁佔滿內容區、不捲動 */
+.tg-menu[data-sub='1'] .tg-page-scroll:has(.tg-page-map:not([hidden])) {
+  overflow: hidden;
+  padding: 0;
+  touch-action: none;
+}
+
+/* ---------- 按鈕 ---------- */
+.tg-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font: inherit;
+  font-weight: bold;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.tg-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.tg-btn:focus {
+  outline: none;
+}
+
+.tg-btn:focus-visible,
+.tg-btn.tg-focus {
+  outline: 3px solid var(--tg-accent);
+  outline-offset: 1px;
+}
+
+.tg-nav-item {
+  flex: 0 0 auto;
+  text-align: left;
+  font-size: 1.1em;
+  padding: 10px 18px;
+}
+
+.tg-nav-item.tg-on {
+  background: var(--tg-accent);
+  border-color: var(--tg-accent);
+  color: #111;
+}
+
+.tg-menu[data-mode='start'] .tg-nav-item {
+  font-size: 1.25em;
+  padding: 12px 22px;
+}
+
+.tg-menu[data-mode='start'] .tg-nav-continue,
+.tg-menu[data-mode='start'] .tg-nav-newGame:first-child,
+.tg-nav-resume {
+  background: var(--tg-accent);
+  border-color: var(--tg-accent);
+  color: #111;
+}
+
+.tg-nav-quit {
+  margin-top: auto;
+  color: #ffb3b3;
+}
+
+.tg-page-back {
+  padding: 6px 12px;
+}
+
+/* ---------- 頁尾：小提示 + 授權文字（#attribution 被選單蓋住，這裡另外顯示一份）---------- */
+.tg-menu-foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-top: 8px;
+  font-size: 0.8em;
+}
+
+.tg-menu-hint {
+  opacity: 0.85;
+}
+
+.tg-menu-attr {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.75;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tg-menu-attr a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* ---------- 設定 ---------- */
+.tg-set-row {
+  display: grid;
+  grid-template-columns: minmax(7em, 11em) 1fr;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--tg-line);
+  border-radius: 6px;
+}
+
+.tg-set-row.tg-focus {
+  background: rgba(255, 210, 63, 0.14);
+  box-shadow: inset 3px 0 0 var(--tg-accent);
+}
+
+.tg-set-label {
+  font-weight: bold;
+}
+
+.tg-set-note {
+  grid-column: 1 / -1;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.tg-set-reset {
+  grid-template-columns: 1fr;
+  justify-items: end;
+  border-bottom: none;
+  padding-top: 14px;
+}
+
+.tg-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tg-seg-btn {
+  padding: 6px 12px;
+}
+
+.tg-seg-btn.tg-on,
+.tg-toggle.tg-on,
+.tg-tab.tg-on {
+  background: var(--tg-accent);
+  border-color: var(--tg-accent);
+  color: #111;
+}
+
+.tg-toggle {
+  justify-self: start;
+  min-width: 72px;
+}
+
+.tg-range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tg-range-val {
+  min-width: 3.6em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滑桿：觸控可拖，thumb ≥ 28px */
+.tg-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: pan-y;
+  cursor: pointer;
+}
+
+.tg-range:focus {
+  outline: none;
+}
+
+.tg-range::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.tg-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 30px;
+  height: 30px;
+  margin-top: -11px;
+  border: 3px solid #111;
+  border-radius: 50%;
+  background: var(--tg-accent);
+}
+
+.tg-range::-moz-range-track {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.tg-range::-moz-range-thumb {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #111;
+  border-radius: 50%;
+  background: var(--tg-accent);
+}
+
+.tg-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(255, 210, 63, 0.45);
+}
+
+/* ---------- 操作說明 ---------- */
+.tg-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tg-help-group {
+  margin-bottom: 14px;
+}
+
+.tg-help-title {
+  margin: 4px 0 6px;
+  font-size: 1em;
+  color: var(--tg-accent);
+}
+
+.tg-help-row {
+  display: grid;
+  grid-template-columns: minmax(8em, 14em) 1fr;
+  gap: 4px 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--tg-line);
+}
+
+.tg-kbd {
+  font-family: inherit;
+  font-weight: bold;
+  color: #ffe9a6;
+}
+
+/* ---------- 統計 ---------- */
+.tg-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13em, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.tg-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tg-stat-k {
+  opacity: 0.8;
+}
+
+.tg-stat-v {
+  margin: 0;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+}
+
+.tg-empty,
+.tg-home-text {
+  opacity: 0.8;
+}
+
+/* ---------- 大地圖 ---------- */
+.tg-page-map {
+  position: relative;
+  height: 100%;
+  min-height: 240px;
+}
+
+.tg-map {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 0 0 10px 10px;
+}
+
+.tg-map-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.tg-map-canvas.tg-dragging {
+  cursor: grabbing;
+}
+
+.tg-map-tools {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.tg-map-btn {
+  font-size: 1.2em;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.tg-map-me {
+  font-size: 0.95em;
+}
+
+/* ---------- 確認對話框 ---------- */
+.tg-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
+    calc(16px + env(safe-area-inset-left));
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.tg-confirm-box {
+  width: min(460px, 100%);
+  padding: 20px;
+  border-radius: 12px;
+  background: #151b33;
+  border: 1px solid var(--tg-line);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.tg-confirm-text {
+  margin: 0 0 18px;
+  font-size: 1.1em;
+}
+
+.tg-confirm-btns {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.tg-confirm-yes {
+  background: #c0262d;
+  border-color: #c0262d;
+}
+
+/* ---------- 直向：上方可水平捲動的分頁列 + 下方內容 ---------- */
+@media (orientation: portrait) {
+  .tg-menu[data-mode='pause'] .tg-menu-body {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .tg-menu[data-mode='pause'] .tg-menu-nav {
+    flex-direction: row;
+    width: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .tg-menu[data-mode='pause'] .tg-menu-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tg-menu[data-mode='pause'] .tg-nav-item {
+    white-space: nowrap;
+    padding: 8px 12px;
+  }
+
+  /* 捲動提示：分頁列右緣黏著的漸層 + ›，告訴玩家右側還有「全螢幕 / 回主選單」 */
+  .tg-menu[data-mode='pause'] .tg-menu-nav::after {
+    content: '›';
+    position: sticky;
+    right: 0;
+    flex: 0 0 28px;
+    margin-left: -28px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 2px;
+    font-size: 1.6em;
+    font-weight: 900;
+    color: var(--tg-accent);
+    background: linear-gradient(90deg, rgba(6, 9, 20, 0), rgba(6, 9, 20, 0.92) 70%);
+    pointer-events: none;
+  }
+
+  .tg-nav-quit {
+    margin-top: 0;
+  }
+
+  .tg-menu[data-mode='start'] .tg-menu-body {
+    justify-content: center;
+  }
+
+  .tg-menu[data-mode='start'] .tg-menu-nav {
+    width: min(100%, calc(340px * var(--tg-s)));
+  }
+
+  .tg-set-row,
+  .tg-help-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 矮螢幕（手機橫向，如 844×390、640×360）：縮小標頭 / 間距 / 行高，左欄仍可垂直捲動（「回主選單」捲到底一定點得到） */
+@media (max-height: 460px) {
+  .tg-menu-frame {
+    padding-top: calc(8px + env(safe-area-inset-top));
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
+  }
+
+  .tg-menu-pausetitle {
+    font-size: calc(18px * var(--tg-s));
+    line-height: 1.2;
+  }
+
+  .tg-menu-money {
+    padding: 2px 10px;
+    font-size: calc(16px * var(--tg-s));
+  }
+
+  .tg-menu-body {
+    margin-top: 6px;
+  }
+
+  .tg-menu-nav {
+    gap: 4px;
+  }
+
+  .tg-menu[data-mode='pause'] .tg-nav-item {
+    padding: 4px 14px;
+    font-size: 1em;
+  }
+
+  .tg-menu-foot {
+    margin-top: 4px;
+  }
+
+  .tg-menu[data-mode='start'] .tg-nav-item {
+    padding: 8px 18px;
+  }
+}
+
+/* 矮螢幕橫向的左欄捲動提示：底緣黏著的漸層 + ⌄（左欄放不下 7 項時才有意義，故只在 ≤ 430px 高度啟用）；
+   支援捲動時間軸的瀏覽器：沒有溢出時不顯示、捲到底時淡出 */
+@media (max-height: 430px) and (orientation: landscape) {
+  .tg-menu[data-mode='pause'] .tg-menu-nav::after {
+    content: '⌄';
+    position: sticky;
+    bottom: 0;
+    flex: 0 0 26px;
+    margin-top: -26px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    font-size: 1.3em;
+    font-weight: 900;
+    line-height: 1;
+    color: var(--tg-accent);
+    background: linear-gradient(180deg, rgba(6, 9, 20, 0), rgba(6, 9, 20, 0.92) 75%);
+    pointer-events: none;
+  }
+}
+
+@supports (animation-timeline: scroll()) {
+  .tg-menu[data-mode='pause'] .tg-menu-nav::after {
+    opacity: 0;
+    animation: tg-scroll-hint linear both;
+    animation-timeline: scroll(nearest block);
+  }
+
+  @media (orientation: portrait) {
+    .tg-menu[data-mode='pause'] .tg-menu-nav::after {
+      animation-timeline: scroll(nearest inline);
+    }
+  }
+}
+
+@keyframes tg-scroll-hint {
+  0%,
+  85% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}

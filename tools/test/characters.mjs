@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { loadCharacterModels, createCharacter, disposeCharacter, CharacterAnimator, RATE_MAX, playerVariant, variantHeight, repaintCharacter } from '../../src/characters/index.js';
 import { WALK_RATE_MAX, RUN_ABOVE, IDLE_POSE, IDLE_POSE_AFTER } from '../../src/characters/animator.js';
+import { CombatSystem, GETUP_MIN_DOWN } from '../../src/combat.js';
 
 // player.js → citymodel.js 會 import osm-city.json：以 loader hook 讓 node 讀 JSON（player / camera 於主角段落才動態 import）
 const JSON_HOOK = `
@@ -238,6 +239,51 @@ function run(anim, sec, ctx) {
   check('getup 後再回 idle', anim.state === 'idle', anim.state);
 }
 
+// ---- 倒地一律播動畫（Phase 3 C2）：真 animator + CombatSystem，拳擊 / 車撞皆 knockdown → getup，不走全身布娃娃 ----
+{
+  let clock = 0;
+  const combat = new CombatSystem({ now: () => clock });
+  const body = () => ({ impulses: 0, standUps: 0, knockdown() { this.impulses++; }, settleCheck: () => ({ settled: true, clearToStand: true }), standUp() { this.standUps++; } });
+  const player = { id: 'kd-player', kind: 'player', pos: { x: 0, y: 0, z: 0 }, yaw: 0, hp: 100, maxHp: 100, faction: 'player', anim: { state: 'idle', trigger: () => true, on: () => () => {} }, body: body() };
+  combat.register(player);
+  const kds = [];
+  combat.on('knockdown', (e) => kds.push(e));
+  const results = [];
+  for (const variant of ['pedestrian', 'pedestrian_f', 'pedestrian_heavy']) {
+    for (const cause of ['punch', 'vehicle']) {
+      const ch = createCharacter({ variant });
+      const anim = new CharacterAnimator(ch, manifest.clips);
+      const actor = { id: `kd-${variant}-${cause}`, kind: 'pedestrian', pos: { x: 0, y: 0, z: 0.8 }, yaw: Math.PI, hp: 100, maxHp: 100, faction: 'civilian', anim, body: body() };
+      combat.register(actor);
+      run(anim, 0.3, { speed: 1.4 }); // 走路中被打倒
+      if (cause === 'vehicle') combat.onVehicleHit({ ped: actor, impulse: { x: 0, y: 50, z: 300 }, relSpeed: 7, vehicle: { pos: { x: 0, z: -2 } } });
+      else {
+        actor.hp = 20; // 一拳歸零 → knockdown（行人 dying；此處只驗動畫，倒地後即 revive）
+        combat._applyPunch(combat.entries.get(player.id), combat.entries.get(actor.id), clock);
+      }
+      const kdAnim = anim.state === 'knockdown';
+      if (actor.hp <= 0) combat.revive(actor);
+      let upAt = null;
+      let sawGetup = false;
+      for (let i = 0; i < 60 * 6 && combat.stateOf(actor) !== 'normal'; i++) {
+        clock += DT;
+        anim.update(DT, { speed: 0 });
+        combat.update(DT);
+        if (anim.state === 'getup') sawGetup = true;
+        if (upAt === null && combat.stateOf(actor) === 'getup') upAt = clock;
+      }
+      run(anim, 0.3, { speed: 0 });
+      results.push({ variant, cause, ok: kdAnim && sawGetup && actor.body.impulses === 1 && actor.body.standUps === 1 && combat.stateOf(actor) === 'normal' && anim.state === 'idle' });
+      combat.unregister(actor);
+      disposeCharacter(ch);
+    }
+  }
+  const bad = results.filter((r) => !r.ok).map((r) => `${r.variant}/${r.cause}`);
+  check('三種體型 × 拳擊 / 車撞：knockdown 動畫 → getup 動畫 → 回 idle（剛體只受一次衝量、standUp 一次）', bad.length === 0, bad.join(',') || `${results.length} 組`);
+  const causes = kds.map((e) => e.cause).join();
+  check(`knockdown 事件 cause 依序為 punch / vehicle、拳擊帶 attacker（GETUP_MIN_DOWN ${GETUP_MIN_DOWN}s）`, causes === 'punch,vehicle,punch,vehicle,punch,vehicle' && kds.filter((e) => e.cause === 'punch').every((e) => e.attacker === player && e.byPlayer), causes);
+}
+
 // ---- 缺 clip 退回 ----
 {
   const ch = createCharacter({ variant: 'pedestrian_f' });
@@ -387,9 +433,10 @@ function run(anim, sec, ctx) {
   check('vehicle manifest 不存在 → 空表', !threw && table instanceof Map && table.size === 0, `size ${table && table.size}`);
   check('createVehicleModel 回 null 且不丟例外', !threw && model === null);
   const real = await loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch });
-  const vm = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/vehicles/manifest.json'), 'utf8'));
-  // 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此項 SKIP 不計入（宿主有 glb 時照常檢查）
-  if (vm.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)))) {
+  const vmFile = path.join(PUBLIC, 'models/vehicles/manifest.json');
+  const vm = fs.existsSync(vmFile) ? JSON.parse(fs.readFileSync(vmFile, 'utf8')) : { vehicles: [] };
+  // 工作區（外包環境）沒有車輛 glb（甚至沒有 vehicles/manifest.json）：此項 SKIP 不計入（宿主有 glb 時照常檢查）
+  if (vm.vehicles.length && vm.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)))) {
     check('真實 vehicle manifest → 全部車型載入', real.size === vm.vehicles.length, `${[...real.keys()].join(',')}`);
   } else {
     console.log('SKIP  真實 vehicle manifest → 全部車型載入（工作區缺 public/models/vehicles/*.glb）');

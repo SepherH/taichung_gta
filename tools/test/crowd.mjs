@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// F3b 行人密度管理無頭驗證：真實角色 glb + Traffic（mock RAPIER，同 combat-integration.mjs 的最小版；密度管理不依賴真物理）
-// 用法：node tools/test/crowd.mjs（任一斷言失敗 exit 1）
-// 項目：玩家沿出生點道路方向移動 300 m（5 m/s）+ 原地 20 s，每秒記錄半徑 80 m 內人數（high 40–60、low 25–35）；
-//   生成點不在建築 / 湖 / 車道內、補生成在 60–100 m 且視野外；物件池新建骨架數 ≤ 上限；120 m 外沒有行人剛體；
-//   全部生成點（places.js pedestrianRoutes）的位置檢查與各類型數量；效能：50 行人 + 10 車每幀 CPU（mixer / AI / combat / 生成管理）
+// 行人密度 + 分層模擬無頭驗證（四檔畫質預算）：真實角色 glb + Traffic（mock RAPIER，同 combat-integration.mjs 的最小版；密度管理不依賴真物理）
+// 用法：node tools/test/crowd.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
+// 項目：四檔（low / mid / high / ultra，core/quality.js 的 qualityBudget）玩家沿出生點道路移動 300 m（5 m/s）+ 原地 20 s，每秒記錄半徑 80 m 內人數
+//   （骨架 + 替身；區間推導見 expectedNear80）；high ≥ 50、low ≥ 25（主控裁決）；生成點不在建築 / 湖 / 車道內、補生成在 spawnMin–radius 且視野外；
+//   新建骨架數 ≤ poolMax；pedNear 內一律骨架；替身只在 pedFar 外；啟用中的行人剛體只在 physicsRadius（+ 遲滯）內；
+//   降頻（near 每幀、mid 視野內 mixer / AI 每 3 幀、mid 視野外 mixer 凍結、替身無大腦）；
+//   效能：四檔每幀 CPU（車流 + 行人 AI + mixer + 生成管理 + 分層，不含渲染與 mock 物理本體）high < 4 ms、low < 3 ms
 import { register } from 'node:module';
 
 const JSON_HOOK = `
@@ -34,7 +36,9 @@ const { getTerrain, buildingAt, inWater, onRoadSurface, surfaceRoads } = await i
 const { closestOnSegment } = await import('../../src/geom.js');
 const { computeSpawn, pedestrianRoutes, PED_SPOT_WEIGHTS } = await import('../../src/places.js');
 const { Traffic } = await import('../../src/traffic.js');
-const { PED_TARGET, SPAWN_ROAD_NAME } = await import('../../src/data/city.js');
+const { SPAWN_ROAD_NAME } = await import('../../src/data/city.js');
+const { crowdPlan } = await import('../../src/crowd.js');
+const { QUALITY_IDS, qualityBudget } = await import('../../src/core/quality.js');
 const { loadCharacterModels, CharacterAnimator } = await import('../../src/characters/index.js');
 const { CombatSystem } = await import('../../src/combat.js');
 const { NpcBrain } = await import('../../src/npc-ai.js');
@@ -316,8 +320,26 @@ const badSpot = (x, z) => (buildingAt(x, z, 0) ? '建築' : inWater(x, z, 0) ? '
   check('秋紅谷生成點多數在谷底（湖邊步道 / 坡道，terrain y < −3 m）', low > qhg.length / 2, `${low} / ${qhg.length}`);
 }
 
-// ======================= 2. 密度：移動 300 m + 原地 20 s =======================
-function buildTraffic(crowd) {
+
+// ======================= 2. 四檔密度：移動 300 m + 原地 20 s =======================
+// 畫質預算直接取 core/quality.js 的 qualityBudget（主控裁決後的最終畫質表：peds 40 / 80 / 140 / 200、cars 18 / 30 / 45 / 60；pedNear / pedFar 同契約 §3）
+const TIERS = Object.fromEntries(QUALITY_IDS.map((id) => [id, qualityBudget(id)]));
+check('畫質表人數 = 主控裁決 40 / 80 / 140 / 200', QUALITY_IDS.map((id) => TIERS[id].peds).join('/') === '40/80/140/200', QUALITY_IDS.map((id) => TIERS[id].peds).join('/'));
+// 主控裁決的 80 m 內人數下限
+const NEAR80_MIN = { low: 25, high: 50 };
+
+// 80 m 內人數的合理區間推導：crowdPlan 在 radius（= pedFar + 20）內維持 target 人，均勻分布時 80 m 內期望 target × (80 / radius)²；
+// traffic.js 另在 80 m 內維持 I = ceil(target × (80 / radius)² × 1.15) 人（CROWD_INNER_BOOST，缺人時在 physicsRadius（上限 60）–80 m 視野外補）
+// → I：low 37 / mid 49 / high 61 / ultra 66。補生成每 0.1 s 最多 4 人、只補視野外，移動中會短暫低於 I；原地時過多者要等走到視野外才回收
+// → 區間取 [0.8 I, 1.3 I]，下限再與主控裁決（high ≥ 50、low ≥ 25）取大
+function expectedNear80(budget) {
+  const plan = crowdPlan(budget);
+  const E = Math.min(plan.target, Math.ceil(plan.target * (80 / plan.radius) ** 2 * 1.15));
+  const lo = Math.max(Math.floor(0.8 * E), NEAR80_MIN[budget.id] || 0);
+  return { E, lo, hi: Math.ceil(1.3 * E), plan };
+}
+
+function buildTraffic(budget) {
   const RAPIER = makeMockRapier();
   const pw = new PhysicsWorld(RAPIER);
   const router = createContactRouter(RAPIER, pw);
@@ -327,7 +349,7 @@ function buildTraffic(crowd) {
   const game = { clock: 0 };
   const combat = new CombatSystem({ now: () => game.clock });
   const scene = new THREE.Scene();
-  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat, crowd });
+  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat, budget });
   return Object.assign(game, { pw, combat, traffic, physics, scene });
 }
 
@@ -351,22 +373,33 @@ const PATH_MAIN = spawnRoadDir();
 const PATH_SPARSE = { x: -PATH_MAIN.x, z: -PATH_MAIN.z };
 const CAM_BACK = 7; // 鏡頭在玩家後方（m），同 camera.js 預設距離
 const HALF_FOV = Math.atan(Math.tan((60 * Math.PI) / 360) * (16 / 9)); // 60° 垂直視角、16:9
+const posOf = (c) => c.ped || c;
+const distOf = (c, pl) => Math.hypot(posOf(c).x - pl.x, posOf(c).z - pl.z);
 
-function runCrowd(crowd, [lo, hi], head = PATH_MAIN, assert = true) {
-  const game = buildTraffic(crowd);
+function runCrowd(tier, head = PATH_MAIN, assert = true) {
+  const budget = TIERS[tier];
+  const { E, lo, hi, plan } = expectedNear80(budget);
+  const game = buildTraffic(budget);
   const { traffic, pw, combat } = game;
-  const target = PED_TARGET[crowd];
+  const player = { x: spawn.x, y: spawn.y, z: spawn.z };
   const spawns = [];
   const orig = traffic._spawnPed.bind(traffic);
   traffic._spawnPed = (spot) => {
-    const p = orig(spot);
-    if (p) spawns.push({ x: p.x, z: p.z, kind: spot.route.kind, d: Math.hypot(p.x - player.x, p.z - player.z), hidden: traffic._hidden(p.x, p.z) });
-    return p;
+    const c = orig(spot);
+    if (c) spawns.push({ x: c.x, z: c.z, kind: spot.route.kind, d: Math.hypot(c.x - player.x, c.z - player.z), hidden: traffic._hidden(c.x, c.z) });
+    return c;
   };
-  const initial = traffic.peds.length;
-  const player = { x: spawn.x, y: spawn.y, z: spawn.z };
+  const initial = traffic.citizens.length;
   const counts = [];
-  let farBodies = 0;
+  let nearNotSkel = 0;
+  let impInside = 0;
+  let impPoolFull = 0; // 骨架池已滿（poolMax）時 far 內改用替身：crowd.js 設計如此，只記錄
+  let activeFar = 0;
+  let bodyFar = 0;
+  let bothOrNone = 0;
+  let maxSkel = 0;
+  let maxTotal = 0; // 市民總數（骨架 + 替身）每幀最大值
+  let maxShown = 0; // 顯示中的骨架 + 替身（交叉核對：替身也算人數）
   const SPEED = 5;
   const moveFrames = Math.round(300 / SPEED / DT);
   const stillFrames = Math.round(20 / DT);
@@ -382,66 +415,73 @@ function runCrowd(crowd, [lo, hi], head = PATH_MAIN, assert = true) {
     game.clock += DT;
     combat.update(DT);
     traffic.sync(DT, player);
+    maxSkel = Math.max(maxSkel, traffic.peds.length);
+    maxTotal = Math.max(maxTotal, traffic.citizens.length);
+    maxShown = Math.max(maxShown, traffic.peds.length + traffic.impostors.count);
     if (f % 60 === 0) {
-      counts.push(traffic.peds.filter((p) => Math.hypot(p.x - player.x, p.z - player.z) <= 80).length);
-      farBodies += traffic.peds.filter((p) => p.body && Math.hypot(p.x - player.x, p.z - player.z) > 121).length;
+      counts.push(traffic.citizens.filter((c) => distOf(c, player) <= 80).length);
+      for (const c of traffic.citizens) {
+        const d = distOf(c, player);
+        if (d < plan.near && c.rep !== 'skeleton') nearNotSkel++;
+        if (c.rep === 'impostor' && d < plan.far - 0.5) (traffic.peds.length < plan.poolMax ? impInside++ : impPoolFull++);
+        const skel = c.rep === 'skeleton' && c.ped.mesh.visible;
+        const imp = traffic.impostors.isShown(c.slot);
+        if (skel === imp) bothOrNone++;
+      }
+      for (const p of traffic.peds) {
+        const d = Math.hypot(p.x - player.x, p.z - player.z);
+        if (p.body.active && d > plan.physicsRadius + 15 + 2) activeFar++;
+        if (d > plan.far + plan.hysteresis + 2) bodyFar++;
+      }
     }
   }
-  const moved = counts.slice(0, Math.round(moveFrames * DT));
   const min = Math.min(...counts);
   const max = Math.max(...counts);
   const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
-  const spotsNear = (x, z) => traffic.spotGrid.query(x - 80, z - 80, x + 80, z + 80, []).filter((sp) => Math.hypot(sp.x - x, sp.z - z) <= 80).length;
-  console.log(`INFO  [${crowd}] 路徑 (${f2(head.x)}, ${f2(head.z)})：每秒 80 m 內人數：${counts.join(' ')}`);
+  console.log(`INFO  [${tier}] 路徑 (${f2(head.x)}, ${f2(head.z)})：每秒 80 m 內人數：${counts.join(' ')}`);
   if (!assert) {
-    console.log(`INFO  [${crowd}] 稀疏路徑（不斷言）：min ${min} / max ${max} / 平均 ${f2(avg)}；路徑中段 80 m 內生成點 ${spotsNear(spawn.x + head.x * 150, spawn.z + head.z * 150)} 個`);
+    console.log(`INFO  [${tier}] 稀疏路徑（不斷言）：min ${min} / max ${max} / 平均 ${f2(avg)}`);
     return game;
   }
-  check(`[${crowd}] 開場補滿目標 ${target} 人`, initial === target, `${initial}`);
-  check(`[${crowd}] 移動 300 m + 原地 20 s，每秒 80 m 內人數 ${lo}–${hi}`, min >= lo && max <= hi, `min ${min} / max ${max} / 平均 ${f2(avg)}（移動段 ${moved.length} 秒）`);
-  const later = spawns.slice(0);
-  const badPos = later.filter((s) => badSpot(s.x, s.z));
-  check(`[${crowd}] 補生成 ${later.length} 人：位置皆不在建築 / 湖 / 車道內`, later.length > 0 && badPos.length === 0, badPos.length ? JSON.stringify(badPos[0]) : '');
-  const ring = later.filter((s) => s.d >= 60 - 0.5 && s.d <= 100 + 0.5 && s.hidden); // 規格環帶 60–100 m（實作取 60–80 m）
-  const dmin = Math.min(...later.map((s) => s.d));
-  const dmax = Math.max(...later.map((s) => s.d));
-  check(`[${crowd}] 補生成皆在 60–100 m 且視野外（視錐外或被建築遮擋）`, ring.length === later.length, `距離 ${f2(dmin)}–${f2(dmax)} m、視野外 ${later.filter((s) => s.hidden).length} / ${later.length}`);
+  check(`[${tier}] 開場補滿目標 ${plan.target} 人（radius ${plan.radius} m）`, initial === plan.target, `${initial}`);
+  // 實測修正：low 檔市民總數曾到 46 > budget.peds 40——總數（骨架 + 替身）每幀都 ≤ peds × 1.05
+  const totalCap = Math.floor(budget.peds * 1.05 + 1e-9);
+  check(`[${tier}] 市民總數（骨架 + 替身）每幀 ≤ peds × 1.05 = ${totalCap}`, maxTotal <= totalCap && maxShown <= totalCap, `總數最多 ${maxTotal}、顯示中骨架 + 替身最多 ${maxShown}`);
+  check(`[${tier}] 移動 300 m + 原地 20 s，每秒 80 m 內人數 ${lo}–${hi}（I = ${E}）`, min >= lo && max <= hi && traffic.innerTarget === E, `min ${min} / max ${max} / 平均 ${f2(avg)}`);
+  const badPos = spawns.filter((s) => badSpot(s.x, s.z));
+  check(`[${tier}] 補生成 ${spawns.length} 人：位置皆不在建築 / 湖 / 車道內`, spawns.length > 0 && badPos.length === 0, badPos.length ? JSON.stringify(badPos[0]) : '');
+  const ring = spawns.filter((s) => s.d >= traffic.innerMin - 0.5 && s.d <= plan.radius + 0.5 && s.hidden);
+  check(`[${tier}] 補生成皆在 ${traffic.innerMin}–${plan.radius} m 且視野外（視錐外或被建築遮擋）`, ring.length === spawns.length, `距離 ${f2(Math.min(...spawns.map((s) => s.d)))}–${f2(Math.max(...spawns.map((s) => s.d)))} m、視野外 ${spawns.filter((s) => s.hidden).length} / ${spawns.length}`);
   const kinds = {};
-  for (const s of later) kinds[s.kind] = (kinds[s.kind] || 0) + 1;
-  console.log(`INFO  [${crowd}] 補生成類型：${JSON.stringify(kinds)}；回收 ${traffic.stats.recycled}、池中 ${traffic.pedPool.length}`);
-  check(`[${crowd}] 物件池：新建骨架 ${traffic.stats.pedCreated} ≤ 上限 ${traffic.poolMax}（生成 ${traffic.stats.spawned} 次）`, traffic.stats.pedCreated <= traffic.poolMax && traffic.stats.spawned > traffic.stats.pedCreated);
-  check(`[${crowd}] 120 m 外沒有行人剛體；回收者剛體已移除`, farBodies === 0 && traffic.pedPool.every((p) => p.body === null && !p.mesh.visible));
+  for (const s of spawns) kinds[s.kind] = (kinds[s.kind] || 0) + 1;
+  console.log(`INFO  [${tier}] 補生成類型：${JSON.stringify(kinds)}；回收 ${traffic.stats.recycled}、池中 ${traffic.pedPool.length}、借骨架 ${traffic.stats.stolen}、骨架同時最多 ${maxSkel}`);
+  check(`[${tier}] 骨架池：新建 ${traffic.stats.pedCreated} ≤ poolMax ${plan.poolMax}（掛骨架 ${traffic.stats.spawned} 人次以上重用）`, traffic.stats.pedCreated <= plan.poolMax && traffic.pedPool.every((p) => p.body === null && !p.mesh.visible));
+  check(`[${tier}] 分層：pedNear ${plan.near} m 內一律骨架、替身只在 pedFar ${plan.far} m 外（骨架池未滿時）、骨架 / 替身每人恰好顯示一種`, nearNotSkel === 0 && impInside === 0 && bothOrNone === 0, `近處非骨架 ${nearNotSkel}、far 內替身 ${impInside}（池滿時 ${impPoolFull} 人次）、顯示衝突 ${bothOrNone}`);
+  check(`[${tier}] 物理分層：啟用中的行人剛體只在 physicsRadius ${plan.physicsRadius} m（+ 遲滯 15）內、pedFar 外沒有行人剛體`, activeFar === 0 && bodyFar === 0, `超出 ${activeFar} / ${bodyFar}`);
   const variants = new Set(traffic.peds.map((p) => p.character.variant));
   const shirts = new Set();
   for (const p of traffic.peds) p.mesh.traverse((o) => o.isMesh && [].concat(o.material).forEach((m) => m.name === 'shirt' && shirts.add(m.color.getHexString())));
-  check(`[${crowd}] 三種角色變體、多種服色`, variants.size === 3 && shirts.size >= 4, `variant ${[...variants].join(',')}、shirt ${shirts.size} 色`);
+  check(`[${tier}] 三種角色變體、多種服色`, variants.size === 3 && shirts.size >= 4, `variant ${[...variants].join(',')}、shirt ${shirts.size} 色`);
   return game;
 }
 
-runCrowd('high', [40, 60]);
-runCrowd('low', [25, 35]);
-runCrowd('high', [40, 60], PATH_SPARSE, false);
+for (const tier of ['low', 'mid', 'high', 'ultra']) runCrowd(tier);
+runCrowd('high', PATH_SPARSE, false);
 
-// ======================= 3. 效能：50 行人 + 10 車 =======================
-{
-  const game = buildTraffic('high');
+// ======================= 3. 降頻 + 效能（四檔）=======================
+const perfRows = [];
+for (const tier of ['low', 'mid', 'high', 'ultra']) {
+  const budget = TIERS[tier];
+  const game = buildTraffic(budget);
   const { traffic, pw, combat } = game;
-  // 車流 8 台 + 2 台同路段加開，湊 10 台
-  for (let k = 0; traffic.cars.length < 10 && k < 50; k++) {
-    const road = traffic.cars[k % traffic.cars.length].road;
-    const s = road.length * (0.2 + 0.6 * ((k * 0.37) % 1));
-    const tmp = traffic._tmp;
-    const { samplePolyline } = await import('../../src/geom.js');
-    samplePolyline(road, s, tmp);
-    traffic._spawnCar(game.scene, game.physics, 'sedan', '#888888', road, 1, s, 1);
-  }
   const player = { x: spawn.x, y: spawn.y, z: spawn.z };
   const head = PATH_MAIN;
-  // 讓部分行人進入打鬥 / 逃跑（AI 較忙）
+  // 讓近處四分之一的行人進入打鬥 / 逃跑（AI 較忙）
   const actor = { id: 'perf-player', kind: 'player', pos: player, yaw: 0, hp: 100, maxHp: 100, faction: 'player', anim: { state: 'idle', trigger: () => true, on: () => () => {} }, body: { knockdown() {}, settleCheck: () => ({ settled: true, clearToStand: true }), standUp() {} } };
   combat.register(actor);
-  for (const [i, p] of traffic.peds.entries()) if (i % 4 === 0) traffic.brains.get(p.actor.id).onAttacked({ attacker: actor });
-  const time = { mixer: 0, ai: 0, manage: 0 };
+  for (const [i, p] of traffic.peds.entries()) if (i % 4 === 0 && Math.hypot(p.x - player.x, p.z - player.z) < 40) p.brain.onAttacked({ attacker: actor });
+  const time = { mixer: 0, ai: 0, manage: 0, lod: 0, lane: 0 };
+  const undo = [];
   const wrap = (obj, name, key) => {
     const fn = obj[name];
     obj[name] = function (...args) {
@@ -450,32 +490,46 @@ runCrowd('high', [40, 60], PATH_SPARSE, false);
       time[key] += performance.now() - t0;
       return r;
     };
+    undo.push(() => (obj[name] = fn));
   };
   wrap(CharacterAnimator.prototype, 'update', 'mixer');
   wrap(NpcBrain.prototype, 'update', 'ai');
   wrap(traffic, '_manageCrowd', 'manage');
+  wrap(traffic, '_manageCars', 'manage');
+  wrap(traffic, '_updateLod', 'lod');
+  wrap(traffic, '_step', 'lane');
+  wrap(traffic, '_afterStep', 'lane');
   const FRAMES = 1200;
-  let tStep = 0;
-  let tCombat = 0;
   let tSync = 0;
+  let tCombat = 0;
   for (let f = 0; f < FRAMES; f++) {
     player.x += head.x * 3 * DT;
     player.z += head.z * 3 * DT;
     traffic.setView(player.x - head.x * CAM_BACK, player.z - head.z * CAM_BACK, head.x, head.z, HALF_FOV);
     traffic.setBlockers([player]);
-    const t0 = performance.now();
     pw.step(DT);
-    const t1 = performance.now();
     game.clock += DT;
+    const t1 = performance.now();
     combat.update(DT);
     const t2 = performance.now();
     traffic.sync(DT, player);
-    const t3 = performance.now();
-    tStep += t1 - t0;
+    tSync += performance.now() - t2;
     tCombat += t2 - t1;
-    tSync += t3 - t2;
   }
-  // 降頻：玩家停住 30 幀，近處（< 55 m）mixer / AI 每幀、遠處（> 65 m）mixer 每 3 幀、AI 每 5 幀
+  undo.reverse().forEach((u) => u());
+  const per = (t) => t / FRAMES;
+  // 每幀 CPU = traffic.sync（含 mixer / AI / 生成管理 / 分層 / 網格與替身擺放 / 行人剛體休眠切換）+ 物理子步前後的車道 / 人行道邏輯 + combat
+  const total = per(tSync + time.lane + tCombat);
+  perfRows.push({ tier, total, time: Object.fromEntries(Object.entries(time).map(([k, v]) => [k, per(v)])), peds: traffic.citizens.length, skel: traffic.peds.length, cars: traffic.cars.length });
+  console.log(`INFO  效能 [${tier}]（node，市民 ${traffic.citizens.length}（骨架 ${traffic.peds.length}）+ 車 ${traffic.cars.length}、${FRAMES} 幀平均）：每幀 ${total.toFixed(3)} ms = sync ${per(tSync).toFixed(3)}`
+    + `（mixer ${per(time.mixer).toFixed(3)}、AI ${per(time.ai).toFixed(3)}、生成管理 ${per(time.manage).toFixed(3)}、分層 ${per(time.lod).toFixed(3)}）+ 車道 / 人行道子步 ${per(time.lane).toFixed(3)} + combat ${per(tCombat).toFixed(3)}`);
+  if (tier === 'high' || tier === 'low') {
+    const lim = tier === 'high' ? 4 : 3;
+    check(`效能 [${tier}]：每幀 CPU < ${lim} ms（市民 ${traffic.citizens.length} + 車 ${traffic.cars.length}）`, total < lim && traffic.cars.length === budget.cars, `${total.toFixed(3)} ms`);
+  }
+
+  if (tier !== 'high') continue;
+  // 降頻：玩家停住 30 幀（不跑密度管理）：near 每幀；mid 視野內 mixer / AI 每 3 幀；mid 視野外 mixer 凍結、AI 每 3 幀；替身沒有大腦
   const calls = new Map();
   const countCall = (proto, name, key) => {
     const fn = proto[name];
@@ -487,7 +541,7 @@ runCrowd('high', [40, 60], PATH_SPARSE, false);
     };
     return () => (proto[name] = fn);
   };
-  const undo = [countCall(CharacterAnimator.prototype, 'update', 'mixer'), countCall(NpcBrain.prototype, 'update', 'ai')];
+  const undo2 = [countCall(CharacterAnimator.prototype, 'update', 'mixer'), countCall(NpcBrain.prototype, 'update', 'ai')];
   for (let f = 0; f < 30; f++) {
     pw.step(DT);
     game.clock += DT;
@@ -495,31 +549,30 @@ runCrowd('high', [40, 60], PATH_SPARSE, false);
     traffic._crowdT = -1; // 這 30 幀不跑密度管理（避免生成 / 回收改變名單）
     traffic.sync(DT, player);
   }
-  undo.forEach((u) => u());
-  let nearOk = true;
-  let farOk = true;
-  let nNear = 0;
-  let nFar = 0;
-  for (const p of traffic.peds) {
-    const d = Math.hypot(p.x - player.x, p.z - player.z);
-    const c = calls.get(p.anim) || { mixer: 0 };
-    const ai = (calls.get(traffic.brains.get(p.actor.id)) || { ai: 0 }).ai;
-    if (d < 55) {
-      nNear++;
-      if (c.mixer !== 30 || ai !== 30) nearOk = false;
-    } else if (d > 65) {
-      nFar++;
-      if (c.mixer !== 10 || ai !== 6) farOk = false;
+  undo2.forEach((u) => u());
+  const plan = traffic.plan;
+  const stat = { near: [0, 0], midIn: [0, 0], midOut: [0, 0], imp: [0, 0] };
+  for (const c of traffic.citizens) {
+    const p = c.ped;
+    if (!p) {
+      stat.imp[0]++;
+      continue;
     }
+    const cm = calls.get(p.anim) || { mixer: 0 };
+    const ai = (calls.get(p.brain) || { ai: 0 }).ai;
+    const lv = c.level === 'near' ? 'near' : c.inView ? 'midIn' : 'midOut';
+    if (c.dist > plan.near - 5 && c.dist < plan.near + plan.hysteresis + 5) continue; // 邊界附近遲滯中，不判
+    if (traffic._forceNear(p)) continue;
+    stat[lv][0]++;
+    const want = lv === 'near' ? [30, 30] : lv === 'midIn' ? [10, 10] : [0, 10];
+    if (cm.mixer !== want[0] || ai !== want[1]) stat[lv][1]++;
   }
-  check(`降頻：60 m 內 mixer / AI 每幀（${nNear} 人）、60 m 外 mixer 每 3 幀 / AI 每 5 幀（${nFar} 人）`, nearOk && farOk && nNear > 0 && nFar > 0);
-
-  const per = (t) => t / FRAMES;
-  const listed = per(time.mixer + time.ai + time.manage + tCombat);
-  console.log(`INFO  效能（node，${traffic.peds.length} 行人 + ${traffic.cars.length} 車、${FRAMES} 幀平均）：mixer ${per(time.mixer).toFixed(3)} ms、AI ${per(time.ai).toFixed(3)} ms、combat ${per(tCombat).toFixed(3)} ms、生成管理 ${per(time.manage).toFixed(3)} ms；`
-    + `traffic.sync 全部（含上列與網格擺放）${per(tSync).toFixed(3)} ms、物理子步前後的車道 / 人行道邏輯（mock 世界）${per(tStep).toFixed(3)} ms`);
-  check(`效能：mixer + AI + combat + 生成管理 ≤ 1.5 ms / 幀（${traffic.peds.length} 人 + ${traffic.cars.length} 車）`, listed <= 1.5 && traffic.peds.length >= 45 && traffic.cars.length === 10, `${listed.toFixed(3)} ms`);
+  check(`降頻 [high]：near 每幀（${stat.near[0]} 人）、mid 視野內 mixer / AI 每 3 幀（${stat.midIn[0]} 人）、mid 視野外 mixer 凍結（${stat.midOut[0]} 人）、替身 ${stat.imp[0]} 人無大腦`,
+    stat.near[0] > 0 && stat.midIn[0] + stat.midOut[0] > 0 && stat.near[1] + stat.midIn[1] + stat.midOut[1] === 0 && traffic.brains.size === traffic.peds.length,
+    `不符 near ${stat.near[1]} / midIn ${stat.midIn[1]} / midOut ${stat.midOut[1]}`);
 }
+console.log(`INFO  四檔每幀 CPU：${perfRows.map((r) => `${r.tier} ${r.total.toFixed(3)} ms`).join('、')}`);
 
 console.log(`\ncrowd.mjs：${passed} 通過 / ${failed} 失敗`);
+console.log(failed ? `FAIL ${failed}/${passed + failed}` : `PASS ${passed}/${passed}`);
 process.exit(failed ? 1 : 0);

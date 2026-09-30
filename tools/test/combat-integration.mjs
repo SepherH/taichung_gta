@@ -45,7 +45,8 @@ const { loadCharacterModels, createCharacter, getCharacterManifest, CharacterAni
 const { loadVehicleModels, createVehicleModel, SEAT_HIPS_HEIGHT } = await import('../../src/vehicle-model.js');
 const { CombatSystem, PUNCH_DAMAGE, ASSIST_TURN_SEC, HIT_RADIUS } = await import('../../src/combat.js');
 const { angleDelta } = await import('../../src/utils.js');
-const { NpcBrain, wireCombatToBrains } = await import('../../src/npc-ai.js');
+const { NpcBrain, wireCombatToBrains, FIGHT_CHANCE, FIGHT_CHANCE_HEAVY } = await import('../../src/npc-ai.js');
+const { CITY_SEED } = await import('../../src/data/city.js');
 const { PhysicsWorld, initPhysics } = await import('../../src/physics/world.js');
 const { GROUPS } = await import('../../src/physics/groups.js');
 const { CharacterBody } = await import('../../src/physics/character.js');
@@ -84,7 +85,9 @@ function fsFetch(url) {
 
 const chars = await loadCharacterModels('./models/characters/manifest.json', { fetch: fsFetch });
 const vehTable = await loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch });
-const vManifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/vehicles/manifest.json'), 'utf8'));
+// 工作區（外包環境）可能連 vehicles/manifest.json 都沒有：視為空表（車輛 glb 檢查 SKIP，車輛走程式建模退路）
+const vManifestFile = path.join(PUBLIC, 'models/vehicles/manifest.json');
+const vManifest = fs.existsSync(vManifestFile) ? JSON.parse(fs.readFileSync(vManifestFile, 'utf8')) : { vehicles: [] };
 check('角色 glb 三種 variant 載入（非方塊人）', chars.variants.length === 3 && !chars.fallback, chars.variants.join(','));
 
 const terrain = getTerrain();
@@ -95,7 +98,7 @@ const q = {};
 
 // ======================= 1. vehicle-model：真 glb 五種車 =======================
 // 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此段標 SKIP 不計入（宿主有 glb 時照常檢查）
-const vehGlbPresent = vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
+const vehGlbPresent = vManifest.vehicles.length > 0 && vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
 if (!vehGlbPresent) console.log('SKIP  vehicle-model 真 glb 檢查（工作區缺 public/models/vehicles/*.glb）');
 else {
   const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2 };
@@ -759,15 +762,38 @@ async function runScenarios(RAPIER, label, real) {
   }
 
   // ---- I. 反擊比例：逐一打場上行人一拳，看大腦反應（fight / flee）----
+  // 還手與否只由每人固定種子的 braveness 決定（npc-ai.js：braveness ≥ 1 − FIGHT_CHANCE / FIGHT_CHANCE_HEAVY），
+  //   本情境每打完一人就把對方交還漫步，MAX_FIGHTERS 不會介入 → 比例 = 抽到的人裡「勇敢者」的比例，屬抽樣波動；
+  //   抽到誰取決於工作區有哪些模型（宿主 97 人、工作區 81 人），所以不寫死 20–40%，改用實際抽到的體型組成推導區間：
+  //   期望 μ = Σpᵢ / n（一般 0.25、壯碩 0.45；三體型各 1/3 時 μ = (2 × 0.25 + 0.45) / 3 ≈ 0.317）、σ = √Σpᵢ(1 − pᵢ) / n，
+  //   斷言 |比例 − μ| ≤ 3σ（n = 97 時約 ±0.14：0.18–0.46，宿主 40.2% 在內）
+  //   另外兩條無波動的斷言：每人的反應與其 braveness 特質一致（規則沒有讓比例上升）；同一市民只計一次
+  //   （FX1 發現：市民換骨架 / 行人物件回收後同一 actor 會出現在兩個 ped 物件上，舊版會被打兩次、計兩次）
   {
     let fight = 0;
     let flee = 0;
     let tried = 0;
+    let mismatch = 0;
+    let dup = 0;
+    let sumP = 0;
+    let sumVar = 0;
+    let heavyN = 0;
+    const seen = new Set();
     for (const p of peds.slice()) {
       if (!p.alive || p.state === 'down' || combat.stateOf(p.actor) !== 'normal' || brainOf(p).state === 'fight') continue;
+      if (seen.has(p.actor.id)) {
+        dup++;
+        continue;
+      }
       player.actor.hp = player.actor.maxHp;
       if (combat.stateOf(player.actor) !== 'normal') combat.revive(player.actor);
       for (let i = 0; i < 240 && combat.stateOf(player.actor) !== 'normal'; i++) frame();
+      // 先前事件的恐慌可能讓對方已在逃跑：出拳前交還漫步，讀到的 fight / flee 才是對這一拳的反應
+      const b0 = brainOf(p);
+      b0.pending.length = 0;
+      b0.target = null;
+      b0.fleeFrom = null;
+      b0._enter('wander');
       // 等出拳冷卻 / 上一拳動作結束（每幀重新擺到對方面前）
       let ok = false;
       for (let i = 0; i < 90 && !ok; i++) {
@@ -778,24 +804,51 @@ async function runScenarios(RAPIER, label, real) {
       }
       if (!ok) continue;
       tried++;
+      seen.add(p.actor.id);
       let mode = null;
       for (let i = 0; i < 30 && !mode; i++) {
         frame();
         const m = brainOf(p).state;
         if (m === 'fight' || m === 'flee') mode = m;
       }
-      if (mode === 'fight') fight++;
-      else if (mode === 'flee') flee++;
-      // 讓對方回漫步，避免追打影響下一位
       const b = brainOf(p);
+      if (mode === 'fight' || mode === 'flee') {
+        if (mode === 'fight') fight++;
+        else flee++;
+        const pi = b.heavy ? FIGHT_CHANCE_HEAVY : FIGHT_CHANCE;
+        sumP += pi;
+        sumVar += pi * (1 - pi);
+        if (b.heavy) heavyN++;
+        if ((mode === 'fight') !== b.fights) mismatch++;
+      }
+      // 讓對方回漫步，避免追打影響下一位
       if (b) {
         b.target = null;
         b.fleeFrom = null;
         b._enter('wander');
       }
     }
-    const ratio = fight / Math.max(1, fight + flee);
-    check(`[${label}] 反擊比例：打 ${tried} 人，還手 ${fight}、逃跑 ${flee}（還手 20–40%）`, fight + flee >= 30 && ratio >= 0.2 && ratio <= 0.4, `${(ratio * 100).toFixed(1)}%`);
+    const n = fight + flee;
+    const ratio = fight / Math.max(1, n);
+    const mu = sumP / Math.max(1, n);
+    const sigma = Math.sqrt(sumVar) / Math.max(1, n);
+    check(`[${label}] 反擊比例：打 ${tried} 人（不重複；略過重複市民 ${dup}），還手 ${fight}、逃跑 ${flee}（壯碩 ${heavyN}）→ 期望 ${(mu * 100).toFixed(1)}% ± 3σ ${(3 * sigma * 100).toFixed(1)}%`,
+      n >= 30 && Math.abs(ratio - mu) <= 3 * sigma, `${(ratio * 100).toFixed(1)}%`);
+    check(`[${label}] 每人反應與 braveness 特質一致（還手 ⇔ braveness ≥ 1 − 還手機率）：不一致 ${mismatch} 人`, n >= 30 && mismatch === 0);
+    // 大樣本（同 traffic 的 id 格式 ped-N 與 CITY_SEED、三體型輪流）：還手特質比例 ≈ (2 × 0.25 + 0.45) / 3，3000 人 3σ ≈ 2.5%
+    const N = 3000;
+    let brave = 0;
+    let exp = 0;
+    let v = 0;
+    for (let i = 0; i < N; i++) {
+      const heavy = i % 3 === 2;
+      if (new NpcBrain({ actor: { id: `ped-${i}`, pos: { x: 0, y: 0, z: 0 } }, heavy, seed: CITY_SEED }).fights) brave++;
+      const pi = heavy ? FIGHT_CHANCE_HEAVY : FIGHT_CHANCE;
+      exp += pi;
+      v += pi * (1 - pi);
+    }
+    check(`[${label}] 還手特質大樣本：${N} 人 ${((brave / N) * 100).toFixed(1)}%（期望 ${((exp / N) * 100).toFixed(1)}% ± 3σ ${((3 * Math.sqrt(v) / N) * 100).toFixed(1)}%）`,
+      Math.abs(brave - exp) <= 3 * Math.sqrt(v));
   }
   return game;
 }
