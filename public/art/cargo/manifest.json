@@ -1,0 +1,188 @@
+{
+  "size": [
+    640,
+    640
+  ],
+  "notes": "from / to 為 public/models/manifest.json 的地標 id；distance 為兩地標原點直線距離（公尺）；timeLimit（秒）＝ 每 100 m 20 秒 + 60 秒緩衝，取 5 的倍數；reward 單位新臺幣。",
+  "items": [
+    {
+      "slug": "glowing-sun-cakes",
+      "name": "會發光的太陽餅",
+      "file": "glowing-sun-cakes.jpg",
+      "title": "夜光太陽餅急送",
+      "brief": "烘焙師傅說這批太陽餅曬太久，晚上會自己發光。展示館要拿來當夜間照明，路上請戴好墨鏡。",
+      "from": 150999799,
+      "to": "qiuhonggu_pavilion",
+      "distance": 460,
+      "timeLimit": 155,
+      "reward": 290,
+      "tags": [
+        "fragile"
+      ]
+    },
+    {
+      "slug": "giant-boba-pearl",
+      "name": "比人還大的珍珠",
+      "file": "giant-boba-pearl.jpg",
+      "title": "滾滾巨珍珠",
+      "brief": "飲料店的珍珠長太大，塞不進任何吸管。請推去湖邊步道讓它散散步，千萬別讓它滾進湖裡。",
+      "from": 148849083,
+      "to": "qiuhonggu_red_bridge",
+      "distance": 555,
+      "timeLimit": 175,
+      "reward": 310,
+      "tags": [
+        "heavy"
+      ]
+    },
+    {
+      "slug": "mini-opera-house",
+      "name": "迷你歌劇院模型",
+      "file": "mini-opera-house.jpg",
+      "title": "歌劇院套娃",
+      "brief": "有人訂了一座迷你歌劇院模型，要擺在真的歌劇院前面拍「套娃照」。模型很脆，請輕拿輕放。",
+      "from": 865367994,
+      "to": 222636759,
+      "distance": 371,
+      "timeLimit": 135,
+      "reward": 280,
+      "tags": [
+        "fragile"
+      ]
+    },
+    {
+      "slug": "chili-sauce-bathtub",
+      "name": "裝滿辣椒醬的浴缸",
+      "file": "chili-sauce-bathtub.jpg",
+      "title": "辣醬浴缸要穩",
+      "brief": "辣椒醬狂熱者在飯店辦「辣醬派對」，整缸醬已經裝滿。請穩穩推過去，灑出來會很香也很辣。",
+      "from": 224955652,
+      "to": 456488572,
+      "distance": 731,
+      "timeLimit": 210,
+      "reward": 400,
+      "tags": [
+        "heavy",
+        "smelly"
+      ]
+    },
+    {
+      "slug": "giant-official-seal",
+      "name": "巨大公文章",
+      "file": "giant-official-seal.jpg",
+      "title": "找回公文章",
+      "brief": "市政府的巨大公文章被忘在捷運站，沒有它今天的公文全都蓋不了章。快送回去，全市都在等你。",
+      "from": 862750722,
+      "to": 222413435,
+      "distance": 214,
+      "timeLimit": 105,
+      "reward": 250,
+      "tags": [
+        "timed"
+      ]
+    },
+    {
+      "slug": "runaway-jelly",
+      "name": "逃跑的雞腳凍",
+      "file": "runaway-jelly.jpg",
+      "title": "雞腳凍大逃亡",
+      "brief": "一盒雞腳凍長出小腳逃跑，最後在大樓大廳被抓到。請趁它還沒融化、也還沒再次逃跑前送達。",
+      "from": 853807906,
+      "to": 222636758,
+      "distance": 981,
+      "timeLimit": 260,
+      "reward": 390,
+      "tags": [
+        "timed"
+      ]
+    },
+    {
+      "slug": "mayi-ice-cream",
+      "name": "一整箱麻薏冰淇淋",
+      "file": "mayi-ice-cream.jpg",
+      "title": "苦甜麻薏冰淇淋",
+      "brief": "全臺唯一麻薏口味冰淇淋，客人說「苦得很療癒」。保冷箱撐不久，融掉就只剩一箱綠色的湯。",
+      "from": 222636758,
+      "to": 148849083,
+      "distance": 697,
+      "timeLimit": 200,
+      "reward": 340,
+      "tags": [
+        "timed"
+      ]
+    },
+    {
+      "slug": "singing-lucky-cat",
+      "name": "會唱歌的招財貓",
+      "file": "singing-lucky-cat.jpg",
+      "title": "吵鬧招財貓搬家",
+      "brief": "這隻招財貓每小時準時唱歌，辦公室快受不了了。請送去購物中心的新店面，老闆說越吵越旺。",
+      "from": 222413435,
+      "to": 150999799,
+      "distance": 958,
+      "timeLimit": 255,
+      "reward": 380,
+      "tags": [
+        "fragile"
+      ]
+    },
+    {
+      "slug": "helmet-tower",
+      "name": "三十頂安全帽疊成的塔",
+      "file": "helmet-tower.jpg",
+      "title": "安全帽疊疊樂",
+      "brief": "三十頂安全帽疊成一座塔，客人堅持「不能拆，這是藝術」。請穩穩推到捷運站，倒了要重疊。",
+      "from": 222636759,
+      "to": 862750722,
+      "distance": 867,
+      "timeLimit": 235,
+      "reward": 370,
+      "tags": [
+        "fragile"
+      ]
+    },
+    {
+      "slug": "giant-pineapple-cake",
+      "name": "西瓜大的鳳梨酥",
+      "file": "giant-pineapple-cake.jpg",
+      "title": "超巨大鳳梨酥",
+      "brief": "伴手禮店做出比西瓜還大的鳳梨酥，要送去百貨公司參展。重到推車發出哀號，請多保重。",
+      "from": 456488572,
+      "to": 224955652,
+      "distance": 731,
+      "timeLimit": 210,
+      "reward": 340,
+      "tags": [
+        "heavy"
+      ]
+    },
+    {
+      "slug": "tiger-balloon",
+      "name": "充氣老虎氣球",
+      "file": "tiger-balloon.jpg",
+      "title": "老虎氣球別飛走",
+      "brief": "充氣老虎大到一直想飛走，請拉去大樓的生日派對。記得抓緊繩子，別跟它一起飛上天。",
+      "from": "qiuhonggu_pavilion",
+      "to": 865367994,
+      "distance": 669,
+      "timeLimit": 195,
+      "reward": 270,
+      "tags": []
+    },
+    {
+      "slug": "cloud-in-a-jar",
+      "name": "罐裝小雨雲",
+      "file": "cloud-in-a-jar.jpg",
+      "title": "罐裝雨雲快遞",
+      "brief": "有人在湖邊撿到一朵迷路的小雨雲，裝進罐子裡了。請送到大樓頂樓花園，那裡的盆栽正缺水。",
+      "from": "qiuhonggu_red_bridge",
+      "to": 853807906,
+      "distance": 169,
+      "timeLimit": 95,
+      "reward": 240,
+      "tags": [
+        "fragile"
+      ]
+    }
+  ]
+}

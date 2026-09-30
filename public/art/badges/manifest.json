@@ -1,0 +1,77 @@
+{
+  "size": 256,
+  "badges": [
+    {
+      "id": 853807906,
+      "slug": "baohui_qiuhonggu",
+      "name": "寶輝秋紅谷",
+      "file": "baohui_qiuhonggu.png"
+    },
+    {
+      "id": 865367994,
+      "slug": "lianju_zhongyong",
+      "name": "聯聚中雍大廈",
+      "file": "lianju_zhongyong.png"
+    },
+    {
+      "id": 456488572,
+      "slug": "lin_hotel",
+      "name": "林酒店",
+      "file": "lin_hotel.png"
+    },
+    {
+      "id": 862750722,
+      "slug": "mrt_city_hall_station",
+      "name": "捷運市政府站",
+      "file": "mrt_city_hall_station.png"
+    },
+    {
+      "id": 222636759,
+      "slug": "national_taichung_theater",
+      "name": "臺中國家歌劇院",
+      "file": "national_taichung_theater.png"
+    },
+    {
+      "id": "qiuhonggu_pavilion",
+      "slug": "qiuhonggu_pavilion",
+      "name": "秋紅谷展示館（心之谷永續教育園區）",
+      "file": "qiuhonggu_pavilion.png"
+    },
+    {
+      "id": "qiuhonggu_red_bridge",
+      "slug": "qiuhonggu_red_bridge",
+      "name": "秋紅谷紅色跨湖步道",
+      "file": "qiuhonggu_red_bridge.png"
+    },
+    {
+      "id": 148849083,
+      "slug": "shin_kong_mitsukoshi",
+      "name": "新光三越 台中中港店",
+      "file": "shin_kong_mitsukoshi.png"
+    },
+    {
+      "id": 222636758,
+      "slug": "taichung_city_council",
+      "name": "臺中市議會",
+      "file": "taichung_city_council.png"
+    },
+    {
+      "id": 222413435,
+      "slug": "taichung_city_hall",
+      "name": "臺中市政府臺灣大道市政大樓",
+      "file": "taichung_city_hall.png"
+    },
+    {
+      "id": 150999799,
+      "slug": "tiger_city",
+      "name": "老虎城購物中心",
+      "file": "tiger_city.png"
+    },
+    {
+      "id": 224955652,
+      "slug": "top_city",
+      "name": "Top City 台中大遠百",
+      "file": "top_city.png"
+    }
+  ]
+}

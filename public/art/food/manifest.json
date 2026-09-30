@@ -1,0 +1,80 @@
+{
+  "size": [
+    768,
+    512
+  ],
+  "items": [
+    {
+      "slug": "fried-noodles-chili",
+      "name": "炒麵配東泉辣椒醬",
+      "file": "fried-noodles-chili.jpg",
+      "intro": "臺中早餐店常見吃法：油麵炒麵淋上甜辣的東泉辣椒醬，常配一碗味噌湯。"
+    },
+    {
+      "slug": "da-mian-geng",
+      "name": "大麵羹",
+      "file": "da-mian-geng.jpg",
+      "intro": "臺中傳統麵食：粗黃鹼麵煮在湯裡，湯頭微稠，常加韭菜與紅蔥酥。"
+    },
+    {
+      "slug": "sun-cake",
+      "name": "太陽餅",
+      "file": "sun-cake.jpg",
+      "intro": "臺中最知名的伴手禮：多層酥皮包著麥芽糖內餡，一咬酥屑紛飛。"
+    },
+    {
+      "slug": "bubble-tea",
+      "name": "珍珠奶茶",
+      "file": "bubble-tea.jpg",
+      "intro": "臺灣代表性飲品，臺中常被視為發源地之一：奶茶加上Q彈粉圓。"
+    },
+    {
+      "slug": "fengren-ice",
+      "name": "豐仁冰",
+      "file": "fengren-ice.jpg",
+      "intro": "臺中老字號冰品，綿密刨冰搭配紅豆等配料，是在地人的消暑記憶。"
+    },
+    {
+      "slug": "mitou-ice",
+      "name": "蜜豆冰",
+      "file": "mitou-ice.jpg",
+      "intro": "刨冰淋上煉乳、鋪滿蜜豆與蜜餞水果，臺中常見的古早味冰品。"
+    },
+    {
+      "slug": "mayi-soup",
+      "name": "麻薏湯",
+      "file": "mayi-soup.jpg",
+      "intro": "臺中夏季限定：黃麻嫩葉煮成的湯，常加地瓜與小魚乾，微苦回甘。"
+    },
+    {
+      "slug": "chicken-feet-jelly",
+      "name": "東海雞腳凍",
+      "file": "chicken-feet-jelly.jpg",
+      "intro": "東海大學周邊的人氣小吃：滷雞腳冰鎮成凍，冰涼又Q彈。"
+    },
+    {
+      "slug": "yizhong-chicken-cutlet",
+      "name": "一中街雞排",
+      "file": "yizhong-chicken-cutlet.jpg",
+      "intro": "一中街商圈的招牌小吃：大片炸雞排外酥內嫩，學生下課的最愛。"
+    },
+    {
+      "slug": "rou-yuan",
+      "name": "肉圓",
+      "file": "rou-yuan.jpg",
+      "intro": "半透明Q彈外皮包著豬肉內餡，淋上甜辣醬，中部常見的小吃。"
+    },
+    {
+      "slug": "mung-bean-cake",
+      "name": "綠豆椪",
+      "file": "mung-bean-cake.jpg",
+      "intro": "白色酥皮包綠豆沙，有的還包滷肉，中秋常見、臺中糕餅名店眾多。"
+    },
+    {
+      "slug": "salty-sponge-cake",
+      "name": "鹹蛋糕",
+      "file": "salty-sponge-cake.jpg",
+      "intro": "臺中傳統糕點：鬆軟蛋糕中間夾著鹹香肉燥內餡，甜鹹交織。"
+    }
+  ]
+}

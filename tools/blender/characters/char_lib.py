@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import blendsafe  # noqa: E402
 
 FPS = 30
+SOCKET = "weapon_socket"   # 右手武器插槽（非變形骨，不綁頂點；Phase 4）
 MAT_SLOTS = ["skin", "shirt", "pants", "hair", "shoes"]
 
 # ---------------------------------------------------------------- 骨架（所有體型共用同一副）
@@ -361,6 +362,22 @@ def build_hair(B, style):
 
 
 # ---------------------------------------------------------------- 骨架 / 組裝
+def add_weapon_socket(arm_data):
+    """在 EDIT 模式下於 RightHand 底下加 weapon_socket：骨頭（原點）在掌心、骨向朝上（手腕方向）、
+    骨本地 +Z 朝角色前方（綁定姿勢下＝拇指方向）。glTF 匯出後骨本地軸原樣保留：+Z＝拇指方向、+Y＝指尖→手腕、+X＝掌心法線
+    （已由匯出檔節點旋轉實測確認）。"""
+    h, t, _ = JOINTS["RightHand"]
+    wr, tip = Vector(h), Vector(t)
+    head = wr + (tip - wr) * 0.42 + Vector((0.018, 0, 0))   # 右手掌心朝 +X（身體內側）
+    eb = arm_data.edit_bones.new(SOCKET)
+    eb.head, eb.tail = head, head + Vector((0, 0, 0.06))
+    eb.align_roll(Vector((0, -1, 0)))
+    eb.parent = arm_data.edit_bones["RightHand"]
+    eb.use_connect = False
+    eb.use_deform = True    # 匯出設 export_def_bones，需為變形骨才會輸出節點（無頂點群組，不影響蒙皮）
+    return eb
+
+
 def build_character(v):
     """v = 變體 dict：slug、name、colors、g（體型）、hair。回傳 ch（含 arm、meshes、colls）。"""
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -387,6 +404,7 @@ def build_character(v):
         if p:
             eb.parent = arm_data.edit_bones[p]
             eb.use_connect = False
+    add_weapon_socket(arm_data)
     bpy.ops.object.mode_set(mode="OBJECT")
 
     c = v["colors"]

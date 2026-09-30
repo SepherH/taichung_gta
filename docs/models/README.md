@@ -132,3 +132,35 @@ blender -b -P tools/blender/tiles/build_tiles.py
 
 three.js 用法：`texture.wrapS = texture.wrapT = THREE.RepeatWrapping`、`texture.colorSpace = THREE.SRGBColorSpace`，
 `texture.repeat.set(面寬 / 建議尺度, 面高 / 建議尺度)`。
+
+## Phase 4：戰鬥 / 武器動作與武器插槽
+
+`tools/blender/characters/combat_clips.py`（hero.py 與 build_characters.py 都會呼叫）替主角與三個行人各加 10 個 clip；既有 clip 名稱、長度與取樣資料逐 byte 不變。
+
+| clip | 長度 | 循環 | upperBodyOnly | 說明 |
+|---|---|---|---|---|
+| weapon_equip | 0.5 s | 否 | 是 | 右手伸到右後腰取武器再回到持握；`events.weapon_equip.swapAt` 為換手上模型的時間點 |
+| bat_hold | 2.0 s | 是 | 是 | 球棒扛在右肩 |
+| bat_swing_a | 0.6 s | 否 | 是 | 水平揮擊（右後蓄力 → 正前方 → 收到左側），`hitWindow` 0.24–0.39 s |
+| bat_swing_b | 0.6 s | 否 | 是 | 過頭下劈，`hitWindow` 0.24–0.39 s |
+| pistol_hold | 2.0 s | 是 | 是 | 單手持槍、槍口朝前下方 |
+| pistol_aim | 2.0 s | 是 | 是 | 雙手舉槍瞄準正前方（槍口與肩同高） |
+| pistol_fire | 0.267 s | 否 | 是 | 開火後座：第 0 格＝pistol_aim，第 2 格上揚最大，可直接當加法層 |
+| pistol_reload | 1.5 s | 否 | 是 | 槍移到胸前 → 左手摸腰取彈匣 → 插入 → 拉滑套；`magOut` / `magIn` / `done` 事件 |
+| hit_front | 0.5 s | 否 | 否 | 正面受擊：上身後仰、右腳退半步（全身、腳底逐格貼地） |
+| hit_back | 0.5 s | 否 | 否 | 背後受擊：上身前撲、左腳往前踉蹌一步（全身、腳底逐格貼地） |
+
+- `upperBodyOnly: true` 的 clip 下半身（Hips 與雙腿）全程維持綁定姿勢；程式以 manifest 的 `boneGroups.upper`（Spine、Chest、Neck、Head、雙肩 / 上臂 / 前臂 / 手與 weapon_socket）做遮罩疊在 walk / run 上，`boneGroups.lower` 為 Hips 與雙腿。
+- **武器插槽 `weapon_socket`**：RightHand 的子骨（glb 骨架因此為 20 個 joint，`skeleton` 仍列原 19 根變形骨），原點在右手掌心；glTF 本地 **+Z＝拇指方向**（握拳時棒身方向；綁定姿勢下朝角色前方）、**+Y＝由指尖指向手腕**、+X＝掌心法線（由匯出檔節點旋轉實測）。
+  武器 glb 設為該節點的子物件，position 0、quaternion＝`public/models/weapons/manifest.json` 的 `socketRotation`（球棒為單位四元數；手槍槍管沿手指方向，為繞 X 軸 +90°）。
+- 蒙皮檢查拼圖：`docs/models/previews/hero-combat-1.png`、`hero-combat-2.png`（主角全套關鍵格，武器為不匯出的代理幾何）、`characters-combat.png`（三個行人各抽 bat_swing_a / pistol_aim / hit_back）。
+
+# 武器
+
+`tools/blender/weapons/build_weapons.py`（`blender -b -P` 執行）→ `public/models/weapons/bat.glb`、`pistol.glb`、`manifest.json`，
+來源 `assets/blender/weapons/bat.blend`、`pistol.blend`，預覽 `docs/models/previews/weapon-{bat,pistol}-{34,side}.png`。
+
+- **座標契約**：原點＝慣用手握點，glTF +Z 指向前端（棒頭 / 槍口）、+Y 上；單一網格物件，transform 已 apply。
+- bat：全長 0.85 m、768 三角面、材質 wood / grip / knob；manifest 另有 `sweep`（近戰掃掠線段 0.35 m → 棒頭、半徑 0.04 m）與 `offHandOffset`（左手握點）。
+- pistol：通用半自動手槍外型（不仿任何真實型號）、全長約 0.195 m、344 三角面、材質 metal / grip / sight；`tipOffset`＝槍口中心（握點上方 0.045、前方 0.1455 m）。
+- 改尺寸：改腳本上方常數重跑即可，manifest 的 length / tipOffset / triangles / bytes 由腳本實測寫入。

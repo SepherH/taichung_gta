@@ -16,6 +16,7 @@ import bpy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import char_lib as C  # noqa: E402
+import combat_clips as CC  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 GLB_DIR = os.path.join(REPO, "public", "models", "characters")
@@ -350,6 +351,7 @@ def build_variant(v):
     ch = C.build_character(v)
     for name, keys, loop in CLIPS:
         C.make_action(ch, name, keys(), loop, ground=GROUND.get(name))
+    CC.add_actions(ch)   # Phase 4 戰鬥 / 武器 clip
     glb = os.path.join(GLB_DIR, f"{v['slug']}.glb")
     blend = os.path.join(BLEND_DIR, f"{v['slug']}.blend")
     os.makedirs(GLB_DIR, exist_ok=True)
@@ -366,10 +368,15 @@ def build_variant(v):
     render_to(stand, 256, 420)
     arm.animation_data.action = None
     cells = clip_previews(ch, cam, tmp, v["slug"]) if (SCRATCH or v["slug"] == "pedestrian") else []
+    _, cb = CC.previews(ch, cam, CC.PED_FRAMES, os.path.join(tmp, f"{v['slug']}-combat-{{n}}.png"))
+    COMBAT_CELLS.extend(cb)
     C.blendsafe.save_blend(blend)
     print(f"CHARACTER {v['slug']} tris={info['tris']} glb_bytes={info['bytes']} joints={info['joints']} "
           f"anims={info['anims']} mats={info['mats']}")
     return info, stand, cells
+
+
+COMBAT_CELLS = []
 
 
 def main():
@@ -388,18 +395,27 @@ def main():
                 full = os.path.join(PREVIEW_DIR, "characters-clips.png")
                 sheet(cells, 7, 300, 360, full)
     sheet(stands, 3, 256, 420, os.path.join(PREVIEW_DIR, "characters-lineup.png"))
+    sheet(COMBAT_CELLS, 3, 192, 230, os.path.join(PREVIEW_DIR, "characters-combat.png"))   # 列＝變體，欄＝抽樣 clip
 
     base = results["pedestrian"]
     loops = {n: lp for n, _, lp in CLIPS}
+    loops.update({n: lp for n, _, lp, _ in CC.CLIPS})
+    upper = {n: up for n, _, _, up in CC.CLIPS}
     manifest = {
         "skeleton": C.BONES,
         "materialSlots": C.MAT_SLOTS,
         "fps": C.FPS,
-        "clips": [{"name": n, "duration": d, "loop": loops[n]} for n, d in base["anims"]],
+        "clips": [{"name": n, "duration": d, "loop": loops[n], "upperBodyOnly": upper.get(n, False)}
+                  for n, d in base["anims"]],
+        "boneGroups": {"upper": CC.UPPER, "lower": CC.LOWER},
+        "weaponSocket": {"bone": C.SOCKET, "parent": "RightHand",
+                         "axes": "原點＝右手掌心；本地 +Z＝拇指方向（握拳時棒身方向；綁定姿勢朝角色前方 +Z）、+Y＝由指尖指向手腕（綁定姿勢朝上）、+X＝掌心法線",
+                         "notes": "武器 glb 原點（握點）對齊插槽原點，weapon.quaternion＝public/models/weapons/manifest.json 的 socketRotation"},
         "variants": [{"id": v["slug"], "name": v["name"], "file": f"{v['slug']}.glb",
                       "height": 1.75, "bytes": results[v["slug"]]["bytes"], "triangles": results[v["slug"]]["tris"],
                       "colors": v["colors"]} for v in VARIANTS],
-        "events": {"punch": {"hitWindow": [round(5 / C.FPS, 3), round(10 / C.FPS, 3)], "hand": "RightHand"}},
+        "events": dict({"punch": {"hitWindow": [round(5 / C.FPS, 3), round(10 / C.FPS, 3)], "hand": "RightHand"}},
+                       **CC.EVENTS),
         "poses": {
             "knockdownEndHips": [0, 0.115, -0.25],   # 各變體相同（倒地高度不隨身高變）
             "driveHips": [0, DRIVE_HIP_H, 0],

@@ -30,63 +30,165 @@
   "fps": 30,
   "clips": [
     {
+      "name": "bat_hold",
+      "duration": 2,
+      "loop": true,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "bat_swing_a",
+      "duration": 0.6,
+      "loop": false,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "bat_swing_b",
+      "duration": 0.6,
+      "loop": false,
+      "upperBodyOnly": true
+    },
+    {
       "name": "drive",
       "duration": 2,
-      "loop": true
+      "loop": true,
+      "upperBodyOnly": false
     },
     {
       "name": "enter_car",
       "duration": 1.3333,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
     },
     {
       "name": "getup",
       "duration": 1.5,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
     },
     {
       "name": "hit",
       "duration": 0.5,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "hit_back",
+      "duration": 0.5,
+      "loop": false,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "hit_front",
+      "duration": 0.5,
+      "loop": false,
+      "upperBodyOnly": false
     },
     {
       "name": "idle",
       "duration": 2,
-      "loop": true
+      "loop": true,
+      "upperBodyOnly": false
     },
     {
       "name": "jump",
       "duration": 1.0667,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
     },
     {
       "name": "knockdown",
       "duration": 1.2,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "pistol_aim",
+      "duration": 2,
+      "loop": true,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "pistol_fire",
+      "duration": 0.2667,
+      "loop": false,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "pistol_hold",
+      "duration": 2,
+      "loop": true,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "pistol_reload",
+      "duration": 1.5,
+      "loop": false,
+      "upperBodyOnly": true
     },
     {
       "name": "punch",
       "duration": 0.6,
-      "loop": false
+      "loop": false,
+      "upperBodyOnly": false
     },
     {
       "name": "run",
       "duration": 0.6667,
-      "loop": true
+      "loop": true,
+      "upperBodyOnly": false
     },
     {
       "name": "walk",
       "duration": 1.0667,
-      "loop": true
+      "loop": true,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "weapon_equip",
+      "duration": 0.5,
+      "loop": false,
+      "upperBodyOnly": true
     }
   ],
+  "boneGroups": {
+    "upper": [
+      "Spine",
+      "Chest",
+      "Neck",
+      "Head",
+      "LeftShoulder",
+      "LeftUpperArm",
+      "LeftLowerArm",
+      "LeftHand",
+      "RightShoulder",
+      "RightUpperArm",
+      "RightLowerArm",
+      "RightHand",
+      "weapon_socket"
+    ],
+    "lower": [
+      "Hips",
+      "LeftUpperLeg",
+      "LeftLowerLeg",
+      "LeftFoot",
+      "RightUpperLeg",
+      "RightLowerLeg",
+      "RightFoot"
+    ]
+  },
+  "weaponSocket": {
+    "bone": "weapon_socket",
+    "parent": "RightHand",
+    "axes": "原點＝右手掌心；本地 +Z＝拇指方向（握拳時棒身方向；綁定姿勢朝角色前方 +Z）、+Y＝由指尖指向手腕（綁定姿勢朝上）、+X＝掌心法線",
+    "notes": "武器 glb 原點（握點）對齊插槽原點，weapon.quaternion＝public/models/weapons/manifest.json 的 socketRotation"
+  },
   "variants": [
     {
       "id": "pedestrian",
       "name": "行人 A（短髮男性、標準體型）",
       "file": "pedestrian.glb",
       "height": 1.75,
-      "bytes": 255764,
+      "bytes": 378324,
       "triangles": 2212,
       "colors": {
         "skin": "#D6A27C",
@@ -101,7 +203,7 @@
       "name": "行人 B（及肩短髮 + 馬尾女性、纖細體型）",
       "file": "pedestrian_f.glb",
       "height": 1.75,
-      "bytes": 258132,
+      "bytes": 380680,
       "triangles": 2292,
       "colors": {
         "skin": "#E3B393",
@@ -116,7 +218,7 @@
       "name": "行人 C（平頭、壯碩體型）",
       "file": "pedestrian_heavy.glb",
       "height": 1.75,
-      "bytes": 255788,
+      "bytes": 378352,
       "triangles": 2212,
       "colors": {
         "skin": "#C68E68",
@@ -132,7 +234,7 @@
       "role": "player",
       "file": "hero.glb",
       "height": 1.86,
-      "bytes": 662272,
+      "bytes": 785716,
       "triangles": 11841,
       "colors": {
         "skin": "#EDBFA8",
@@ -177,6 +279,32 @@
         0.333
       ],
       "hand": "RightHand"
+    },
+    "weapon_equip": {
+      "swapAt": 0.2
+    },
+    "bat_swing_a": {
+      "hitWindow": [
+        0.24,
+        0.39
+      ],
+      "weapon": "bat"
+    },
+    "bat_swing_b": {
+      "hitWindow": [
+        0.24,
+        0.39
+      ],
+      "weapon": "bat"
+    },
+    "pistol_fire": {
+      "shotAt": 0.0,
+      "recoilPeak": 0.067
+    },
+    "pistol_reload": {
+      "magOut": 0.4,
+      "magIn": 1.0,
+      "done": 1.333
     }
   },
   "poses": {

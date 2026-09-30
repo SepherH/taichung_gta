@@ -24,6 +24,7 @@ import char_lib as C  # noqa: E402
 C.set_proportions([(0.0, 0.0), (0.09, 0.09), (0.50, 0.535), (0.92, 0.99), (0.95, 1.02), (1.05, 1.13),
                    (1.22, 1.32), (1.45, 1.56), (1.555, 1.665)])
 import build_characters as BC  # noqa: E402  （clip 關鍵影格函式在呼叫時讀 C 的新比例）
+import combat_clips as CC  # noqa: E402
 
 C.MAT_SLOTS.extend(["shirt_stripe", "face"])
 V, R = C.V, C.R
@@ -507,6 +508,7 @@ def build():
         eb.head, eb.tail, eb.roll = h, t, 0.0
         if p:
             eb.parent = arm_data.edit_bones[p]
+    C.add_weapon_socket(arm_data)
     bpy.ops.object.mode_set(mode="OBJECT")
     mats = make_mats()
 
@@ -533,6 +535,7 @@ def build():
     for name, keys, loop in BC.CLIPS:
         C.make_action(ch, name, keys(), loop, ground=BC.GROUND.get(name))
     C.make_action(ch, "idle_pose", idle_pose_keys(), True, ground=BC.GROUND["idle_pose"])
+    CC.add_actions(ch)   # Phase 4 戰鬥 / 武器 clip（同名同長度，與行人共用清單）
     glb = os.path.join(BC.GLB_DIR, f"{SLUG}.glb")
     blend = os.path.join(BC.BLEND_DIR, f"{SLUG}.blend")
     C.export(ch, glb, blend)
@@ -598,6 +601,7 @@ def previews(ch):
         cam.data.lens = lens
         BC.look(cam, loc, tgt)
         BC.render_to(os.path.join(BC.PREVIEW_DIR, f"hero-{key}.png"), w, h)
+    CC.previews(ch, cam, CC.HERO_FRAMES, os.path.join(BC.PREVIEW_DIR, "hero-combat-{n}.png"), height=HEIGHT)
     if BC.SCRATCH:    # 蒙皮檢查：全 clip 關鍵影格（含 run / punch / knockdown / drive 極端格）
         cells = BC.clip_previews(ch, cam, BC.SCRATCH, SLUG)
         BC.sheet(cells, 6, 300, 360, os.path.join(BC.SCRATCH, "hero-clips.png"))
