@@ -13,7 +13,7 @@
 ```bash
 npm install
 npm run build:city  # 由 data/osm/qiqi-raw.json 重新產生 src/data/osm-city.json（已附產出檔，改資料時才需要）
-npm run dev       # 開發伺服器，預設 http://localhost:5273（通道 https://tcgta.i23iv.cc）
+npm run dev       # 開發伺服器，預設 http://localhost:5273（自訂網域見 vite.config.js 的 DEV_ALLOWED_HOSTS）
 npm run build     # 產出 dist/
 npm run preview   # 預覽 build 結果
 ```
