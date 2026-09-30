@@ -50,6 +50,32 @@ BONES = ["Hips", "Spine", "Chest", "Neck", "Head",
 L_THIGH = 0.42
 L_SHIN = 0.411
 HIP_JOINT_Z = 0.92
+HIPS_Z = 0.95
+BASE_JOINTS = {k: (tuple(h), tuple(t), p) for k, (h, t, p) in JOINTS.items()}
+ZMAP = None   # 體型高度重映射：[(基準 z, 新 z), ...]；None = 標準 1.75 m
+
+
+def Z(z):
+    """把以 1.75 m 標準體型寫的高度換成目前比例（分段線性，超出末點則平移）。"""
+    if not ZMAP:
+        return z
+    for (a0, b0), (a1, b1) in zip(ZMAP, ZMAP[1:]):
+        if z <= a1:
+            return b0 + (z - a0) * (b1 - b0) / (a1 - a0)
+    return z + (ZMAP[-1][1] - ZMAP[-1][0])
+
+
+def set_proportions(zmap):
+    """改身高比例：重算關節高度（骨名 / 階層 / 朝向不變）與腿長常數。頭部尺寸維持不變由 zmap 決定。"""
+    global ZMAP, L_THIGH, L_SHIN, HIP_JOINT_Z, HIPS_Z
+    ZMAP = zmap
+    for k, (h, t, p) in BASE_JOINTS.items():
+        JOINTS[k] = ((h[0], h[1], Z(h[2])), (t[0], t[1], Z(t[2])), p)
+    hp, kn, an = (JOINTS["LeftUpperLeg"][0], JOINTS["LeftLowerLeg"][0], JOINTS["LeftFoot"][0])
+    L_THIGH = (Vector(kn) - Vector(hp)).length
+    L_SHIN = (Vector(an) - Vector(kn)).length
+    HIP_JOINT_Z = hp[2]
+    HIPS_Z = JOINTS["Hips"][0][2]
 
 
 def V(*a):
@@ -151,8 +177,8 @@ def lerp(a, b, t):
 
 
 # ---------------------------------------------------------------- 體型
-def build_body(B, g, side):
-    """四肢（side = +1 左 / -1 右）。g = 體型參數 dict。"""
+def build_body(B, g, side, arms=True):
+    """四肢（side = +1 左 / -1 右）。g = 體型參數 dict。arms=False 只建腿與鞋（主角另建七分袖手臂）。"""
     S = "Left" if side > 0 else "Right"
     X = V(1, 0, 0)
     fwd = V(0, -1, 0)
@@ -162,6 +188,12 @@ def build_body(B, g, side):
     tip = V(*JOINTS[S + "Hand"][1])
     a = g["arm"]
     UA, LA, HD, SH = S + "UpperArm", S + "LowerArm", S + "Hand", S + "Shoulder"
+    if arms:
+        _arm(B, g, side, S, sh, el, wr, tip, a, UA, LA, HD, SH, fwd)
+    _leg(B, g, side, S, fwd)
+
+
+def _arm(B, g, side, S, sh, el, wr, tip, a, UA, LA, HD, SH, fwd):
     d1 = el - sh
     # 上臂：肩頭（三角肌）→ 短袖 → 手肘
     B.loft([
@@ -195,6 +227,9 @@ def build_body(B, g, side):
         R(th1, th1 - th0, inward, 0.009, 0.008, 0.008, {HD: 1}, "skin"),
     ], n=6, cap0=0.0, cap1=0.008)
 
+
+
+def _leg(B, g, side, S, fwd):
     # 腿：大腿 → 膝 → 小腿（褲管到腳踝）
     hp = V(*JOINTS[S + "UpperLeg"][0])
     kn = V(*JOINTS[S + "LowerLeg"][0])
@@ -246,13 +281,13 @@ def build_torso(B, g):
         (1.440, 0.165 * g["shoulder"], 0.080, 0.084, {"Chest": .9, "Neck": .1}, "shirt"),
         (1.482, 0.080 * g["neck"], 0.058 * g["neck"], 0.062 * g["neck"], {"Chest": .5, "Neck": .5}, "shirt"),
     ]
-    B.loft([R(V(0, 0, z), up, fwd, rx, rf, rb, w, m) for z, rx, rf, rb, w, m in rows], n=14, cap0=0.02, cap1=0.0)
+    B.loft([R(V(0, 0, Z(z)), up, fwd, rx, rf, rb, w, m) for z, rx, rf, rb, w, m in rows], n=14, cap0=0.02, cap1=0.0)
     # 頸
     nk = g["neck"]
     B.loft([
-        R(V(0, 0.004, 1.43), up, fwd, 0.060 * nk, 0.054 * nk, 0.060 * nk, {"Chest": .5, "Neck": .5}, "skin"),
-        R(V(0, 0.006, 1.50), up, fwd, 0.056 * nk, 0.050 * nk, 0.056 * nk, {"Neck": 1}, "skin"),
-        R(V(0, 0.008, 1.565), up, fwd, 0.054 * nk, 0.048 * nk, 0.054 * nk, {"Neck": .4, "Head": .6}, "skin"),
+        R(V(0, 0.004, Z(1.43)), up, fwd, 0.060 * nk, 0.054 * nk, 0.060 * nk, {"Chest": .5, "Neck": .5}, "skin"),
+        R(V(0, 0.006, Z(1.50)), up, fwd, 0.056 * nk, 0.050 * nk, 0.056 * nk, {"Neck": 1}, "skin"),
+        R(V(0, 0.008, Z(1.565)), up, fwd, 0.054 * nk, 0.048 * nk, 0.054 * nk, {"Neck": .4, "Head": .6}, "skin"),
     ], n=10, cap0=0.0, cap1=0.0)
 
 
@@ -430,8 +465,23 @@ def merge(*ps):
     return out
 
 
-def make_action(ch, name, keys, loop, pre_post=None):
-    """keys = [(frame, pose)]。循環 clip 另加前後各一個延伸鍵，讓首尾切線連續。"""
+def _lowest(ch):
+    dg = bpy.context.evaluated_depsgraph_get()
+    low = 1e9
+    for ob in ch["meshes"]:
+        ev = ob.evaluated_get(dg)
+        me = ev.to_mesh()
+        mw = ob.matrix_world
+        low = min(low, min((mw @ v.co).z for v in me.vertices))
+        ev.to_mesh_clear()
+    return low
+
+
+def make_action(ch, name, keys, loop, pre_post=None, ground=None):
+    """keys = [(frame, pose)]。循環 clip 另加前後各一個延伸鍵，讓首尾切線連續。
+    ground = (關鍵影格清單或 "all", 模式, 逐格檢查到第幾格)：先把指定關鍵影格的全身最低點平移到 z = 0，
+    再逐格檢查——模式 "lock" 每格都貼地（站立類），"clamp" 只把低於地面的格抬回地面（有騰空 / 坐下的動作）。"""
+    frames_spec, mode, until = (ground + (None,))[:3] if ground else (None, None, None)
     arm = ch["arm"]
     if arm.animation_data is None:
         arm.animation_data_create()
@@ -445,6 +495,26 @@ def make_action(ch, name, keys, loop, pre_post=None):
         allkeys = [(keys[-2][0] - f_end, keys[-2][1])] + allkeys + [(f_end + keys[1][0], keys[1][1])]
     for f, p in allkeys:
         _key_pose(arm, p, f, prev)
+    if ground:
+        frames = [f for f, _ in keys] if frames_spec == "all" else frames_spec
+        for f, p in keys:
+            if f in frames:
+                bpy.context.scene.frame_set(int(f))
+                dz = _lowest(ch)
+                loc = p.get("loc", (0, 0, 0))
+                p["loc"] = (loc[0], loc[1], loc[2] - dz)
+        prev = {}
+        for f, p in allkeys:
+            _key_pose(arm, p, f, prev)
+        pb = arm.pose.bones["Hips"]
+        inv = _rest3(arm, "Hips").inverted()
+        last = keys[-1][0] if until is None else until
+        for f in range(int(keys[0][0]), int(last) + 1):
+            bpy.context.scene.frame_set(f)
+            low = _lowest(ch)
+            if mode == "lock" or low < 0:
+                pb.location = pb.location + inv @ Vector((0, 0, -low))
+                pb.keyframe_insert("location", frame=f, group="Hips")
     for fc in _fcurves(act):
         for kp in fc.keyframe_points:
             kp.interpolation = "BEZIER"

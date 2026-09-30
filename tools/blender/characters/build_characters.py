@@ -54,8 +54,13 @@ def idle1():
                        "loc": (0, 0, 0.004)})
 
 
+def ks():
+    """腿長比例（標準 0.831 m）：原地上下起伏量跟著腿長縮放。"""
+    return (C.L_THIGH + C.L_SHIN) / 0.831
+
+
 def walk_keys():
-    w0 = M({"loc": (0, 0, -0.032), "Hips": (0, 0, -6), "Spine": (3, 0, 0), "Chest": (0, 0, 8),
+    w0 = M({"loc": (0, 0, -0.032 * ks()), "Hips": (0, 0, -6), "Spine": (3, 0, 0), "Chest": (0, 0, 8),
             "Head": (-2, 0, -2)},
            {"LeftUpperLeg": (-20, 0, 0), "LeftLowerLeg": (3, 0, 0), "LeftFoot": (-10, 0, 0)},
            {"RightUpperLeg": (16, 0, 0), "RightLowerLeg": (20, 0, 0), "RightFoot": (22, 0, 0)},
@@ -70,7 +75,7 @@ def walk_keys():
 
 
 def run_keys():
-    r0 = M({"loc": (0, 0, -0.065), "Hips": (0, 0, -8), "Spine": (10, 0, 0), "Chest": (2, 0, 12),
+    r0 = M({"loc": (0, 0, -0.065 * ks()), "Hips": (0, 0, -8), "Spine": (10, 0, 0), "Chest": (2, 0, 12),
             "Head": (-10, 0, -4)},
            {"LeftUpperLeg": (-30, 0, 0), "LeftLowerLeg": (18, 0, 0), "LeftFoot": (12, 0, 0)},
            {"RightUpperLeg": (22, 0, 0), "RightLowerLeg": (75, 0, 0), "RightFoot": (25, 0, 0)},
@@ -137,11 +142,8 @@ def hit_keys():
     return [(0, idle0()), (3, snap), (8, rec), (15, idle0())]
 
 
-LIE_LOC = (0, 0.25, 0.115 - 0.95)
-
-
 def lie_pose():
-    return {"loc": LIE_LOC, "Hips": (-90, 0, 0), "Spine": (-2, 0, 0), "Head": (0, 0, 20),
+    return {"loc": (0, 0.25, 0.115 - C.HIPS_Z), "Hips": (-90, 0, 0), "Spine": (-2, 0, 0), "Head": (0, 0, 20),
             "LeftUpperArm": (-15, -40, 0), "RightUpperArm": (-10, 45, 0),
             "LeftLowerArm": (-20, 0, 0), "RightLowerArm": (-30, 0, 0),
             "LeftUpperLeg": (-4, -6, 0), "LeftLowerLeg": (8, 0, 0), "LeftFoot": (-10, 0, 0),
@@ -151,18 +153,18 @@ def lie_pose():
 def knockdown_keys():
     stag = M(both_legs(-15, 30), {"loc": (0, 0.05, C.crouch_drop(-15, 30)), "Spine": (-15, 0, 0),
                                   "Chest": (-10, 0, 0), "Head": (-25, 0, 0)}, arms(-50, -30, 35))
-    fall = M({"loc": (0, 0.20, -0.40), "Hips": (-45, 0, 0), "Spine": (-5, 0, 0), "Head": (15, 0, 0),
+    fall = M({"loc": (0, 0.20, 0.55 * ks() - C.HIPS_Z), "Hips": (-45, 0, 0), "Spine": (-5, 0, 0), "Head": (15, 0, 0),
               "LeftUpperLeg": (5, 0, 0), "RightUpperLeg": (-5, 0, 0), "LeftLowerLeg": (25, 0, 0),
               "RightLowerLeg": (35, 0, 0), "LeftFoot": (-10, 0, 0), "RightFoot": (-10, 0, 0)},
              arms(-80, -20, 50))
-    impact = M(lie_pose(), {"Hips": (-88, 0, 0), "loc": (0, 0.25, -0.83), "Head": (8, 0, 10),
+    impact = M(lie_pose(), {"Hips": (-88, 0, 0), "loc": (0, 0.25, 0.12 - C.HIPS_Z), "Head": (8, 0, 10),
                             "LeftUpperArm": (-30, -50, 0), "RightUpperArm": (-30, 50, 0)})
-    bounce = M(lie_pose(), {"Hips": (-86, 0, 0), "loc": (0, 0.25, -0.82), "Head": (2, 0, 16)})
+    bounce = M(lie_pose(), {"Hips": (-86, 0, 0), "loc": (0, 0.25, 0.13 - C.HIPS_Z), "Head": (2, 0, 16)})
     return [(0, idle0()), (5, stag), (13, fall), (20, impact), (26, bounce), (36, lie_pose())]
 
 
 def getup_keys():
-    sit = M({"loc": (0, 0.12, 0.12 - 0.95), "Hips": (-25, 0, 0), "Spine": (15, 0, 0), "Chest": (10, 0, 0),
+    sit = M({"loc": (0, 0.12, 0.12 - C.HIPS_Z), "Hips": (-25, 0, 0), "Spine": (15, 0, 0), "Chest": (10, 0, 0),
              "Head": (5, 0, 0),
              "LeftUpperLeg": (-63, -4, 0), "RightUpperLeg": (-85, 4, 0), "LeftLowerLeg": (2, 0, 0),
              "RightLowerLeg": (45, 0, 0), "LeftFoot": (-5, 0, 0), "RightFoot": (20, 0, 0)},
@@ -179,10 +181,11 @@ DRIVE_HIP_H = 0.30   # drive 時 Hips 關節離腳底平面（＝車內地板）
 
 
 def drive0():
-    return M({"loc": (0, 0, DRIVE_HIP_H - 0.95), "Hips": (-15, 0, 0), "Spine": (8, 0, 0), "Chest": (2, 0, 0),
+    return M({"loc": (0, 0, DRIVE_HIP_H - C.HIPS_Z), "Hips": (-15, 0, 0), "Spine": (8, 0, 0), "Chest": (2, 0, 0),
               "Neck": (3, 0, 0), "Head": (2, 0, 0),
-              "LeftUpperLeg": (-67, -4, 0), "RightUpperLeg": (-67, 4, 0), "LeftLowerLeg": (50, 0, 0),
-              "RightLowerLeg": (50, 0, 0), "LeftFoot": (15, 0, 0), "RightFoot": (15, 0, 0),
+              # 腿往前伸（大腿世界俯仰 −85°、膝彎 20°）讓腳掌落在車內地板（Hips 下方 0.30 m）附近
+              "LeftUpperLeg": (-70, -4, 0), "RightUpperLeg": (-70, 4, 0), "LeftLowerLeg": (20, 0, 0),
+              "RightLowerLeg": (20, 0, 0), "LeftFoot": (50, 0, 0), "RightFoot": (50, 0, 0),
               "LeftUpperArm": (-52, 10, 0), "RightUpperArm": (-52, -10, 0),
               "LeftLowerArm": (-55, 0, 0), "RightLowerArm": (-55, 0, 0)})
 
@@ -202,7 +205,7 @@ def enter_keys():
               "RightUpperLeg": (-55, 25, 0), "RightLowerLeg": (70, 0, 0), "RightFoot": (-15, 0, 0),
               "RightUpperArm": (-45, 10, 0), "RightLowerArm": (-30, 0, 0),
               "LeftUpperArm": (-20, -15, 0), "LeftLowerArm": (-30, 0, 0)})
-    sitdown = M({"loc": (0, 0, -0.55), "Hips": (-10, 0, 0), "Spine": (15, 0, 0), "Head": (0, 0, 0),
+    sitdown = M({"loc": (0, 0, 0.40 - C.HIPS_Z), "Hips": (-10, 0, 0), "Spine": (15, 0, 0), "Head": (0, 0, 0),
                  "RightUpperLeg": (-70, 10, 0), "RightLowerLeg": (60, 0, 0), "RightFoot": (10, 0, 0),
                  "LeftUpperLeg": (-55, 0, 0), "LeftLowerLeg": (70, 0, 0), "LeftFoot": (-5, 0, 0)},
                 arms(-40, -50, -8))
@@ -221,6 +224,11 @@ CLIPS = [  # 名稱, 關鍵影格, 是否循環
     ("enter_car", enter_keys, False),
     ("drive", lambda: [(0, drive0()), (30, drive1()), (60, drive0())], True),
 ]
+# 貼地校正的關鍵影格（全身最低點 = 地面）：騰空 / 坐進車內的格不校正
+GROUND = {"idle": ("all", "lock"), "walk": ("all", "lock"), "punch": ("all", "lock"), "hit": ("all", "lock"),
+          "idle_pose": ("all", "lock"), "run": ([0, 10, 20], "clamp"), "jump": ([0, 6, 26, 32], "clamp"),
+          "knockdown": ([0, 5, 20, 26, 36], "clamp"), "getup": ("all", "lock"),
+          "enter_car": ([0, 8, 16, 25], "clamp", 25)}
 PREVIEW_FRAMES = {"idle": [0, 30], "walk": [0, 8, 16], "run": [0, 5, 10], "jump": [6, 17, 26],
                   "punch": [4, 7, 13], "hit": [3, 8], "knockdown": [5, 13, 36], "getup": [10, 20, 32],
                   "enter_car": [8, 25, 33], "drive": [0, 30]}
@@ -340,7 +348,7 @@ def clip_previews(ch, cam, out_dir, tag):
 def build_variant(v):
     ch = C.build_character(v)
     for name, keys, loop in CLIPS:
-        C.make_action(ch, name, keys(), loop)
+        C.make_action(ch, name, keys(), loop, ground=GROUND.get(name))
     glb = os.path.join(GLB_DIR, f"{v['slug']}.glb")
     blend = os.path.join(BLEND_DIR, f"{v['slug']}.blend")
     os.makedirs(GLB_DIR, exist_ok=True)
@@ -392,7 +400,7 @@ def main():
                       "colors": v["colors"]} for v in VARIANTS],
         "events": {"punch": {"hitWindow": [round(5 / C.FPS, 3), round(10 / C.FPS, 3)], "hand": "RightHand"}},
         "poses": {
-            "knockdownEndHips": [0, 0.115, -0.25],
+            "knockdownEndHips": [0, 0.115, -0.25],   # 各變體相同（倒地高度不隨身高變）
             "driveHips": [0, DRIVE_HIP_H, 0],
         },
         "notes": ("原點＝兩腳底中心、地面；面向 glTF +Z、+Y 上；身高 1.75 m。三個變體共用同一副骨架（19 根骨頭、"
@@ -401,7 +409,14 @@ def main():
                   "drive 與 enter_car 最後一格為坐姿：Hips 關節在原點上方 0.30 m，程式放置時令 角色原點 ＝ 車輛 seat 點 − (0, 0.30, 0)。"
                   "punch 右拳命中窗 hitWindow（秒）。材質槽名稱固定，執行期可依名稱換色（眼睛 / 眉毛共用 hair 材質）。"),
     }
-    with open(os.path.join(GLB_DIR, "manifest.json"), "w", encoding="utf-8") as f:
+    mpath = os.path.join(GLB_DIR, "manifest.json")
+    if os.path.exists(mpath):   # 保留主角（hero.py 寫入的 role=player 變體與額外 clip）
+        with open(mpath, encoding="utf-8") as f:
+            old = json.load(f)
+        manifest["variants"] += [x for x in old.get("variants", []) if x.get("role") == "player"]
+        if "extraClips" in old:
+            manifest["extraClips"] = old["extraClips"]
+    with open(mpath, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
         f.write("\n")
     print("CHARACTERS_DONE", json.dumps({k: [r["tris"], r["bytes"]] for k, r in results.items()}))

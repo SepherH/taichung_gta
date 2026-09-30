@@ -86,7 +86,7 @@
       "name": "行人 A（短髮男性、標準體型）",
       "file": "pedestrian.glb",
       "height": 1.75,
-      "bytes": 255516,
+      "bytes": 255764,
       "triangles": 2212,
       "colors": {
         "skin": "#D6A27C",
@@ -101,7 +101,7 @@
       "name": "行人 B（及肩短髮 + 馬尾女性、纖細體型）",
       "file": "pedestrian_f.glb",
       "height": 1.75,
-      "bytes": 257884,
+      "bytes": 258132,
       "triangles": 2292,
       "colors": {
         "skin": "#E3B393",
@@ -116,7 +116,7 @@
       "name": "行人 C（平頭、壯碩體型）",
       "file": "pedestrian_heavy.glb",
       "height": 1.75,
-      "bytes": 255540,
+      "bytes": 255788,
       "triangles": 2212,
       "colors": {
         "skin": "#C68E68",
@@ -125,6 +125,49 @@
         "hair": "#141210",
         "shoes": "#3A3A3A"
       }
+    },
+    {
+      "id": "hero",
+      "name": "主角",
+      "role": "player",
+      "file": "hero.glb",
+      "height": 1.86,
+      "bytes": 662272,
+      "triangles": 11841,
+      "colors": {
+        "skin": "#EDBFA8",
+        "shirt": "#56606B",
+        "shirt_stripe": "#1D1F23",
+        "pants": "#9DB4CC",
+        "hair": "#3A2A20",
+        "shoes": "#141414"
+      },
+      "randomColors": false,
+      "extraClips": [
+        "idle_pose"
+      ],
+      "materials": [
+        "skin",
+        "shirt",
+        "pants",
+        "shoes",
+        "shirt_stripe",
+        "hair",
+        "face"
+      ],
+      "poses": {
+        "driveHips": [
+          0,
+          0.3,
+          0
+        ],
+        "knockdownEndHips": [
+          0,
+          0.115,
+          -0.25
+        ]
+      },
+      "notes": "依用戶提供的全身照打扮建模（照片不入 repo，臉部貼圖只含裁切後臉部）。身高 1.86 m；骨名 / 階層 / 朝向與行人相同，關節高度依比例不同（頭部同尺寸、增高在腿與軀幹），請用本檔自帶的 clip。材質 face 為臉部貼圖（羽化外圈＝skin 色）、pants 帶程序刷色貼圖、shirt_stripe 為上衣黑色橫條（也用於袖口 / 鞋底 / 帽兜開口暗部）；預設不換色。idle_pose＝本人右手插腰招牌待機（循環）。"
     }
   ],
   "events": {
@@ -148,5 +191,15 @@
       0
     ]
   },
-  "notes": "原點＝兩腳底中心、地面；面向 glTF +Z、+Y 上；身高 1.75 m。三個變體共用同一副骨架（19 根骨頭、關節位置相同）與同一組動作，動作可跨檔共用（依骨頭名稱綁定）。動作皆原地，只有 Hips 有平移。knockdown 最後一格＝getup 第一格（仰躺，Hips 關節在 glTF (0, 0.115, -0.25)，頭朝 −Z、腳朝 +Z）。drive 與 enter_car 最後一格為坐姿：Hips 關節在原點上方 0.30 m，程式放置時令 角色原點 ＝ 車輛 seat 點 − (0, 0.30, 0)。punch 右拳命中窗 hitWindow（秒）。材質槽名稱固定，執行期可依名稱換色（眼睛 / 眉毛共用 hair 材質）。"
+  "notes": "原點＝兩腳底中心、地面；面向 glTF +Z、+Y 上；身高 1.75 m。三個變體共用同一副骨架（19 根骨頭、關節位置相同）與同一組動作，動作可跨檔共用（依骨頭名稱綁定）。動作皆原地，只有 Hips 有平移。knockdown 最後一格＝getup 第一格（仰躺，Hips 關節在 glTF (0, 0.115, -0.25)，頭朝 −Z、腳朝 +Z）。drive 與 enter_car 最後一格為坐姿：Hips 關節在原點上方 0.30 m，程式放置時令 角色原點 ＝ 車輛 seat 點 − (0, 0.30, 0)。punch 右拳命中窗 hitWindow（秒）。材質槽名稱固定，執行期可依名稱換色（眼睛 / 眉毛共用 hair 材質）。",
+  "extraClips": [
+    {
+      "name": "idle_pose",
+      "duration": 3.0,
+      "loop": true,
+      "variants": [
+        "hero"
+      ]
+    }
+  ]
 }

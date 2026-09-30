@@ -89,6 +89,16 @@ manifest 的 `id` 是字串、`footprint` 為 false；原點高度假設寫在�
 blender -b -P tools/blender/characters/build_characters.py
 ```
 
+## 主角（hero）
+
+`tools/blender/characters/hero.py` → `public/models/characters/hero.glb`、`assets/blender/characters/hero.blend`，manifest 中 `role: "player"`、`height: 1.86`。
+依用戶提供的照片打扮建模：深灰 / 黑寬橫條紋連帽上衣（七分袖外擴袖口、V 領滾邊、兩條帽繩、帽兜垂在背後）、淺藍直筒牛仔褲（程序刷色貼圖 `hero_jeans.jpg`：大腿正面較淺、側縫、褲腳堆疊摺痕）、黑鞋（鞋面 + 外凸鞋底兩層）、中分及肩直髮（多片髮束、髮尾外翹、額頭中央露出）、分指手掌（拇指分離、四指兩節）。約 1.18 萬三角面（行人的 2 倍以上）。
+臉部用 `assets/blender/characters/hero_face.jpg`（照片裁臉 → 本機 qwen-edit 清晰化 → 雙眼水平、鼻樑置中 → 低頻膚色拉平 → 橢圓羽化到膚色；**原始照片不入 repo**）以正面投影貼在網格頭（鼻 / 眼窩 / 唇 / 下巴起伏）上，材質名 `face`；羽化外圈顏色＝`skin` 材質色（`#EDBFA8`），側面與耳後為膚色，無接縫。換臉圖後要把新的外圈膚色同步寫回 `hero.py` 的 `COLORS["skin"]`，對位常數為 `V_EYE` / `TEX_SU` / `TEX_SV`。
+上衣黑條為 `shirt_stripe`（也用於袖口內側、鞋底、帽兜開口與褲管封口暗部）。
+骨名 / 階層 / 朝向與行人相同，但關節高度依 1.86 m 比例重排（頭部同尺寸、增高在腿與軀幹），所以**主角請用 hero.glb 自帶的 clip**；
+另有循環 clip `idle_pose`（本人右手插腰招牌待機，3.0 秒）。改比例改 `C.set_proportions([...])` 的高度對照表；各動作腳底貼地由 `build_characters.py` 的 `GROUND` 表自動校正。
+設 `CHAR_PREVIEW_SCRATCH=<目錄>` 執行時會另外輸出全 clip 蒙皮檢查拼圖 `hero-clips.png`（不入 repo）。
+
 # 車輛
 
 | 檔案 | 用途 |
