@@ -19,6 +19,8 @@ import math
 import os
 from mathutils import Vector
 
+import blendsafe
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OSM_FILE = os.path.join(REPO, "data", "osm", "qiqi-raw-v2.json")   # Phase 2：範圍擴大到七期精華區（含市政府）
 BLEND_DIR = os.path.join(REPO, "assets", "blender")
@@ -568,12 +570,11 @@ def finish(ctx, height, height_source, notes, street_dir, street=None, aerial=No
         _look(cam, target)
         cam.data.lens = 22 if key == "street" else 30
         cam.data.clip_end = 5000
-        bpy.context.scene.render.filepath = os.path.join(PREVIEW_DIR, f"{ctx.slug}-{key}.png")
-        bpy.ops.render.render(write_still=True)
+        blendsafe.render_png(os.path.join(PREVIEW_DIR, f"{ctx.slug}-{key}.png"))
     cam.location, _ = views["aerial"]
     _look(cam, views["aerial"][1])
 
-    bpy.ops.wm.save_as_mainfile(filepath=blend, compress=True)
+    blendsafe.save_blend(blend)
 
     entry = {
         "id": ctx.way_id, "name": ctx.name, "file": f"{ctx.slug}.glb",

@@ -16,7 +16,11 @@ import bpy
 import bmesh
 import math
 import os
+import sys
 from mathutils import Euler, Matrix, Quaternion, Vector
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import blendsafe  # noqa: E402
 
 FPS = 30
 MAT_SLOTS = ["skin", "shirt", "pants", "hair", "shoes"]
@@ -559,4 +563,4 @@ def export(ch, glb, blend):
         export_optimize_animation_size=True, export_skins=True, export_def_bones=True,
         export_cameras=False, export_lights=False, export_frame_range=False)
     os.makedirs(os.path.dirname(blend), exist_ok=True)
-    bpy.ops.wm.save_as_mainfile(filepath=blend, compress=True)
+    blendsafe.save_blend(blend)

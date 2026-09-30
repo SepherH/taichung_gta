@@ -16,7 +16,11 @@ import json
 import math
 import os
 import struct
+import sys
 from mathutils import Matrix, Vector
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import blendsafe  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 GLB_DIR = os.path.join(REPO, "public", "models", "vehicles")
@@ -338,7 +342,7 @@ class Vehicle:
         entry["triangles"] = tris
         entry["bytes"] = os.path.getsize(glb)
         self._previews(views)
-        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(BLEND_DIR, f"{self.slug}.blend"), compress=True)
+        blendsafe.save_blend(os.path.join(BLEND_DIR, f"{self.slug}.blend"))
         print(f"VEHICLE {self.slug} tris={tris} glb_bytes={entry['bytes']} dims={[round(d, 3) for d in dims]}")
         return entry
 
@@ -378,8 +382,7 @@ class Vehicle:
             cam.rotation_euler = (Vector(target) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
             cam.data.lens = lens
             out = os.path.join(PREVIEW_DIR, f"vehicle-{self.slug}-{key}.png")
-            scene.render.filepath = out
-            bpy.ops.render.render(write_still=True)
+            blendsafe.render_png(out, scene)
 
 
 def glb_nodes(path):

@@ -1,6 +1,6 @@
 # 臺中GTA 美術素材表（M1）
 
-產出工具：imgen-local（本機 ComfyUI），模板一律 `qwen21`。原始 PNG 保留於 `~/Library/Logs/claude-start/imgen/`（檔名前綴見「來源」欄）。
+產出工具：本機生圖工具（模型 `qwen21`）。由本機生圖工具產出的原圖未入 repo（檔名前綴見「來源」欄）。
 轉檔：`sips -s format jpeg`（品質 58–72），單檔 ≤300KB，整包 1912KB。
 
 | 檔名 | 用途（貼在遊戲哪裡） | 尺寸 | 大小 | 模板 | seed | 來源 PNG 前綴 |

@@ -122,7 +122,7 @@ blender -b -P tools/blender/vehicles/build_vehicles.py
 
 # 可平鋪貼圖（public/art/tiles/）
 
-由 `tools/blender/tiles/build_tiles.py` 產生：imgen-local 產出的材質底圖（原圖在 `~/Library/Logs/claude-start/imgen/`，未入 repo）
+由 `tools/blender/tiles/build_tiles.py` 產生：由本機生圖工具產出的材質底圖（原圖未入 repo；重建時以環境變數 `TILE_SRC_DIR` 指定原圖目錄，缺檔改純程序生成）
 先去掉大範圍明暗、四邊交叉淡化成無縫，再用程式疊上地磚 / 石材接縫與帷幕框（接縫以 512 px 為週期，保證四邊連續）。
 清單、用途與建議重複尺度見 `docs/art/ASSETS.md`「可平鋪貼圖」。重建：
 

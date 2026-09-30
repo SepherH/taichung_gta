@@ -538,7 +538,7 @@ def build():
     C.export(ch, glb, blend)
     info = BC.glb_info(glb)
     previews(ch)
-    bpy.ops.wm.save_as_mainfile(filepath=blend, compress=True)
+    C.blendsafe.save_blend(blend)
     ground = foot_check(ch)
     update_manifest(info)
     print(f"HERO tris={info['tris']} glb_bytes={info['bytes']} joints={info['joints']} anims={info['anims']} "

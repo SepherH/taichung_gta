@@ -1,7 +1,8 @@
 """A4 可平鋪貼圖：imgen-local 底圖 → 去低頻、四邊無縫化 → 疊程序接縫（地磚 / 石材分割 / 帷幕框）→ 512 JPG。
 
 執行：blender -b -P tools/blender/tiles/build_tiles.py
-輸入：imgen-local 原圖（$CC_LOG_DIR/imgen/tcgta_tile_<名>_00001_.png，未入 repo；缺檔的項目改用純程序生成）
+輸入：由本機生圖工具產出的原圖（未入 repo），放在環境變數 TILE_SRC_DIR 指定的目錄，檔名 tcgta_tile_<名>_00001_.png；
+      未設時讀 repo 內 var/tile_src/（不存在也無妨），缺檔的項目改用純程序生成
 輸出：public/art/tiles/<名>.jpg（經 sips 轉 JPEG）、TILES_CHECK 環境變數指定目錄時另出 2x2 拼接檢查圖
 接縫原則：所有程序圖樣（格線 / 雜訊）都以 512 為週期，隨機雜訊用環狀（wrap）模糊，四邊天生連續。
 """
@@ -13,7 +14,7 @@ import numpy as np
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 OUT = os.path.join(REPO, "public", "art", "tiles")
-SRC = os.path.join(os.environ.get("CC_LOG_DIR", os.path.expanduser("~/Library/Logs/claude-start")), "imgen")
+SRC = os.environ.get("TILE_SRC_DIR") or os.path.join(REPO, "var", "tile_src")
 CHECK = os.environ.get("TILES_CHECK", "")
 N = 512
 rng = np.random.default_rng(20260930)

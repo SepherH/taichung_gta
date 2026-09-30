@@ -8,6 +8,7 @@
 import json
 import math
 import os
+import tempfile
 import struct
 import sys
 
@@ -20,7 +21,8 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")
 GLB_DIR = os.path.join(REPO, "public", "models", "characters")
 BLEND_DIR = os.path.join(REPO, "assets", "blender", "characters")
 PREVIEW_DIR = os.path.join(REPO, "docs", "models", "previews")
-SCRATCH = os.environ.get("CHAR_PREVIEW_SCRATCH", "")   # 有設才輸出大張驗收圖
+SCRATCH = os.environ.get("CHAR_PREVIEW_SCRATCH", "")
+TMP = SCRATCH or tempfile.mkdtemp(prefix="tcgta_chars_")   # 立繪 / clip 暫存（跨變體保留到拼圖完成）   # 有設才輸出大張驗收圖
 
 BASE_G = dict(arm=1.28, leg=1.12, hand=1.2, torso=1.0, hip=1.0, chest=1.0, belly=1.0, shoulder=1.0,
               neck=1.0, shoe=1.0, sleeve=0.45, delt_in=0.0)
@@ -295,8 +297,7 @@ def render_to(path, w, h):
     sc = bpy.context.scene
     sc.render.resolution_x, sc.render.resolution_y = w, h
     sc.render.resolution_percentage = 100
-    sc.render.filepath = path
-    bpy.ops.render.render(write_still=True)
+    C.blendsafe.render_png(path, sc)
 
 
 def sheet(cells, cols, cw, chh, out):
@@ -360,12 +361,12 @@ def build_variant(v):
     arm.animation_data.action = bpy.data.actions["idle"]
     bpy.context.scene.frame_set(0)
     look(cam, (1.5, -3.6, 1.2), (0, 0, 0.88))
-    tmp = SCRATCH or bpy.app.tempdir
+    tmp = TMP
     stand = os.path.join(tmp, f"{v['slug']}-stand.png")
     render_to(stand, 256, 420)
     arm.animation_data.action = None
     cells = clip_previews(ch, cam, tmp, v["slug"]) if (SCRATCH or v["slug"] == "pedestrian") else []
-    bpy.ops.wm.save_as_mainfile(filepath=blend, compress=True)
+    C.blendsafe.save_blend(blend)
     print(f"CHARACTER {v['slug']} tris={info['tris']} glb_bytes={info['bytes']} joints={info['joints']} "
           f"anims={info['anims']} mats={info['mats']}")
     return info, stand, cells
@@ -381,8 +382,8 @@ def main():
         if cells:
             n = len(cells)
             half = 13
-            sheet(cells[:half], 5, 300, 360, os.path.join(SCRATCH or bpy.app.tempdir, f"{v['slug']}-clips-a.png"))
-            sheet(cells[half:], 5, 300, 360, os.path.join(SCRATCH or bpy.app.tempdir, f"{v['slug']}-clips-b.png"))
+            sheet(cells[:half], 5, 300, 360, os.path.join(TMP, f"{v['slug']}-clips-a.png"))
+            sheet(cells[half:], 5, 300, 360, os.path.join(TMP, f"{v['slug']}-clips-b.png"))
             if v["slug"] == "pedestrian":
                 full = os.path.join(PREVIEW_DIR, "characters-clips.png")
                 sheet(cells, 7, 300, 360, full)
