@@ -225,6 +225,7 @@ export class Input {
   }
 
   // ---------- 本幀輸入快照（不清除累積量；清除仍用 consumeMouse / endFrame） ----------
+  // 欄位依契約 §4.4 + §12：down 含 aim / attack（手槍按住連發）；pressed 含武器直選 slot1–3、weaponCycle、reload
   snapshot() {
     const a = this.actions;
     return {
@@ -235,6 +236,7 @@ export class Input {
         sprint: a.down('sprint'),
         jump: a.down('jump'),
         attack: a.down('attack'),
+        aim: a.down('aim'),
         lookBack: a.down('lookBack'),
       },
       pressed: {
@@ -247,6 +249,11 @@ export class Input {
         map: a.pressed('map'),
         pause: a.pressed('pause'),
         timeSkip: a.pressed('timeSkip'),
+        weaponCycle: a.pressed('weaponCycle'),
+        slot1: a.pressed('slot1'),
+        slot2: a.pressed('slot2'),
+        slot3: a.pressed('slot3'),
+        reload: a.pressed('reload'),
       },
     };
   }

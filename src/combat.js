@@ -16,9 +16,20 @@
 // 狀態（stateOf）：normal / hit（受擊硬直）/ knockdown（倒地）/ getup（起身中）/ dead（已發 dead 事件，等呼叫端回收）
 // 計時一律用注入的 now()（秒），update(dt) 的 dt 只作介面相容，方便暫停時由 now 決定是否前進
 // 事件：on('hit' | 'knockdown' | 'getup' | 'dead', cb)，回傳取消訂閱函式
-//   'knockdown' payload：{ target, impulse, cause: 'punch'|'vehicle', attacker（拳擊 = 出拳者；車撞 = 駕駛 actor 或 null）,
+//   'knockdown' payload：{ target, impulse, cause: 'punch'|'bat'|'bullet'|'vehicle'（knockdownActor 可自訂）, weapon, attacker（拳擊 = 出拳者；車撞 = 駕駛 actor 或 null）,
 //     byPlayer（attacker 為玩家）, x, z（倒地點）, damage, vehicle?, relSpeed? }；整合層以 pedKnockdownPayload 轉成契約 §1 ped:knockdown
 // 車撞的駕駛：onVehicleHit 的 driver 參數優先，否則用建構時注入的 vehicleDriver(vehicle) → actor | null（例：玩家駕駛的車回傳玩家 actor）
+// Phase 4（契約 §13）：
+//   applyHit({ attacker, target, damage, weapon: 'fist'|'bat'|'pistol', dir:{x,z}, impulse?, point?, swingId? }) → 結果物件 | null
+//     通用受擊入口（球棒 / 手槍由 weapons 呼叫；拳擊命中窗內部也走同一條）：扣血、連擊計數、hit / knockdown、hitStop、
+//     emit 'hit'（含 weapon、side、x,y,z、dirX,dirZ、byPlayer、knockdown）；倒地 / 起身 / dead 中、untargetable 者回 null
+//     swingId：同一揮（或同一發）的編號（newSwingId() 取得），同一 swingId 對同一目標只計傷一次
+//     擊倒門檻（KNOCKDOWN_RULES）：fist 4 s 內 3 下、bat 4 s 內 2 下、pistol 1.5 s 內 2 發；任何武器 hp 歸零即倒
+//     recoverOnKo 對 fist / bat 生效（hp 歸零只倒地、起身回滿）；pistol 與車撞一樣進 dying → DEAD_HOLD 後 dead
+//   knockdownActor(actor, { cause, impulse, attacker, emit }) → boolean：外部直接讓角色倒地（機車摔落、被拖出的司機），
+//     取代直接改 entries；emit 預設 false（不發 'knockdown'，同舊做法）；impulse 省略時不呼叫 body.knockdown
+//   'hit' 的 side：目標面向 ·（攻擊者 → 目標方向）> 0 = 被從背後打 → 'back'，否則 'front'；受擊動畫 anim.trigger('hit', { side })
+//   'knockdown' payload cause 擴充 'bat' | 'bullet'，另帶 weapon
 
 export const PUNCH_DAMAGE = 20; // 每拳傷害：滿血 100 需 5 拳，但 4 秒內連中 3 拳就先倒地
 export const PUNCH_COOLDOWN = 0.55; // 出拳冷卻（秒）：約等於一拳動畫長度，連按不會變機關槍
@@ -50,6 +61,19 @@ export const GETUP_MIN_DOWN = 1.5; // 倒地至少多久才可起身（秒）：
 // 動畫沒發事件（例如 anim 被別的 trigger 打斷）時最多等這麼久就強制回 normal
 export const GETUP_TIMEOUT = 3;
 export const DEAD_HOLD = 10; // hp 歸零後維持倒地多久發 'dead'（秒），由呼叫端回收
+// 各武器的擊倒門檻：window 秒內（含本次）累積 hits 次同武器命中即倒地；fist 沿用 COMBO_HITS / COMBO_WINDOW
+export const KNOCKDOWN_RULES = {
+  fist: { hits: COMBO_HITS, window: COMBO_WINDOW },
+  bat: { hits: 2, window: COMBO_WINDOW },
+  pistol: { hits: 2, window: 1.5 },
+};
+// 武器 → knockdown 事件的 cause
+export const WEAPON_CAUSE = { fist: 'punch', bat: 'bat', pistol: 'bullet' };
+// 各武器受擊擊退位移（m）與擊倒水平衝量（N·s，手感設定：推測值）
+export const WEAPON_KNOCKBACK = { fist: KNOCKBACK_DIST, bat: 0.8, pistol: 0.25 };
+export const WEAPON_KNOCKDOWN_IMPULSE = { fist: PUNCH_KNOCKDOWN_IMPULSE, bat: 170, pistol: 90 };
+// 受擊點高度（m，腳底往上）：hit 事件沒有給 point 時的 y
+export const HIT_POINT_HEIGHT = 1.2;
 
 // 這些動畫狀態下不能出拳（hit 不在內：受擊硬直以 combat 狀態 'hit'（HIT_STUN）為準，硬直結束即可出拳打斷受擊動作）
 const NO_PUNCH_ANIM = new Set(['knockdown', 'getup', 'enter_car', 'drive']);
@@ -87,7 +111,12 @@ export function assistRange(attacker, target) {
 // combat 'knockdown' 事件 → 契約 §1 ped:knockdown payload（玩家本身倒地回 null，由整合層另發 player:ko）
 export function pedKnockdownPayload(e) {
   if (!e || !e.target || e.target.kind === 'player') return null;
-  return { ped: e.target, cause: e.cause, byPlayer: !!e.byPlayer, x: e.x, z: e.z };
+  return { ped: e.target, cause: e.cause, weapon: e.weapon || null, byPlayer: !!e.byPlayer, x: e.x, z: e.z };
+}
+
+// 受擊方向判定（純函式）：目標面向 · 攻擊方向（攻擊者 → 目標）> 0 = 從背後打
+export function hitSide(targetYaw, dirX, dirZ) {
+  return Math.sin(targetYaw || 0) * dirX + Math.cos(targetYaw || 0) * dirZ > 1e-9 ? 'back' : 'front';
 }
 
 // anim 的 punchHitWindow 參數容許 'open' / 'close' 字串或 { phase } / { type } 物件
@@ -104,6 +133,13 @@ export class CombatSystem {
     this.entries = new Map(); // actor.id → entry
     this.listeners = { hit: [], knockdown: [], getup: [], dead: [] };
     this.punchSeq = 0;
+    this.swingHits = new Map(); // 攻擊者 id → { id: swingId, ids: Set }（applyHit 的 swingId 去重）
+    this._hitArg = { side: 'front' }; // anim.trigger('hit', …) 的參數（重用）
+  }
+
+  // 新的一揮 / 一發的編號（與拳擊共用序號，不會撞號）
+  newSwingId() {
+    return ++this.punchSeq;
   }
 
   on(evt, cb) {
@@ -132,6 +168,7 @@ export class CombatSystem {
       windowUsed: false, // 目前這一拳的命中窗已開過（動畫重複開窗時換新編號）
       hitIds: new Set(), // 目前這一拳已命中的目標 id（以 punchId 去重）
       hitTimes: [], // 連擊計數用的受擊時間
+      hitKinds: [], // 與 hitTimes 平行：每次受擊的武器（擊倒門檻依武器分開計）
       dying: false, // hp 歸零：倒地後不起身，DEAD_HOLD 後發 dead
       vehicleHits: new Map(), // vehicle → 上次碰撞時間（去重）
       unsubs: [],
@@ -149,6 +186,7 @@ export class CombatSystem {
     if (!e) return;
     for (const off of e.unsubs) off();
     this.entries.delete(actor.id);
+    this.swingHits.delete(actor.id);
   }
 
   stateOf(actor) {
@@ -171,6 +209,7 @@ export class CombatSystem {
     actor.hp = actor.maxHp;
     e.dying = false;
     e.hitTimes.length = 0;
+    e.hitKinds.length = 0;
     if (e.state === 'knockdown' || e.state === 'dead') {
       e.state = 'knockdown';
       e.stateAt = t - GETUP_MIN_DOWN;
@@ -241,16 +280,16 @@ export class CombatSystem {
       e.stateAt = t;
     } else {
       const attacker = driver || (vehicle && this.vehicleDriver ? this.vehicleDriver(vehicle) || null : null);
-      this._knockdown(e, impulse, t, { cause: 'vehicle', attacker, vehicle, relSpeed, damage });
+      this._knockdown(e, impulse, t, { cause: 'vehicle', weapon: 'vehicle', attacker, vehicle, relSpeed, damage });
     }
     return true;
   }
 
-  // cause：'punch' | 'vehicle'；recoverOnKo 的角色被拳擊打到 hp 歸零不進 dying（倒地後照常起身）
+  // cause：'punch' | 'bat' | 'bullet' | 'vehicle'；recoverOnKo 的角色被拳擊 / 棒擊打到 hp 歸零不進 dying（倒地後照常起身）
   _damage(e, damage, t, cause) {
     const a = e.actor;
     a.hp = Math.max(0, a.hp - damage);
-    if (a.hp <= 0 && !e.dying && !(a.recoverOnKo && cause === 'punch')) {
+    if (a.hp <= 0 && !e.dying && !(a.recoverOnKo && (cause === 'punch' || cause === 'bat'))) {
       e.dying = true;
       e.dyingAt = t;
     }
@@ -261,49 +300,127 @@ export class CombatSystem {
     e.stateAt = t;
     e.windowOpen = false;
     e.hitTimes.length = 0;
-    e.actor.body.knockdown(impulse);
+    e.hitKinds.length = 0;
+    if (impulse) e.actor.body.knockdown(impulse);
     e.actor.anim.trigger('knockdown');
     const a = e.actor;
     const attacker = info.attacker || null;
     this._emit('knockdown', { target: a, impulse, ...info, attacker, byPlayer: !!attacker && attacker.kind === 'player', x: a.pos.x, z: a.pos.z });
   }
 
+  // 拳擊命中窗命中：走通用受擊流程（行為同 Phase 3：20 傷害、4 s 內 3 拳倒地、擊退 0.6 m）
   _applyPunch(att, e, t) {
     const a = att.actor;
     const target = e.actor;
-    this._damage(e, PUNCH_DAMAGE, t, 'punch');
+    this._hit(att, e, t, a, PUNCH_DAMAGE, 'fist', target.pos.x - a.pos.x, target.pos.z - a.pos.z, null, null, att.punchId);
+  }
+
+  // 通用受擊入口（契約 §13）：回傳 { damage, hp, side, knockdown } 或 null（未註冊 / 倒地中 / 不可受擊 / 同一揮已命中）
+  applyHit({ attacker = null, target, damage, weapon = 'fist', dir = null, impulse = null, point = null, swingId = null } = {}) {
+    const e = target && this.entries.get(target.id);
+    if (!e || (e.state !== 'normal' && e.state !== 'hit') || target.untargetable) return null;
+    if (!(damage >= 0) || !KNOCKDOWN_RULES[weapon]) return null;
+    if (swingId !== null && attacker) {
+      let rec = this.swingHits.get(attacker.id);
+      if (!rec) this.swingHits.set(attacker.id, (rec = { id: null, ids: new Set() }));
+      if (rec.id !== swingId) {
+        rec.id = swingId;
+        rec.ids.clear();
+      }
+      if (rec.ids.has(target.id)) return null;
+      rec.ids.add(target.id);
+    }
+    const att = attacker ? this.entries.get(attacker.id) || null : null;
+    let dx = dir ? dir.x : 0;
+    let dz = dir ? dir.z : 0;
+    if (!(Math.hypot(dx, dz) > 1e-6) && attacker) {
+      dx = target.pos.x - attacker.pos.x;
+      dz = target.pos.z - attacker.pos.z;
+    }
+    const knock = this._hit(att, e, this.now(), attacker, damage, weapon, dx, dz, impulse, point, swingId);
+    return { damage, hp: target.hp, side: this._lastSide, knockdown: knock };
+  }
+
+  // 受擊共用流程：(dx, dz) 為攻擊方向（攻擊者 → 目標，未正規化）；att 為攻擊者的 entry（可為 null）；回傳是否擊倒
+  _hit(att, e, t, a, damage, weapon, dx, dz, impulse, point, swingId) {
+    const target = e.actor;
+    const cause = WEAPON_CAUSE[weapon];
+    this._damage(e, damage, t, cause);
     const hitTimes = e.hitTimes;
+    const kinds = e.hitKinds;
     hitTimes.push(t);
-    while (hitTimes.length && t - hitTimes[0] > COMBO_WINDOW) hitTimes.shift();
-    let dx = target.pos.x - a.pos.x;
-    let dz = target.pos.z - a.pos.z;
+    kinds.push(weapon);
+    while (hitTimes.length && t - hitTimes[0] > COMBO_WINDOW) {
+      hitTimes.shift();
+      kinds.shift();
+    }
+    const rule = KNOCKDOWN_RULES[weapon];
+    let combo = 0;
+    for (let i = hitTimes.length - 1; i >= 0 && t - hitTimes[i] <= rule.window; i--) if (kinds[i] === weapon) combo++;
     let d = Math.hypot(dx, dz);
     if (d < 1e-6) {
-      dx = Math.sin(a.yaw);
-      dz = Math.cos(a.yaw);
+      const yaw = a ? a.yaw : target.yaw + Math.PI;
+      dx = Math.sin(yaw);
+      dz = Math.cos(yaw);
       d = 1;
     }
     dx /= d;
     dz /= d;
+    const side = (this._lastSide = hitSide(target.yaw, dx, dz));
+    const knock = e.dying || target.hp <= 0 || combo >= rule.hits;
+    const kb = WEAPON_KNOCKBACK[weapon];
+    const byPlayer = !!a && a.kind === 'player';
     this._emit('hit', {
       attacker: a,
       target,
-      damage: PUNCH_DAMAGE,
+      weapon,
+      damage,
       hp: target.hp,
-      punchId: att.punchId,
-      knockback: { x: dx * KNOCKBACK_DIST, y: 0, z: dz * KNOCKBACK_DIST },
+      punchId: swingId,
+      knockback: { x: dx * kb, y: 0, z: dz * kb },
+      x: point ? point.x : target.pos.x,
+      y: point ? point.y : target.pos.y + HIT_POINT_HEIGHT,
+      z: point ? point.z : target.pos.z,
+      dirX: dx,
+      dirZ: dz,
+      side,
+      byPlayer,
+      knockdown: knock,
     });
-    if (a.anim.hitStop) a.anim.hitStop(HIT_STOP);
+    if (a && a.anim && a.anim.hitStop) a.anim.hitStop(HIT_STOP);
     if (target.anim.hitStop) target.anim.hitStop(HIT_STOP);
-    if (e.dying || target.hp <= 0 || hitTimes.length >= COMBO_HITS) {
-      const imp = PUNCH_KNOCKDOWN_IMPULSE;
-      this._knockdown(e, { x: dx * imp, y: imp * PUNCH_KNOCKDOWN_LIFT, z: dz * imp }, t, { cause: 'punch', attacker: a, damage: PUNCH_DAMAGE });
+    if (knock) {
+      const imp = WEAPON_KNOCKDOWN_IMPULSE[weapon];
+      const im = impulse || { x: dx * imp, y: imp * PUNCH_KNOCKDOWN_LIFT, z: dz * imp };
+      this._knockdown(e, im, t, { cause, weapon, attacker: a, damage });
     } else {
       e.state = 'hit';
       e.stateAt = t;
       e.windowOpen = false; // 被打斷的拳不再計傷
-      target.anim.trigger('hit');
+      this._hitArg.side = side;
+      target.anim.trigger('hit', this._hitArg);
     }
+    return knock;
+  }
+
+  // 外部直接讓角色倒地（契約 §13；取代直接改 entries）：已倒地 / dead / 未註冊回 false
+  // cause 預設 'fall'；emit = true 時發 'knockdown'（payload 同一般倒地）；impulse 省略時不呼叫 body.knockdown（剛體由呼叫端處理）
+  knockdownActor(actor, { cause = 'fall', impulse = null, attacker = null, emit = false } = {}) {
+    const e = actor && this.entries.get(actor.id);
+    if (!e || e.state === 'knockdown' || e.state === 'dead') return false;
+    const t = this.now();
+    if (emit) {
+      this._knockdown(e, impulse, t, { cause, weapon: null, attacker, damage: 0 });
+      return true;
+    }
+    e.state = 'knockdown';
+    e.stateAt = t;
+    e.windowOpen = false;
+    e.hitTimes.length = 0;
+    e.hitKinds.length = 0;
+    if (impulse) actor.body.knockdown(impulse);
+    actor.anim.trigger('knockdown');
+    return true;
   }
 
   update(_dt) {

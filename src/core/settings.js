@@ -1,4 +1,4 @@
-// 玩家設定（契約 §2）：畫質、鏡頭靈敏度、反轉 Y、音量、FPS 顯示、提示、UI 縮放
+// 玩家設定（契約 §2 / §11）：畫質、鏡頭靈敏度、反轉 Y、音量、FPS 顯示、提示、UI 縮放、血液顯示、後座力、瞄準輔助
 // 以 JSON 存在 storage 的 SETTINGS_KEY；storage 由呼叫端注入（node 測試用假物件），預設為安全包裝的 localStorage
 // 讀寫全部 try/catch：無痕模式 / 停用儲存 / node 無 window 時只存在記憶體，不丟例外
 // 舊版遷移：SETTINGS_KEY 不存在時讀舊的三段靈敏度（input.js 早期版本存的 'low'/'mid'/'high'）當初值；
@@ -20,6 +20,10 @@ export const SETTINGS_SCHEMA = {
   showFps: { type: 'boolean', default: false, label: '顯示 FPS' },
   showHints: { type: 'boolean', default: true, label: '顯示操作提示' },
   uiScale: { type: 'number', min: 0.8, max: 1.3, step: 0.05, default: 1.0, label: '介面縮放' },
+  // Phase 4（§11）
+  showBlood: { type: 'boolean', default: true, label: '顯示血液' },
+  recoil: { type: 'number', min: 0.2, max: 1.0, step: 0.1, default: 1.0, label: '後座力' },
+  aimAssist: { type: 'boolean', default: true, label: '瞄準輔助' }, // 只作用於觸控
 };
 
 function defaults() {

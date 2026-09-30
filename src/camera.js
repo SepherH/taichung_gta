@@ -15,6 +15,10 @@
 // FOV：步行 WALK_FOV；駕駛依車速 DRIVE_FOV_MIN → DRIVE_FOV_MAX（0 → FOV_SPEED_KMH 線性、平滑）
 // 駕駛自動回正：RECENTER_IDLE 秒無轉視角輸入且前進車速 > RECENTER_MIN_KMH，yaw 以 RECENTER_RATE 轉回車尾（倒車不回正）；
 //   opts.lookBack（按住 C）時看車後方，放開立即回原本 yaw
+// 肩後瞄準（Phase 4，opts.aim，步行持手槍按住瞄準；駕駛時忽略）：距離 AIM_DIST、右肩偏移 AIM_SHOULDER、FOV AIM_FOV，
+//   以 aimBlend（0..1）在 AIM_BLEND_SEC 內線性內插進出；俯仰範圍與非瞄準時相同（不收窄，仰角仍可到 80° 看樓頂）
+// 後座：rig.addRecoil(pitch, yaw)（rad；pitch < 0 = 往上抬）累加到獨立的偏移量，以 RECOIL_TAU 指數衰減回原位；
+//   偏移只影響鏡頭朝向（含準星射線），不改 rig.yaw / rig.pitch 本身（玩家移動方向不受影響）
 // 碰撞震動：rig.shake(trauma)（0–1 累加），振幅 ∝ trauma²，trauma 指數衰減（SHAKE_TAU；約 0.6 s 後振幅 < 2%）
 import * as THREE from 'three';
 import { clamp, angleDelta } from './utils.js';
@@ -61,6 +65,12 @@ const RECENTER_RAMP = 0.3; // 回正速率由 0 漸增到滿速的時間（s）�
 export const SHAKE_TAU = 0.3; // trauma 衰減時間常數（s）：0.6 s 後 trauma ≈ 0.14、振幅 trauma² ≈ 0.02
 const SHAKE_POS = 0.25; // trauma = 1 時的最大位移（m）
 const SHAKE_ROT = 3 * DEG; // trauma = 1 時的最大旋轉（rad）
+export const AIM_DIST = 1.6; // 肩後瞄準距離（m）
+export const AIM_SHOULDER = 0.45; // 肩後瞄準右肩偏移（m）
+export const AIM_FOV = 55; // 肩後瞄準 FOV
+export const AIM_BLEND_SEC = 0.15; // 進出瞄準的內插時間（s）
+export const RECOIL_TAU = 0.12; // 後座偏移衰減時間常數（s）：約 0.5 s 後剩 < 2%
+const RECOIL_MAX = 12 * DEG; // 後座累積偏移上限（rad），連射也不會把鏡頭甩飛
 
 // 步行目標點離腳底高度（m）
 export function walkEyeHeight(playerHeight = DEFAULT_HEIGHT) {
@@ -89,6 +99,9 @@ export class CameraRig {
     this.curShoulder = SHOULDER_OFFSET;
     this.fov = camera.fov;
     this.trauma = 0;
+    this.aimBlend = 0; // 肩後瞄準內插 0..1（HUD 準星收窄可讀）
+    this.recoilPitch = 0; // 後座偏移（rad，衰減回 0）
+    this.recoilYaw = 0;
     this._head = new THREE.Vector3();
     this._target = new THREE.Vector3();
     this._desired = new THREE.Vector3();
@@ -102,6 +115,12 @@ export class CameraRig {
     this.trauma = Math.min(1, this.trauma + trauma);
   }
 
+  // 後座：pitch < 0 往上抬、yaw > 0 往左轉（同滑鼠 dx < 0 的方向）；累加後各自限制在 ±RECOIL_MAX
+  addRecoil(pitch, yaw = 0) {
+    if (Number.isFinite(pitch)) this.recoilPitch = clamp(this.recoilPitch + pitch, -RECOIL_MAX, RECOIL_MAX);
+    if (Number.isFinite(yaw)) this.recoilYaw = clamp(this.recoilYaw + yaw, -RECOIL_MAX, RECOIL_MAX);
+  }
+
   // 目前名目距離（未含遮擋縮短）；opts 同 update
   targetDistance(opts = {}) {
     if (!opts.driving) return this.dist;
@@ -112,7 +131,8 @@ export class CameraRig {
   }
 
   // focus：跟隨目標位置；opts：{ driving, vehicleYaw, speed（m/s，負 = 倒車）, distScale（車種 camScale）, twoWheeler,
-  //   cycleView（本幀按 V）, lookBack（按住 C，駕駛時看車後方）, clearRadius, clearHeight（駕駛時車身水平半徑 / 車頂上方高度）}
+  //   cycleView（本幀按 V）, lookBack（按住 C，駕駛時看車後方）, clearRadius, clearHeight（駕駛時車身水平半徑 / 車頂上方高度）,
+  //   aim（步行肩後瞄準，駕駛時忽略）}
   update(dt, input, focus, opts = {}) {
     this.time += dt;
     const driving = !!opts.driving;
@@ -138,16 +158,31 @@ export class CameraRig {
       const step = RECENTER_RATE * Math.min(1, idle / RECENTER_RAMP) * dt;
       this.yaw += Math.abs(d) <= step ? d : Math.sign(d) * step;
     }
+    // 肩後瞄準內插（線性，AIM_BLEND_SEC 走完）；後座偏移衰減
+    const aimPrev = this.aimBlend;
+    const aimWant = opts.aim && !driving ? 1 : 0;
+    const aimStep = dt / AIM_BLEND_SEC;
+    this.aimBlend = aimWant > aimPrev ? Math.min(aimWant, aimPrev + aimStep) : Math.max(aimWant, aimPrev - aimStep);
+    const ak = this.aimBlend;
+    const aimMoving = ak !== aimPrev;
+    const rk = Math.exp(-dt / RECOIL_TAU);
+    const recoilP = this.recoilPitch;
+    const recoilY = this.recoilYaw;
+    this.recoilPitch = Math.abs(recoilP * rk) < 1e-5 ? 0 : recoilP * rk;
+    this.recoilYaw = Math.abs(recoilY * rk) < 1e-5 ? 0 : recoilY * rk;
+
     const lookBack = driving && !!opts.lookBack;
-    const yaw = (this.viewYaw = lookBack ? (opts.vehicleYaw || 0) + Math.PI : this.yaw);
+    const yaw = (this.viewYaw = lookBack ? (opts.vehicleYaw || 0) + Math.PI : this.yaw + recoilY);
+    const pitch = clamp(this.pitch + recoilP, PITCH_MIN, PITCH_MAX);
 
     // FOV：步行固定、駕駛隨車速線性，平滑逼近
     const fovWant = driving
       ? DRIVE_FOV_MIN + (DRIVE_FOV_MAX - DRIVE_FOV_MIN) * clamp((Math.abs(speed) * KMH) / FOV_SPEED_KMH, 0, 1)
       : WALK_FOV;
     this.fov += (fovWant - this.fov) * Math.min(1, FOV_EASE * dt);
-    if (Math.abs(this.camera.fov - this.fov) > 1e-4) {
-      this.camera.fov = this.fov;
+    const fovOut = this.fov + (AIM_FOV - this.fov) * ak;
+    if (Math.abs(this.camera.fov - fovOut) > 1e-4) {
+      this.camera.fov = fovOut;
       this.camera.updateProjectionMatrix();
     }
 
@@ -157,17 +192,18 @@ export class CameraRig {
     const side = this._side.set(-Math.cos(yaw), 0, Math.sin(yaw)); // 鏡頭右方
     let shoulder = 0;
     if (!driving) {
-      t.addScaledVector(side, SHOULDER_OFFSET);
-      shoulder = SHOULDER_OFFSET * this.collision.sweep(head, t, CAM_RADIUS);
+      const so = SHOULDER_OFFSET + (AIM_SHOULDER - SHOULDER_OFFSET) * ak;
+      t.addScaledVector(side, so);
+      shoulder = so * this.collision.sweep(head, t, CAM_RADIUS);
     }
     // 貼牆縮小立即；上下車（0 ↔ 0.3）與離牆回復平滑
-    if (!driving && shoulder < this.curShoulder) this.curShoulder = shoulder;
+    if (!driving && (shoulder < this.curShoulder || aimMoving)) this.curShoulder = shoulder;
     else this.curShoulder += (shoulder - this.curShoulder) * Math.min(1, SHOULDER_EASE * dt);
     t.copy(head).addScaledVector(side, this.curShoulder);
     const base = this._p.copy(t);
     let raise = 0;
-    if (this.pitch < 0) {
-      raise = LOOK_UP_RAISE * (this.pitch / PITCH_MIN);
+    if (pitch < 0) {
+      raise = LOOK_UP_RAISE * (pitch / PITCH_MIN);
       t.y += raise;
       raise *= this.collision.sweep(base, t, CAM_RADIUS);
     }
@@ -179,9 +215,9 @@ export class CameraRig {
     const dWant = this.targetDistance(opts);
     if (this.nominal === null) this.nominal = dWant;
     else this.nominal += (dWant - this.nominal) * Math.min(1, NOMINAL_EASE * dt);
-    const d = this.nominal;
-    const cp = Math.cos(this.pitch);
-    const sp = Math.sin(this.pitch);
+    const d = this.nominal + (AIM_DIST - this.nominal) * ak;
+    const cp = Math.cos(pitch);
+    const sp = Math.sin(pitch);
     const desired = this._desired.set(
       t.x - Math.sin(yaw) * cp * d,
       t.y + sp * d,
@@ -207,7 +243,8 @@ export class CameraRig {
     }
     // 拉近要立即，拉遠要平滑
     const want = d * frac;
-    if (this.curDist === null || want < this.curDist) this.curDist = want;
+    // 進出瞄準的內插期間距離直接跟隨（want 已含遮擋縮短），才能在 AIM_BLEND_SEC 內到位
+    if (this.curDist === null || want < this.curDist || aimMoving) this.curDist = want;
     else this.curDist += (want - this.curDist) * Math.min(1, DIST_EASE * dt);
     const k = d > 0 ? this.curDist / d : 1;
     this._p.lerpVectors(t, desired, k);

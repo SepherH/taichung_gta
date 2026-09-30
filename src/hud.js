@@ -5,8 +5,13 @@
 // 接線（整合層 main.js）：
 //   const hud = new HUD();                         // 可傳 { storage }（預設安全包裝的 localStorage）
 //   hud.update(dt, state)                           // 每幀；state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers,
-//                                                   //   money, hp, hpMax, vehicleLabel, roadName }（新欄位可省略）
+//                                                   //   money, hp, hpMax, vehicleLabel, roadName, route }（新欄位可省略）
+//     markers：[{ x, z, kind? }]，kind 依 MARKER_COLORS 著色（無 kind = 可駕駛車輛，藍）；超出小地圖半徑的
+//       mission-start / mission-dest / dest 貼在邊緣並畫朝外箭頭指出方向，其餘超出者不畫
+//     route：[{ x, z }] 或 null（navigator.route()），在小地圖畫亮青色 3 px 路線，只畫落在小地圖範圍內的段
 //   hud.setMoney(money, delta) / hud.setHealth(hp, hpMax) / hud.setPrompt(text | null)
+//   hud.setInteractPrompt(text | null)              // 互動提示（任務 / 打卡 / 小吃）：同 setPrompt，另控制觸控「互動」鈕 tb-interact 顯示
+//                                                   //   與 setPrompt 共用同一個膠囊：每幀依仲裁結果二擇一呼叫（後呼叫者生效）
 //   hud.showHint(id, text)                          // 同 id 只出現一次（localStorage 'tcgta.hints.seen'）；回傳是否排入
 //   hud.setHintsEnabled(settings.get('showHints')) / hud.resetHints()
 //   hud.setControlsHint([{ keys, desc }])           // 由 KEYMAP_HELP / TOUCH_HELP 產生後傳入
@@ -18,7 +23,7 @@
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
-import { setTouchMode } from './touch.js';
+import { setTouchMode, setTouchButtonVisible } from './touch.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
@@ -32,6 +37,24 @@ const SPEEDO_HOT = 0.8; // 超過滿格此比例改警示色
 const HP_LOW = 0.3; // 血量低於此比例改警示色
 const SMALL_SCREEN = 700; // 視窗短邊小於此值（px；手機、小視窗）時介面縮放上限 1，放大後的角落群組才不會互相擠到
 const TOUCH_BTN_LABEL = { walk: '上車', drive: '下車' }; // 對應 touch.js 的 tb-enter / tb-exit 文字
+const TOUCH_INTERACT_LABEL = '互動'; // 對應 touch.js 的 tb-interact 文字
+const INTERACT_BTN_ID = 'tb-interact';
+// 小地圖標記顏色（契約 §17 kind）；無 kind = 可駕駛車輛
+export const MARKER_COLORS = {
+  car: '#4fc3ff',
+  'mission-start': '#ffd400',
+  'mission-dest': '#ff8a1f',
+  dest: '#27e8ff',
+  checkin: '#b36bff',
+  food: '#ff7eb9',
+  ammo: '#a8a8a8',
+};
+// 超出小地圖半徑時貼邊顯示方向的 kind
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest']);
+export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
+export const ROUTE_WIDTH = 3; // 螢幕 px
+const MARKER_PX = 4; // 標記半徑（螢幕 px）
+const EDGE_PAD = 9; // 貼邊標記距外框的內縮（px）
 
 // localStorage 安全包裝：無痕 / 停用儲存 / node 無 window 時回 null
 function defaultStorage() {
@@ -49,9 +72,23 @@ export function formatMoney(n) {
   return `${v < 0 ? '−' : ''}NT$ ${s}`;
 }
 
-// 觸控版提示文字：「按 F 上車（…）」→「點「上車」鈕 上車（…）」（駕駛中指向「下車」鈕）
+// 觸控版提示文字：「按 F 上車（…）」→「點「上車」鈕 上車（…）」（駕駛中指向「下車」鈕）；步行時「按 E …」→「點「互動」鈕 …」
 export function touchPromptText(text, driving) {
-  return text.replace(/按\s*F\s*/g, `點「${TOUCH_BTN_LABEL[driving ? 'drive' : 'walk']}」鈕 `);
+  let t = text.replace(/按\s*F\s*/g, `點「${TOUCH_BTN_LABEL[driving ? 'drive' : 'walk']}」鈕 `);
+  if (!driving) t = t.replace(/按\s*E\s*/g, `點「${TOUCH_INTERACT_LABEL}」鈕 `);
+  return t;
+}
+
+// 點 (px, pz) 到線段 a–b 的距離平方（小地圖路線裁切用，不配置物件）
+function segDist2(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const L = dx * dx + dz * dz;
+  let t = L > 0 ? ((px - ax) * dx + (pz - az) * dz) / L : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const ex = ax + dx * t - px;
+  const ez = az + dz * t - pz;
+  return ex * ex + ez * ez;
 }
 
 export class HUD {
@@ -87,6 +124,8 @@ export class HUD {
     this._lastLocation = '';
     this._lastPrompt = null;
     this._rawPrompt = null;
+    this._promptInteract = false; // 目前膠囊是否為互動提示（setInteractPrompt）
+    this._interactShown = null; // tb-interact 目前顯示狀態（null = 尚未同步）
     this._toastTimer = 0;
     this._pendingPlace = null; // 待判斷的進場地名 toast（等本幀 pill 更新後再決定）
     this._clock = '';
@@ -203,15 +242,29 @@ export class HUD {
   }
 
   // ---------- 互動提示膠囊 ----------
+  // 上車 / 搶車等提示（觸控時「上車」鈕加 .ready）
   setPrompt(text) {
+    this._setPrompt(text, false);
+  }
+
+  // 互動提示（接委託 / 打卡 / 收集小吃）：觸控時顯示「互動」鈕，提示消失即隱藏
+  setInteractPrompt(text) {
+    this._setPrompt(text, true);
+  }
+
+  _setPrompt(text, interact) {
     const raw = text || null;
+    // 每幀重複呼叫同樣內容：不重算文字（不配置新字串）
+    if (raw === this._rawPrompt && interact === this._promptInteract && this._lastPrompt !== undefined) return;
     this._rawPrompt = raw;
+    this._promptInteract = interact;
     let shown = raw;
     if (this.touch && shown) shown = touchPromptText(shown, !!this._lastDriving);
     if (this.touch) {
       if (!this.enterBtn) this.enterBtn = document.getElementById('tb-enter');
-      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!raw && !this._lastDriving);
+      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!raw && !interact && !this._lastDriving);
     }
+    this._syncInteractBtn();
     if (shown === this._lastPrompt) return;
     this._lastPrompt = shown;
     if (shown) {
@@ -220,6 +273,14 @@ export class HUD {
     } else {
       this.promptEl.classList.add('hidden');
     }
+  }
+
+  // tb-interact：觸控、步行、目前膠囊為互動提示時才顯示（駕駛中另由 CSS data-show 隱藏）
+  _syncInteractBtn() {
+    const on = this.touch && !!this._rawPrompt && this._promptInteract && !this._lastDriving;
+    if (on === this._interactShown) return;
+    this._interactShown = on;
+    setTouchButtonVisible(INTERACT_BTN_ID, on);
   }
 
   // ---------- 訊息 toast ----------
@@ -410,7 +471,7 @@ export class HUD {
       // 觸控提示文字依模式指向「上車 / 下車」鈕：以原文重算
       if (this.touch) {
         this._lastPrompt = undefined;
-        this.setPrompt(this._rawPrompt);
+        this._setPrompt(this._rawPrompt, this._promptInteract);
       }
     }
     if (state.location !== undefined && state.location !== this._lastLocation) {
@@ -509,16 +570,12 @@ export class HUD {
     ctx.scale(k / MAP_SCALE, k / MAP_SCALE);
     ctx.translate(-(state.x - BOUNDS.minX) * MAP_SCALE, -(state.z - BOUNDS.minZ) * MAP_SCALE);
     ctx.drawImage(this.mapCanvas, 0, 0);
-    // 可駕駛車輛位置
-    if (state.markers) {
-      ctx.fillStyle = '#4fc3ff';
-      for (const m of state.markers) {
-        ctx.beginPath();
-        ctx.arc((m.x - BOUNDS.minX) * MAP_SCALE, (m.z - BOUNDS.minZ) * MAP_SCALE, 4 / k, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+    // 導航路線（世界座標系內畫，跟著小地圖縮放；線寬換算回螢幕 3 px）
+    if (state.route && state.route.length > 1) this._drawRoute(ctx, state.route, state.x, state.z, R / k, k);
     ctx.restore();
+
+    // 標記（螢幕座標系：北朝上、+x 往右、+z 往下，與底圖一致）
+    if (state.markers && state.markers.length) this._drawMarkers(ctx, state.markers, state.x, state.z, R, k);
 
     // 玩家箭頭（北方朝上，箭頭依角色朝向旋轉）
     ctx.save();
@@ -548,5 +605,81 @@ export class HUD {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ff5a5a';
     ctx.fillText('N', R, 12);
+  }
+
+  // 路線：只畫與小地圖圓（半徑 viewR 公尺，外擴線寬）相交的段；連續可見段接成一條 path
+  _drawRoute(ctx, route, px, pz, viewR, k) {
+    const lim = viewR + ROUTE_WIDTH / k;
+    const lim2 = lim * lim;
+    const ox = BOUNDS.minX;
+    const oz = BOUNDS.minZ;
+    let open = false;
+    let drawn = 0;
+    ctx.beginPath();
+    for (let i = 1; i < route.length; i++) {
+      const a = route[i - 1];
+      const b = route[i];
+      if (!a || !b || !Number.isFinite(a.x) || !Number.isFinite(a.z) || !Number.isFinite(b.x) || !Number.isFinite(b.z)) {
+        open = false;
+        continue;
+      }
+      if (segDist2(px, pz, a.x, a.z, b.x, b.z) > lim2) {
+        open = false;
+        continue;
+      }
+      if (!open) ctx.moveTo((a.x - ox) * MAP_SCALE, (a.z - oz) * MAP_SCALE);
+      ctx.lineTo((b.x - ox) * MAP_SCALE, (b.z - oz) * MAP_SCALE);
+      open = true;
+      drawn++;
+    }
+    if (!drawn) return;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = (ROUTE_WIDTH * MAP_SCALE) / k; // 底圖座標系已縮放 k / MAP_SCALE
+    ctx.strokeStyle = ROUTE_COLOR;
+    ctx.stroke();
+  }
+
+  // 標記依 kind 著色；超出半徑的任務 / 目的地標記貼邊並畫朝外三角形指出方向
+  _drawMarkers(ctx, markers, px, pz, R, k) {
+    const inner = R - EDGE_PAD;
+    for (const m of markers) {
+      if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.z)) continue;
+      const color = (m.kind && MARKER_COLORS[m.kind]) || MARKER_COLORS.car;
+      let dx = (m.x - px) * k;
+      let dz = (m.z - pz) * k;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      const edge = d > inner;
+      if (edge) {
+        if (!m.kind || !EDGE_KINDS.has(m.kind)) continue;
+        const ux = dx / d;
+        const uz = dz / d;
+        dx = ux * inner;
+        dz = uz * inner;
+        // 朝外三角形：尖端在外側
+        const cx = R + dx;
+        const cz = R + dz;
+        ctx.beginPath();
+        ctx.moveTo(cx + ux * 7, cz + uz * 7);
+        ctx.lineTo(cx - ux * 4 - uz * 6, cz - uz * 4 + ux * 6);
+        ctx.lineTo(cx - ux * 4 + uz * 6, cz - uz * 4 - ux * 6);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+        continue;
+      }
+      ctx.beginPath();
+      ctx.arc(R + dx, R + dz, EDGE_KINDS.has(m.kind) ? MARKER_PX + 1.5 : MARKER_PX, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      if (EDGE_KINDS.has(m.kind)) {
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
   }
 }

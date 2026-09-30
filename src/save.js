@@ -2,12 +2,19 @@
 // 損毀處理：主鍵壞、.bak 好 → recovered；兩者皆壞 → corrupt-reset（最後一份原文留在 .corrupt，壞掉的主鍵 / .bak 清掉）
 // storage 由呼叫端注入（介面同 localStorage：getItem / setItem / removeItem）；未注入時用 globalThis.localStorage，
 // 仍不可用（node、停用儲存）時退回記憶體；所有讀寫都 try/catch，不向外丟例外
+// schema v2（契約 §18）：新增 weapons / missions / collect 與三個統計欄位；v1 存檔讀入時補預設、保留原有全部值
 
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 // 統計欄位：計數類取整數，距離 / 時間類保留小數
-const STAT_INT_KEYS = ['pedsHit', 'pedsKnockedOut', 'carjacks', 'crashes', 'kos', 'moneyEarned', 'moneySpent'];
+const STAT_INT_KEYS = ['pedsHit', 'pedsKnockedOut', 'carjacks', 'crashes', 'kos', 'moneyEarned', 'moneySpent', 'missionsDone', 'missionsFailed', 'shotsFired'];
 const STAT_FLOAT_KEYS = ['playTimeSec', 'distWalkM', 'distDriveM'];
+// v2 清洗上限
+const PISTOL_MAG_MAX = 12;
+const PISTOL_RESERVE_MAX = 120;
+const LIST_MAX = 200; // checkins / foods 陣列長度上限
+const MAP_MAX = 200; // completed / best / cooldowns 鍵數上限（契約未定，本檔自訂）
+const MISSION_STAGES = ['pickup', 'deliver'];
 
 export function defaultSave() {
   return {
@@ -25,9 +32,15 @@ export function defaultSave() {
       kos: 0,
       moneyEarned: 0,
       moneySpent: 0,
+      missionsDone: 0,
+      missionsFailed: 0,
+      shotsFired: 0,
     },
     player: { x: null, z: null, yaw: 0 },
     world: { hour: 16.5 },
+    weapons: { slot: 0, ammo: { pistol: { mag: PISTOL_MAG_MAX, reserve: 36 } } },
+    missions: { completed: {}, best: {}, cooldowns: {}, active: null },
+    collect: { checkins: [], foods: [] },
   };
 }
 
@@ -37,6 +50,38 @@ const nonNeg = (v, def) => (typeof v === 'number' && Number.isFinite(v) && v >= 
 const nonNegInt = (v, def) => Math.floor(nonNeg(v, def));
 // 座標可為負；null / 非有限值 → null（整合端改用出生點）
 const coord = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+// 非負整數，超過上限 clamp 到上限；非法 → 預設
+const intCap = (v, def, max) => Math.min(max, nonNegInt(v, def));
+// 字串鍵 → 非負有限數的表（int = true 取整數）；非法值的鍵丟棄；'__proto__' / 空字串不收
+function numMap(src, int) {
+  const out = {};
+  if (!isObj(src)) return out;
+  let n = 0;
+  for (const k of Object.keys(src)) {
+    if (n >= MAP_MAX) break;
+    if (k === '' || k === '__proto__') continue;
+    const v = src[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue;
+    out[k] = int ? Math.floor(v) : v;
+    n++;
+  }
+  return out;
+}
+// 字串陣列：只收非空字串、去重（保留首次出現順序）、上限 LIST_MAX
+function strList(src) {
+  if (!Array.isArray(src)) return [];
+  const seen = new Set();
+  for (const v of src) {
+    if (seen.size >= LIST_MAX) break;
+    if (typeof v === 'string' && v !== '') seen.add(v);
+  }
+  return [...seen];
+}
+// 進行中任務：只收 { slug: 非空字串, stage: 'pickup'|'deliver' }，其餘 → null
+function activeMission(src) {
+  if (!isObj(src) || typeof src.slug !== 'string' || src.slug === '' || !MISSION_STAGES.includes(src.stage)) return null;
+  return { slug: src.slug, stage: src.stage };
+}
 
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
@@ -45,13 +90,25 @@ export function migrate(obj) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
   if (v > SAVE_VERSION) return null;
   const out = { ...obj };
-  // 之後新增版本時在此補：if (v < 2) { ...; v = 2; }
   if (v < 1) v = 1;
+  // v1 → v2：只補缺少的新欄位，v1 原有值（含已存在的同名欄位）一律保留，清洗交給 validateSave
+  if (v < 2) {
+    const d = defaultSave();
+    for (const k of ['weapons', 'missions', 'collect']) if (!(k in out)) out[k] = d[k];
+    if (isObj(out.stats)) {
+      const st = { ...out.stats };
+      for (const k of ['missionsDone', 'missionsFailed', 'shotsFired']) if (!(k in st)) st[k] = 0;
+      out.stats = st;
+    }
+    v = 2;
+  }
+  // 之後新增版本時在此補：if (v < 3) { ...; v = 3; }
   out.version = v;
   return out;
 }
 
 // 清洗：數值 finite 且 ≥ 0、未知鍵丟棄、缺鍵補預設；非物件或版本較新 → null
+// v2 欄位：slot ∈ {0,1,2}、彈藥非負整數且 clamp 到 mag ≤ 12 / reserve ≤ 120、任務表只收字串鍵 → 非負有限數、收集陣列只收字串去重 ≤ 200
 export function validateSave(obj) {
   const m = migrate(obj);
   if (!m) return null;
@@ -70,6 +127,20 @@ export function validateSave(obj) {
   out.player.yaw = typeof p.yaw === 'number' && Number.isFinite(p.yaw) ? p.yaw : d.player.yaw;
   const w = isObj(m.world) ? m.world : {};
   out.world.hour = nonNeg(w.hour, d.world.hour) % 24;
+  // v2：武器 / 任務 / 收集
+  const wp = isObj(m.weapons) ? m.weapons : {};
+  out.weapons.slot = [0, 1, 2].includes(wp.slot) ? wp.slot : d.weapons.slot;
+  const pa = isObj(wp.ammo) && isObj(wp.ammo.pistol) ? wp.ammo.pistol : {};
+  out.weapons.ammo.pistol.mag = intCap(pa.mag, d.weapons.ammo.pistol.mag, PISTOL_MAG_MAX);
+  out.weapons.ammo.pistol.reserve = intCap(pa.reserve, d.weapons.ammo.pistol.reserve, PISTOL_RESERVE_MAX);
+  const ms = isObj(m.missions) ? m.missions : {};
+  out.missions.completed = numMap(ms.completed, true);
+  out.missions.best = numMap(ms.best, false);
+  out.missions.cooldowns = numMap(ms.cooldowns, false);
+  out.missions.active = activeMission(ms.active);
+  const cl = isObj(m.collect) ? m.collect : {};
+  out.collect.checkins = strList(cl.checkins);
+  out.collect.foods = strList(cl.foods);
   return out;
 }
 

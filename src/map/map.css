@@ -1,0 +1,178 @@
+/* M 大地圖面板（src/map/big-map.js）：全部以 mp- 前綴；z-index 85（全螢幕面板 80–89）
+   手機：觸控按鈕 ≥ 44 px、safe-area 內距、直向時圖例改為可收合的下方浮層 */
+.mp-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  display: none;
+  background: #10151c;
+  color: #f2f4f8;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mp-panel.mp-open {
+  display: block;
+}
+.mp-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+.mp-canvas.mp-dragging {
+  cursor: grabbing;
+}
+
+.mp-top {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: none;
+}
+.mp-title {
+  font-size: 20px;
+  font-weight: bold;
+  text-shadow: 0 1px 3px #000;
+}
+.mp-hint {
+  flex: 1;
+  font-size: 13px;
+  opacity: 0.8;
+  text-shadow: 0 1px 3px #000;
+}
+
+.mp-btn {
+  pointer-events: auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(16, 21, 28, 0.82);
+  color: #f2f4f8;
+  font: inherit;
+  font-size: 16px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.mp-btn:hover,
+.mp-btn:focus-visible {
+  background: rgba(53, 242, 255, 0.22);
+  outline: none;
+}
+.mp-btn:active {
+  transform: scale(0.96);
+}
+.mp-close {
+  font-size: 20px;
+  width: 48px;
+  height: 48px;
+}
+
+.mp-tools {
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 36px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: calc(100% - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+}
+.mp-wide {
+  font-size: 15px;
+}
+
+.mp-legend {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 66px);
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+  display: none;
+  min-width: 132px;
+  max-height: calc(100% - 150px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(16, 21, 28, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-size: 13px;
+}
+.mp-legend.mp-legend-open {
+  display: block;
+}
+.mp-legend-title {
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+.mp-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 22px;
+}
+.mp-sw {
+  flex: none;
+  display: inline-block;
+}
+.mp-sw-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #000;
+}
+.mp-sw-sq {
+  width: 8px;
+  height: 8px;
+  margin: 0 2px;
+}
+.mp-sw-line {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+}
+.mp-sw-thick {
+  height: 6px;
+}
+.mp-sw-arrow {
+  width: 12px;
+  height: 14px;
+  clip-path: polygon(50% 0, 100% 100%, 50% 75%, 0 100%);
+}
+
+/* 授權標示：面板右下角常駐，不被圖例或按鈕蓋住 */
+.mp-attr {
+  position: absolute;
+  right: calc(env(safe-area-inset-right, 0px) + 8px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 6px);
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #d8dce2;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+/* 直向 / 窄螢幕：圖例改在工具列上方，提示文字隱藏 */
+@media (orientation: portrait), (max-width: 600px) {
+  .mp-hint {
+    display: none;
+  }
+  .mp-legend {
+    top: auto;
+    right: calc(env(safe-area-inset-right, 0px) + 10px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 150px);
+    max-height: 45%;
+  }
+  .mp-tools {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 30px);
+  }
+}

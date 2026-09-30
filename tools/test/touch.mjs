@@ -296,6 +296,66 @@ input.endFrame();
 check('已移除：翻正 / 靈敏度 / 油門 / 煞車按鈕', !$('tb-flip') && !$('tb-sens') && !$('tb-gas') && !$('tb-brake'));
 check('main.js 舊註冊（tb-flip / tb-punch）被忽略', touch.registerTouchButton({ id: 'tb-flip', label: '翻正', code: 'KeyR', slot: 'top2', showWhen: 'drive' }) === null && touch.registerTouchButton({ id: 'tb-punch', label: '揮拳', code: 'KeyE', slot: 'sec3' }) === null && !$('tb-flip') && !$('tb-punch'));
 
+// 5b. Phase 4：互動鈕 tb-interact（KeyE、有提示才顯示）、圖鑑鈕 tb-guide（onTap 回呼）、setTouchButtonVisible
+{
+  const inter = $('tb-interact');
+  check('互動鈕：interact slot、步行、預設隱藏', !!inter && inter.classList.contains('slot-interact') && inter.attrs['data-show'] === 'walk' && inter.hidden === true && inter.textContent === '互動');
+  check('SLOTS 含 interact', touch.SLOTS.includes('interact'));
+  check('setTouchButtonVisible(tb-interact, true) → 顯示', touch.setTouchButtonVisible('tb-interact', true) === true && inter.hidden === false && touch.isTouchButtonVisible('tb-interact'));
+  inter.dispatch('pointerdown', pe(40, 700, 350));
+  check('互動鈕 tap → KeyE（snapshot.pressed.interact）、不按住', input.wasPressed('KeyE') && input.snapshot().pressed.interact && !input.down('KeyE'));
+  touch.setTouchButtonVisible('tb-interact', false);
+  check('提示消失 → 隱藏並放開按住中的指標', inter.hidden === true && !inter.classList.contains('active') && !touch.isTouchButtonVisible('tb-interact'));
+  inter.dispatch('pointerup', pe(40, 700, 350));
+  input.endFrame();
+  check('setTouchButtonVisible 未知 id 回 false', touch.setTouchButtonVisible('tb-nope', true) === false && !touch.isTouchButtonVisible('tb-nope'));
+
+  const guide0 = $('tb-guide');
+  check('圖鑑鈕：預設隱藏（尚未接回呼）、tl3、步行專屬', !!guide0 && guide0.hidden === true && guide0.classList.contains('slot-tl3') && guide0.attrs['data-show'] === 'walk');
+  guide0.dispatch('pointerdown', pe(41, 250, 20));
+  guide0.dispatch('pointerup', pe(41, 250, 20));
+  check('預設圖鑑鈕 tap 不寫入任何鍵', input.pressed.size === 0);
+  let guideArg = null;
+  let guideCalls = 0;
+  const g = touch.registerTouchButton({ id: 'tb-guide', label: '圖鑑', slot: 'tl3', showWhen: 'walk', onTap: (inp) => {
+    guideCalls++;
+    guideArg = inp;
+  } });
+  const root = $('touch-ui');
+  check('同 id 重新註冊 → 取代舊元素（只剩一顆）並顯示', g === $('tb-guide') && g !== guide0 && root.children.filter((c) => c.id === 'tb-guide').length === 1 && g.hidden === false);
+  g.dispatch('pointerdown', pe(42, 250, 20));
+  check('onTap：按下呼叫一次、傳入 input、不寫入鍵', guideCalls === 1 && guideArg === input && input.pressed.size === 0 && input.keys.size === 0);
+  g.dispatch('pointerdown', pe(43, 252, 22));
+  check('onTap：同鈕第二根手指不重複觸發', guideCalls === 1);
+  g.dispatch('pointerup', pe(42, 250, 20));
+  input.enabled = false;
+  g.dispatch('pointerdown', pe(44, 250, 20));
+  check('onTap：input 停用（暫停 / 面板開啟）時不觸發', guideCalls === 1);
+  input.enabled = true;
+  let threw = false;
+  try {
+    touch.registerTouchButton({ id: 'tb-x', label: 'x' });
+  } catch {
+    threw = true;
+  }
+  check('registerTouchButton 無 code / onTap / onPress 丟例外', threw);
+  check('地圖鈕仍送 KeyM（main 改開大地圖）', $('tb-map').attrs['data-show'] === 'always');
+  // 步行時可見按鈕的 slot 不重複（不與攻擊 / 跳 / 上車 / 跑 / 左上小鈕衝突）
+  const walkVis = root.children.filter((c) => c.classList && c.classList.contains('tbtn') && !c.hidden && c.attrs['data-show'] !== 'drive');
+  touch.setTouchButtonVisible('tb-interact', true);
+  const walkVis2 = root.children.filter((c) => c.classList && c.classList.contains('tbtn') && !c.hidden && c.attrs['data-show'] !== 'drive');
+  const slotOf = (c) => [...c.classList.set].find((x) => x.startsWith('slot-'));
+  const slots = walkVis2.map(slotOf);
+  check('步行可見按鈕 slot 互不重複（含互動 / 圖鑑）', new Set(slots).size === slots.length && walkVis2.length === walkVis.length + 1, slots.join(','));
+  // 駕駛時步行專屬鈕由 CSS 隱藏
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../src/style.css', import.meta.url), 'utf8');
+  check('style.css：駕駛時隱藏 data-show="walk"（互動 / 圖鑑 / 攻擊…）', /body\.touch-drive \.tbtn\[data-show="walk"\][^{]*\{[^}]*display:\s*none/.test(css));
+  check('style.css：.tbtn.slot-interact 已定義、≥ 44px', /\.tbtn\.slot-interact\s*\{[^}]*width:\s*(4[4-9]|[5-9]\d)px[^}]*height:\s*(4[4-9]|[5-9]\d)px/.test(css));
+  touch.setTouchButtonVisible('tb-interact', false);
+  input.endFrame();
+}
+
 // 6. 駕駛模式：踏板取代右半視角區
 touch.setTouchMode('drive');
 check('駕駛模式 body class', body.classList.contains('touch-drive') && !body.classList.contains('touch-walk') && touch.getTouchMode() === 'drive');

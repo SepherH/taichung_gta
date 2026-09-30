@@ -127,7 +127,7 @@
 | horn | KeyH | 喇叭（駕駛時） | ✓ | |
 | camera | KeyV | 鏡頭距離三段循環 | | |
 | lookBack | KeyC | 回頭看（按住，駕駛時） | ✓ | |
-| radio | KeyQ | 電台 | | ✓ |
+| ~~radio~~ | — | 已移除（Q 改 weaponCycle，見 §12） | | |
 | phone | KeyT | 手機 | | ✓ |
 | map | KeyM | 開暫停選單的「地圖」頁 | | |
 | pause | Escape, KeyP | 暫停選單（P 在暫停中 = 繼續） | | |
@@ -206,7 +206,7 @@
 ## 6. 存檔 `src/save.js`（B2）
 
 - 儲存鍵 `tcgta.save`；備份 `tcgta.save.bak`（上一份讀回驗證通過的存檔）；損毀原文 `tcgta.save.corrupt`（只留最後一份）
-- `SAVE_VERSION = 1`；`defaultSave()`：
+- `SAVE_VERSION = 1`（Phase 4 起為 2，見 §18）；`defaultSave()`：
 
 ```
 { version: 1, savedAt: 0, money: 500,
@@ -328,3 +328,187 @@ body.touch-drive #touch-look { display: none; }
 1. 在本檔修改對應章節（新事件加進 §1 表、新設定鍵加進 §2 表、新 action 加進 §4.1 表…）
 2. 通知相關單元（在 result 的 FINDINGS 註明）
 3. 再改程式與測試（`tools/test/core.mjs` 會檢查 action 表與說明表的一致性）
+
+---
+
+# Phase 4 契約（D4-0 定稿 v2，2026-10-01）
+
+原則沿用上文（參數注入、不硬 import 他人內部、共用樞紐只有整合單元改）。新增一條：**功能模組自帶 UI**——武器 HUD / 任務 UI / 大地圖 / 圖鑑各自在自己的目錄建 DOM 與 CSS（class / id 用各自前綴，CSS 由模組 `import './xxx.css'`），hud.js / style.css 只做最小接線。z-index：HUD 模組 50–59、全螢幕面板（大地圖 / 圖鑑 / 結算）80–89（高於選單 70–79 的面板只在遊戲中開啟）。
+**美術資產一律可能缺檔**：manifest / glb / 圖片 404 或回退成 index.html → 安靜退回（佔位幾何 / 純色卡片 / 既有 clip），只 `console.info` 一次，不得 `console.error` 或丟例外。
+
+## 10. 事件（§1 表的增補；payload 欄位可多不可少）
+
+| 事件 | payload | 發出者 |
+|---|---|---|
+| `weapon:equip` | `{ slot: 0\|1\|2, weapon: 'fist'\|'bat'\|'pistol', prev }` | weapons |
+| `weapon:swing` | `{ weapon: 'fist'\|'bat', x, y, z, byPlayer }` | weapons |
+| `weapon:fire` | `{ weapon: 'pistol', x, y, z, dirX, dirY, dirZ, byPlayer, hit: boolean }` | weapons |
+| `weapon:dryFire` | `{ weapon }` | weapons |
+| `weapon:reload` | `{ weapon, phase: 'start'\|'end', mag, reserve }` | weapons |
+| `weapon:ammo` | `{ weapon, mag, magSize, reserve }` | weapons（任何彈藥變動） |
+| `weapon:impact` | `{ x, y, z, nx, ny, nz, surface: 'world'\|'vehicle' }` | weapons（子彈打到非角色） |
+| `combat:hit` | `{ attacker, target, weapon: 'fist'\|'bat'\|'pistol'\|'vehicle', damage, hp, x, y, z, dirX, dirZ, side: 'front'\|'back', byPlayer, knockdown: boolean }` | 整合（由 combat 'hit' 轉發） |
+| `ped:knockdown` | §1 原欄位，`cause` 擴充為 `'punch'\|'bat'\|'bullet'\|'vehicle'`，另加 `weapon` | 整合 |
+| `pickup:ammo` | `{ amount, x, z }` | weapons/pickups |
+| `mission:available` | `{ id, title, x, z }` | missions |
+| `mission:start` | `{ id, title, cargo }` | missions |
+| `mission:stage` | `{ id, stage: 'pickup'\|'deliver', text, x, z }` | missions |
+| `mission:complete` | `{ id, reward, timeSec, damagePct, bonus }` | missions |
+| `mission:fail` | `{ id, reason: 'timeout'\|'destroyed'\|'ko'\|'abandon' }` | missions |
+| `nav:destination` | `{ x, z, label, source: 'map'\|'mission'\|'checkin' }` | map / missions |
+| `nav:clear` | `{ source }` | map / navigation（抵達 20 m 內自動清） |
+| `collect:checkin` | `{ landmarkId, slug, name, reward }` | collect |
+| `collect:food` | `{ id, name, total, found }` | collect |
+| `ui:sound` | `{ kind: 'click'\|'confirm'\|'cancel'\|'reward'\|'fail'\|'open'\|'close' }` | 任何 UI |
+
+`combat:hit.side`：目標面向 · (攻擊者 → 目標方向) > 0 = 被從背後打 → `'back'`，否則 `'front'`。
+
+## 11. 設定鍵增補（§2 表）
+
+| 鍵 | 型別 / 範圍 | 預設 |
+|---|---|---|
+| `showBlood` | boolean（「顯示血液」） | true |
+| `recoil` | number 0.2–1.0（step 0.1，「後座力」） | 1.0 |
+| `aimAssist` | boolean（「瞄準輔助」，只作用於觸控） | true |
+
+`volumeSfx` 的 note「音效將於後續版本加入」移除。三組音量 `volumeMaster / volumeMusic / volumeSfx` 由 audio 訂閱。
+
+## 12. 動作與輸入增補（§4）
+
+| action | 桌機 | 說明 | hold |
+|---|---|---|---|
+| attack | Mouse0 | 攻擊（依目前武器：揮拳 / 揮棒 / 開槍） | 手槍可按住連發（半自動，最短間隔由武器定） |
+| aim | Mouse2 | 肩後瞄準（持手槍時；**取消預留**） | ✓ |
+| interact | KeyE | 互動：接委託 / 打卡 / 收集小吃 / 撿彈藥（**取消預留**） | |
+| weaponCycle | KeyQ | 循環切換武器（取代 radio；radio 移除） | |
+| slot1 / slot2 / slot3 | Digit1 / Digit2 / Digit3 | 直選 空手 / 球棒 / 手槍 | |
+| reload | KeyR | 裝填（**取消預留**） | |
+| map | KeyM | 開 / 關大地圖（不再開暫停選單地圖頁；暫停選單地圖頁保留） | |
+
+- `input.snapshot()`：`down` 增 `aim`、`attack`；`pressed` 增 `slot1`、`slot2`、`slot3`、`weaponCycle`、`reload`（`interact` 已有）
+- 滾輪：持手槍瞄準中不縮放（整合層判斷）；其餘照舊
+- 觸控新增（touch.js `registerTouchButton` 或武器模組自建）：`tb-weapon`（武器鈕：點擊 = weaponCycle；長按 ≥ 350 ms 開三格輪盤，滑到格子放開 = 直選）、`tb-reload`（持手槍才顯示）、`tb-aim`（持手槍才顯示，hold = 肩後瞄準）、`tb-interact`（有互動提示才顯示，送 KeyE）；步行模式顯示，駕駛隱藏；按鈕 ≥ 44 px
+- 武器切換只在「待機或攻擊收尾」允許：`weapons.canSwitch()` 為假時切換請求被忽略（不排隊）
+
+## 13. 武器 `src/weapons/**`（W1）
+
+- 定義 `WEAPONS`（src/weapons/defs.js）：`fist`（沿用 combat 拳擊）、`bat`（傷害 35、冷卻 0.75 s、命中窗讀 clip `bat_swing_a/b` 的 manifest events，缺則 [0.3, 0.55]×長度、揮擊交替 a / b）、`pistol`（傷害 40、彈匣 12、起始備彈 36、備彈上限 120、射速最短 0.22 s、裝填 1.4 s、射程 80 m）；數值常數匯出供測試
+- `createWeapons({ bus, combat, player, raycast, sweep, settings, now, isTouch })` → 
+  `{ current, slot, state: 'idle'|'equipping'|'attacking'|'reloading', canSwitch(), select(slot), cycle(), attack(aim), reload(), update(dt, aim), ammo() → { mag, magSize, reserve }, addAmmo(n), serialize(), restore(data), dispose() }`
+  - `aim = { origin:{x,y,z}, dir:{x,y,z}, aiming: boolean, muzzle?:{x,y,z}, candidates?: actor[] }`（整合層每幀以鏡頭中心射線填入）
+  - 注入 `raycast(origin, dir, maxDist, { excludeActor }) → { point, normal, actor|null, surface } | null`、`sweep(from, to, radius, { excludeActor }) → actor[]`（整合層以 PhysicsWorld.castRay / castShape + 剛體 → actor 對照實作；測試用假物件）
+  - 手槍：鏡頭射線取瞄點 → 槍口到瞄點再射一次確認遮擋（被擋則打在遮擋物）；觸控且 `aimAssist` 時對視野內無遮擋、與射線夾角 ≤ 6°、≤ 40 m 的行人弱吸附（只修正方向不鎖定）；後座 = `recoilKick()` 回傳的鏡頭 pitch / yaw 增量 × settings.recoil
+  - 球棒：命中窗開啟期間每幀以前後幀棒身端點做膠囊掃掠（`sweep`），同一揮對同一人只傷一次（combat 去重）
+  - NPC 中彈 / 被棒擊：走 combat 公開 API（下條），不直接改 combat.entries
+- `src/combat.js` 增：`applyHit({ attacker, target, damage, weapon, dir:{x,z}, impulse? })`（通用受擊入口：扣血、連擊計數、hit / knockdown、hitStop、emit 'hit' 含 `weapon`、`side`、`x,y,z`）與 `knockdownActor(actor, { cause, impulse })`（取代外部直接改 entries 的做法）；`anim.trigger('hit', { side })`（animator 不認第二參數時自然退回 'hit'）；'knockdown' payload `cause` 加 `'bat'|'bullet'`；拳擊路徑行為不變
+- `src/npc-ai.js`：`brain.hear({ type: 'gunshot', x, z })` → 30 m 內行人逃跑（不還手）；被槍擊者一律逃跑或倒地，不還手；被棒擊者照一般被打（還手比例不變）
+- 鏡頭 `src/camera.js`：`rig.update(…, opts)` 增 `aim: boolean`（肩後：距離 1.6 m、右肩偏移 0.45 m、FOV 55、切換 0.15 s 內插）與 `rig.addRecoil(pitch, yaw)`（衰減回原位）；仰角範圍不得收窄
+- 武器模型：`loadWeaponModels(base = 'models/weapons/')` 讀 `manifest.json`（`{ bat:{ file, gripOffset:[x,y,z], tipOffset:[x,y,z], length, type }, pistol:{…, muzzleOffset? } }`，也接受陣列形式）；缺檔 → 佔位幾何（棒 0.85 m 圓柱、槍 L 形方塊），同樣提供 grip / tip / muzzle
+- 彈藥拾取 `createAmmoPickups({ scene, bus, points, amount = 12, respawnSec = 90 })` → `{ update(dt, playerPos), nearest(pos) → interactable|null, dispose() }`；接近 1.5 m 自動拾取（不必按 E）
+- 武器 HUD（src/weapons/hud.js + weapons.css，前綴 `wp-`）：右上武器圖示（`art/hud/weapon-<id>.png`，缺則文字）+ 彈藥 `12 / 36`、裝填進度、準星（持手槍顯示，瞄準時收窄）、觸控武器鈕與輪盤（`tb-weapon` 自建於 `#touch-ui` 內）
+
+## 14. 動畫層與流血（W3）
+
+- 角色 manifest 增補（A7，可能缺）：`clips[].upperBodyOnly`、`clips[].loop`、`boneGroups: { upper: [...], lower: [...] }`、`weaponSocket`（實檔為物件 `{ bone, parent, axes, notes }`，也接受字串；右手子骨）；缺 `boneGroups` 時預設 upper = Spine, Chest, Neck, Head, 兩側 Shoulder / UpperArm / LowerArm / Hand
+- `src/characters/animator.js`：`trigger('hit', { side })` → 有 `hit_front` / `hit_back` 用之，缺則 `hit`；新狀態 clip 缺時以既有 clip 代替（`bat_swing_*` / `pistol_fire` → `punch`、`*_hold` / `pistol_aim` → 不疊加、`weapon_equip` → 略過），`missing` 記錄
+- `src/character-animation.js`：`createWeaponLayer(animator, { boneGroups })` → `{ setPose('none'|'bat_hold'|'pistol_hold'|'pistol_aim'), play('weapon_equip'|'bat_swing_a'|'bat_swing_b'|'pistol_fire'|'pistol_reload') → duration|false, addRecoil(k), update(dt), on('hitWindow', cb) }`：上半身 clip 以 boneGroups.upper 過濾軌道後疊在下半身移動上；後座為 additive 層；`attachWeapon(character, object3d, { gripOffset })` 掛到 `weapon_socket`，缺則右手 `RightHand` 骨
+- `src/blood-fx.js`：`createBloodFx({ scene, settings, heightAt, atlasUrl = 'art/fx/blood-atlas.png', dropUrl = 'art/fx/blood-drop.png', maxDecals = 16, maxDrops = 32 })` → `{ onHit(e), onKnockdown(e), update(dt, camera), clear(), stats() → { decals, drops } }`；地面貼片（4×4 圖集、物件池、全場 ≤ 16、12 s 後 2 s 淡出、最舊者先回收）、血滴粒子（單一 InstancedMesh 或 Points、同屏 ≤ 32、無碰撞、落地即消失）；`settings.showBlood` 為 false 時不生成且清空；圖集缺 → 程序畫 CanvasTexture；不做肢解與傷口特寫；每幀不配置新物件
+- 內容標示（開始畫面）：文字「本遊戲含槍械、暴力與血液畫面」由選單顯示（I4）
+
+## 15. 音效 `src/audio/**`（W2）
+
+- `createAudio({ bus, settings, AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext })` → `{ unlock(), update(dt, state), play(name, opts), stats() → { voices, maxVoices: 12, unlocked }, dispose() }`
+  - 首次 pointerdown / keydown / touchend 由整合層呼叫 `unlock()`（resume context）；未解鎖前 play 靜默略過；無 AudioContext（node）時整個模組為 no-op
+  - 程序合成（噪聲 buffer + 振盪器 + 濾波 + 包絡），不下載音檔：`gunshot`、`dryfire`、`reload`、`bat_hit`、`bat_swing`、`punch`、`footstep`、`crash`、`horn`、`tire`、`ui_*`、引擎（持續音源，依轉速）、路口聲景（持續、低音量）
+  - 同時音源 ≤ 12（超過時丟棄最舊或最小聲者）；一次性音效 3D 衰減以 `state.x/z` 為聆聽點
+  - 訂閱：`weapon:fire / dryFire / reload / swing`、`combat:hit`、`vehicle:horn`、`vehicle:crash`、`mission:complete / fail`、`collect:*`、`ui:sound`；`settings.subscribe` 的三組音量（master × music / sfx）
+  - `state = { x, z, yaw, driving, speedKmh, rpm01, throttle, skid01, walkSpeed, grounded, nearJunction: 距離 m|null, paused }`；footstep 依 walkSpeed 與步距自行觸發；paused 時持續音源靜音
+
+## 16. 任務：資料驅動委託（W4，src/missions/**）
+
+- 委託資料 `public/art/cargo/manifest.json`（美術線產出，可能缺）：`{ items: [ { slug, name, file, title, brief, client, from, to, timeLimitSec, reward, conditions: ['fragile'|'heavy'|'timed'] } ] }`（也接受頂層陣列；`from` / `to` 為地標 manifest 的 `id` 或 slug（檔名去 .glb））；缺檔 → 內建 3 個委託；圖卡 `art/cargo/<file>` 缺 → 純色卡片
+- 地標點由整合層注入：`landmarks = [{ id, slug, name, x, z, radius }]`（§17）
+- `createMissions({ bus, scene, root, landmarks, addMoney, fetchJson, now, rng })` → `{ ready: Promise, update(dt, ctx), nearest(pos) → interactable|null, markers() → [{ x, z, kind: 'mission-start'|'mission-dest', label }], objective() → { text, timerSec|null, distM|null, damagePct|null }|null, onVehicleImpact({ relSpeed }), onPlayerKo(), active(), serialize(), restore(data), dispose() }`
+  - 流程：起點地標光柱（`mission-start`）→ 按 E 接單（顯示貨物圖卡 + 文案 + 條件 + 報酬，確認 / 取消）→ 目的地光柱 + `nav:destination` → 抵達 8 m 內（步行或駕駛）結算 → 結算面板（時間、損壞度、報酬、「再挑戰」/「繼續」）
+  - 條件：`timed` 超時失敗；`fragile` 以 `onVehicleImpact` 與玩家被擊倒累積損壞度，100% 失敗，報酬依損壞度遞減；`heavy` 步行速度上限 × 0.6（回傳於 `ctx` 回饋：`speedScale()`）
+  - 失敗可重試（回起點重接）；輪替：同時開放 3 個起點、完成後該委託冷卻 120 s 遊戲時間
+  - 自帶 UI（前綴 `ms-`）：目標列（上中）、字幕、接單卡、結算面板
+- 存檔（§18）`missions`
+
+## 17. 大地圖與導航（W5）/ 打卡圖鑑（W6）/ 地標點
+
+- 地標點 `src/core/landmark-points.js`（D4-0）：`landmarkPoints(manifestList, project = projectLatLon)` → `[{ id, slug, name, x, z, radius }]`（slug = file 去 .glb；radius = 25 m 預設，footprint false 者 15 m）；純函式
+- 導航 `src/navigation.js`：`buildRoadGraph(roads)`（citymodel surfaceRoads → 節點 / 邊，端點吸附 1 m、交叉點合併）→ graph；`findRoute(graph, from, to)` → `{ points:[{x,z}], lengthM } | null`（A*，起訖投影到最近邊）；`createNavigator({ bus, graph, scene })` → `{ setDestination(x, z, label, source), clear(source), update(dt, playerPos), route() → points|null, destination() }`：偏離路線 > 25 m 或每 3 s 重算一次、抵達 20 m 內清除並 emit `nav:clear`；世界內導航圖釘（目的地上方浮動錐體）
+- 大地圖 `src/map/**`（前綴 `mp-`）：`createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus })` → `{ open(), close(), toggle(), isOpen(), draw(), destroy() }`：canvas 全螢幕、OSM 路網 / 公園 / 水域 / 地標、圖例、滾輪 / 雙指縮放、拖曳、點擊空白處設目的地（`onPick(x,z)` → 整合層呼叫 navigator）、路線與任務 / 打卡 / 小吃標記；可 import `src/ui/map-view.js` 的匯出函式
+- 小地圖：hud.update 的 `state.route`（`[{x,z}]` 或 null）與 `state.markers` 增 `kind`（`'mission-start'|'mission-dest'|'dest'|'checkin'|'food'|'ammo'`）；hud.js 依 kind 著色、route 畫線（I4）
+- 打卡 `src/collect/**`（前綴 `cl-`）：`createCheckins({ bus, landmarks, addMoney, reward = 200, badgeBase = 'art/badges/' })` → `{ nearest(pos) → interactable|null, markers(), progress() → { done, total }, serialize(), restore(data) }`；進入地標 radius 內可按 E 打卡（每地標一次、徽章彈窗 + 金錢）；徽章 `art/badges/<slug>.png` 缺 → 純色圓徽
+- 小吃圖鑑：`createFoodGuide({ bus, scene, root, manifestUrl = 'art/food/manifest.json', spots, fetchJson, addMoney })` → `{ ready, nearest(pos), markers(), open(), close(), isOpen(), progress(), serialize(), restore(data), update(dt, playerPos, camera) }`；food manifest `{ items:[{ id, name, file, desc, area? }] }`（缺 → 內建 10 項名稱與說明、純色卡片）；收集點（`src/collect/food-spots.js`，10–12 點散在七期街區人行道，座標為遊戲世界 x/z）顯示小型浮動圖示，按 E 收集，圖鑑面板列已收集卡 + 未收集剪影
+- **互動介面（interactable）**：`{ id, text, dist, priority, act() }`；整合層每幀向 missions / checkins / food / pickups 各問 `nearest(playerPos)`，取 priority 高者（任務 3 > 打卡 2 > 小吃 1），相同取近者 → `hud.setPrompt(text)`，按 E 呼叫 `act()`
+
+## 18. 存檔 schema v2（src/save.js）
+
+- `SAVE_VERSION = 2`；`defaultSave()` 在 v1 欄位外新增：
+```
+weapons: { slot: 0, ammo: { pistol: { mag: 12, reserve: 36 } } },
+missions: { completed: {}, best: {}, cooldowns: {}, active: null },   // completed/best/cooldowns：slug → 整數 / 秒 / 遊戲秒數
+collect: { checkins: [], foods: [] },                                  // 地標 slug / 小吃 id 字串陣列（去重）
+stats 增：missionsDone: 0, missionsFailed: 0, shotsFired: 0
+```
+- `migrate(v1)` → v2：補上述預設、保留 v1 所有值；`version > 2` → null（不覆寫）
+- `validateSave`：weapons.slot ∈ {0,1,2}；彈藥非負整數且 mag ≤ 12、reserve ≤ 120；completed / best / cooldowns 只收字串鍵 → 非負有限數；checkins / foods 只收字串、去重、上限 200；`missions.active` 只收 `{ slug, stage }` 或 null（讀檔時整合層可選擇作廢進行中的任務）
+- 經濟：任務報酬 `economy.add(n, 'mission')`、打卡 `economy.add(n, 'checkin')`（reason 字串，§7 無需改碼）
+
+## 19. 效能預算（手機 low 檔）
+
+render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 ≤ 32、同時音源 ≤ 12；大地圖開啟時暫停 3D 渲染或降頻；各模組 update 不得每幀配置新物件（重用暫存）
+
+---
+
+## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
+
+### 共通
+- 地標點：`landmarks = landmarkPoints(manifest ?? [], projectLatLon)`（manifest = public/models/manifest.json；缺檔回 []），傳給 missions / checkins / 大地圖
+- interactable 仲裁（§17）：missions（3）> checkins（2）> food（1）；ammo pickups 自動拾取不需按 E；`hud.setPrompt(text)`；`snap.pressed.interact` → `act()`
+- 全螢幕面板（任務接單 / 結算、大地圖、圖鑑）開啟時 `input.enabled = false`、遊戲暫停輸入；關閉時恢復；E / Esc 在面板開啟中由面板處理，遊戲不再處理
+- 存檔 getState：`version: SAVE_VERSION`，帶 `weapons.serialize()`、`missions.serialize()`、`collect: { checkins: checkins.serialize(), foods: food.serialize() }`（兩者回傳陣列時直接放入）；讀檔後各自 `restore(save.xxx)`；stats 的 missionsDone / missionsFailed / shotsFired 由整合層依 `mission:complete` / `mission:fail` / `weapon:fire`（byPlayer）累加（economy.snapshot 已保留新統計欄位）
+
+### 武器（W1，細節見 src/weapons/WIRING.md）
+- `weapons.attack(aim)` 取代 `player.punch()`（fist 內部仍走 combat 拳擊）；持手槍時 `snap.down.attack` 可連發（半自動間隔由武器定）
+- 每幀：`aim = { origin, dir（鏡頭中心射線）, aiming: snap.down.aim && current==='pistol', muzzle, candidates }` → `weapons.update(dt, aim)`；`const k = weapons.recoilKick?.()` → `rig.addRecoil(k.pitch, k.yaw)`；`rig.update(…, { …, aim: aim.aiming })`
+- `raycast` / `sweep` 以 `PhysicsWorld.castRay` / `castShape` 實作，collider → actor 以行人剛體對照表查
+- `weapon:fire`（byPlayer）→ 對 30 m 內行人 `brain.hear({ type: 'gunshot', x, z })`（`gunshotListeners` 見 WIRING.md）
+- `snap.pressed.slot1/2/3` → `weapons.select(0/1/2)`；`weaponCycle` → `cycle()`；`reload` → `reload()`；駕駛中不處理武器輸入且武器模型隱藏
+- 武器 HUD / 觸控武器鈕 / 輪盤 / 裝填鈕 / 瞄準鈕：`src/weapons/hud.js`（依 WIRING.md 建立於 `#touch-ui` 或 body）；`tb-interact` 由整合層以 `registerTouchButton` 註冊（有提示才顯示）
+- 動畫：createWeapons 的 `playAnim` 注入 W3 的 weaponLayer.play；持武器姿勢 `weaponLayer.setPose`
+- `pickup:ammo` → `weapons.addAmmo(n)`；`createAmmoPickups` 每幀 `update(dt, playerPos)`
+- 行人：拳 / 棒 hp 歸零只倒地、起身回滿（recoverOnKo）；槍擊歸零 → dying → dead 回收
+- combat 'hit' → emit `combat:hit`（§10 欄位）；'knockdown' → `ped:knockdown`（cause 含 bat / bullet）；兩者也餵 blood-fx 的 onHit / onKnockdown
+
+### 音效（W2）
+- `audio = createAudio({ bus, settings })`；每次 pointerdown / keydown / touchend 呼叫 `audio.unlock()`
+- 每幀 `audio.update(dt, state)`：x / z / yaw 用鏡頭；`rpm01 = |speed| / 最高速`、`skid01 = 側滑速度 / 8`、`twoWheeler`、`nearJunction` = traffic-lights 最近路口距離（無 = null）；暫停中也呼叫並帶 `paused: true`
+- 選單與各面板按鈕 `bus.emit('ui:sound', { kind })`
+
+### 任務（W4）
+- `missions = createMissions({ bus, scene, root: document.body, landmarks, addMoney: (n, r) => economy.add(n, r), fetchJson, now: () => 遊戲秒, rng, heightAt })`；`restore(save.missions)`
+- 每幀 `missions.update(dt, { x, z, driving })`；步行移速 × `missions.speedScale()`；`isModalOpen()` 為真 → 暫停輸入
+- `player:ko` → `missions.onPlayerKo()`；玩家駕駛的車碰撞（contacts / vehicle-damage 的 relSpeed）→ `missions.onVehicleImpact({ relSpeed })`
+- markers 併入 hud / 大地圖；`nav:destination` / `nav:clear` 由 navigator 自行訂閱
+
+### 導航與大地圖（W5）
+- `graph = buildRoadGraph(surfaceRoads)`；`nav = createNavigator({ bus, graph, scene, heightAt })`；每幀 `nav.update(dt, playerPos)`；`hud.update` 的 `state.route = nav.route()`、markers 併入 `nav.markers()`
+- `bigMap = createBigMap({ root: document.body, bus, getPlayer, getMarkers: 各模組 markers 合併, getRoute: () => nav.route(), onPick: (x, z) => nav.setDestination(x, z, '地圖標記', 'map', playerPos), landmarks, onClose })`；`snap.pressed.map` / 觸控 `tb-map` → `bigMap.toggle()`；Esc 關閉；開啟時暫停 3D 渲染，玩家移動才 `draw()`
+- 大地圖面板自帶 OSM / ODbL 標示（面板 z 85 蓋住遊戲 `#attribution` 屬預期）
+
+### 打卡與圖鑑（W6）
+- `checkins = createCheckins({ bus, landmarks, addMoney: (n, r) => economy.add(n, r), root: document.body })`；`food = createFoodGuide({ bus, scene, root: document.body, fetchJson, addMoney })`；每幀 `food.update(dt, playerPos, camera)`
+- 兩者 `nearest(pos)` 納入仲裁（小吃只在步行時問）；markers 串 `checkins.markers()` + `food.markers()`（回傳重用陣列，勿修改）
+- 存檔 `collect: { checkins: checkins.serialize(), foods: food.serialize() }`；讀檔 `checkins.restore(save.collect)`、`food.restore(save.collect)`
+- 圖鑑入口：暫停選單加「圖鑑」按鈕（與觸控 tl 區可選加 `tb-guide`）→ `food.open()`；開啟時暫停輸入；Esc 先 `food.close()`
+- food manifest 實檔欄位為 `{ slug, name, file, intro }`（已別名處理）
+
+### 動畫層與流血（W3）
+- player 與 traffic 行人：建 animator 後 `layer = createWeaponLayer(anim)`，每次 `anim.update` 後緊接 `layer.update(同 dt)`；回池時 `anim.reset()`、`layer.reset()`、`detachWeapon`（行人目前不持武器，只需 layer 以播定向受擊 / 後續擴充；若成本高可只給玩家建 layer）
+- weapons 的 `playAnim` → `layer.play(clip)`（回傳秒數或 false）；姿勢 `layer.setPose('bat_hold'|'pistol_hold'|'pistol_aim'|'none')`；`layer.on('hitWindow'|'fire'|'swap')`；開槍 `layer.addRecoil(settings.get('recoil'))`；`attachWeapon(character, weaponObj, weaponMount(entry))`（weaponMount 讀 FX1 後 models.js 的 socketQuaternion / grip）
+- `blood = createBloodFx({ scene, settings, heightAt })`；`combat:hit` → `blood.onHit(e)`、`ped:knockdown` → `blood.onKnockdown(e)`；每幀 `blood.update(dt, camera)`
+- 上半身層權重約 92%（非硬遮罩），腿不受影響

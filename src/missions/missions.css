@@ -1,0 +1,290 @@
+/* 任務 UI 樣式（由 src/missions/index.js import）：全部 ms- 前綴
+   目標列 + 字幕（上中）z-index 55；接單卡 / 結算 / 失敗面板 z-index 85（只在遊戲中開啟）
+   介面大小讀 --tg-ui-scale；安全區以 env(safe-area-inset-*) 內縮；按鈕 ≥ 44 px；直向（高 ≥ 寬）改上下排版
+   不覆蓋左下角的 #attribution（OpenStreetMap / ODbL）：目標列在上中、面板為置中卡片且 pointer-events 只在卡片上 */
+
+.ms-hud {
+  --ms-s: var(--tg-ui-scale, 1);
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(92vw, 640px);
+  pointer-events: none;
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--ms-s));
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.ms-hud [hidden],
+.ms-panel[hidden],
+.ms-panel [hidden] {
+  display: none !important;
+}
+
+.ms-objective {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(12, 16, 32, 0.72);
+  border: 1px solid rgba(255, 210, 63, 0.45);
+}
+
+.ms-obj-text {
+  font-weight: bold;
+}
+
+.ms-obj-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ms-obj-timer.ms-urgent {
+  background: rgba(230, 60, 50, 0.85);
+  animation: ms-blink 0.8s ease-in-out infinite alternate;
+}
+
+.ms-obj-damage {
+  color: #ffb3a8;
+}
+
+@keyframes ms-blink {
+  from { opacity: 1; }
+  to { opacity: 0.55; }
+}
+
+.ms-subtitle {
+  max-width: 100%;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  text-align: center;
+  line-height: 1.45;
+}
+
+/* ---------- 面板 ---------- */
+.ms-panel {
+  --ms-s: var(--tg-ui-scale, 1);
+  --ms-accent: #ffd23f;
+  --ms-orange: #f28c1a;
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: calc(12px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom))
+    calc(12px + env(safe-area-inset-left));
+  background: rgba(6, 9, 20, 0.45);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(14px, 1.1vw + 0.6vh, 17px) * var(--ms-s));
+  line-height: 1.5;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.ms-card {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  width: min(100%, 760px);
+  max-height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(12, 16, 32, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.ms-card-art {
+  position: relative;
+  flex: 0 0 38%;
+  min-height: 180px;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ms-card-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ms-card-art-name {
+  padding: 12px;
+  text-align: center;
+  font-size: 1.25em;
+  font-weight: bold;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.ms-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ms-kicker {
+  color: var(--ms-accent);
+  font-size: 0.85em;
+  letter-spacing: 0.08em;
+}
+
+.ms-kicker-ok {
+  color: #7ee08a;
+}
+
+.ms-kicker-fail {
+  color: #ff8a7a;
+}
+
+.ms-card-title {
+  margin: 0;
+  font-size: 1.35em;
+  line-height: 1.3;
+}
+
+.ms-card-client {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.ms-card-brief {
+  margin: 2px 0;
+}
+
+.ms-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ms-tag {
+  padding: 1px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 0.85em;
+}
+
+.ms-tag-fragile { background: rgba(120, 190, 255, 0.35); }
+.ms-tag-heavy { background: rgba(242, 140, 26, 0.45); }
+.ms-tag-timed { background: rgba(230, 60, 50, 0.5); }
+
+.ms-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.ms-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ms-stat-k {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ms-stat-v {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ms-stat-money .ms-stat-v {
+  color: var(--ms-accent);
+  font-weight: bold;
+}
+
+.ms-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 10px;
+}
+
+.ms-btn {
+  flex: 1 1 0;
+  min-height: 48px;
+  min-width: 44px;
+  padding: 0 18px;
+  border-radius: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.ms-btn-primary {
+  border-color: var(--ms-accent);
+  background: linear-gradient(180deg, var(--ms-accent), var(--ms-orange));
+  color: #1a1206;
+}
+
+.ms-btn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+/* 內容過長捲動時，行動列貼在卡片底部 */
+.ms-card-body > .ms-actions {
+  position: sticky;
+  bottom: -16px;
+  padding-bottom: 4px;
+  background: rgba(12, 16, 32, 0.92);
+}
+
+/* 直向 / 窄螢幕：圖卡在上、內容在下 */
+@media (orientation: portrait), (max-width: 560px) {
+  .ms-card {
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .ms-card-art {
+    flex: 0 0 auto;
+    min-height: 0;
+    height: min(28vh, 200px);
+  }
+
+  .ms-hud {
+    width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
+  }
+}
+
+/* 觸控：目標列避開左上小地圖與小鈕列（右移、下移一點） */
+body.touch .ms-hud {
+  top: calc(66px + env(safe-area-inset-top));
+}

@@ -1,12 +1,15 @@
-// 選單 UI：開始畫面、暫停選單（繼續 / 地圖 / 設定 / 操作說明 / 統計 / 全螢幕 / 回主選單）、選單內確認對話框
+// 選單 UI：開始畫面（含內容標示）、暫停選單（繼續 / 地圖 / 圖鑑 / 設定 / 操作說明 / 統計 / 全螢幕 / 回主選單）、選單內確認對話框
 // 狀態與鍵盤導覽由 menu-model.js 決定，本檔只負責 DOM、事件與把效果轉成 bus 事件 / settings.set
-// 依賴全部注入（settings / bus / keymapHelp / touchHelp / getStats / getMoney / hasSave / mapView），不 import src/core/**
+// 依賴全部注入（settings / bus / keymapHelp / touchHelp / getStats / getMoney / hasSave / mapView / onOpenGuide），不 import src/core/**
+// 「圖鑑」只在有給 onOpenGuide 時列出：點下後選單關閉（不 emit game:pause）並呼叫 onOpenGuide()，圖鑑關閉後由整合層決定回暫停選單或繼續
+// 音效：選單操作一律 bus.emit('ui:sound', { kind })（開頁 / 開選單 open、繼續 close、開始 / 確定 confirm、返回 / 取消 cancel、其餘 click）
 // 背景半透明，場景由整合層持續渲染；overlay 上的指標 / 觸控事件一律 stopPropagation，不傳到遊戲 canvas 與觸控層
 import './menu.css';
 import { createMenuModel, ITEM_LABELS, PAGE_TITLES, formatDuration, formatKm, formatMoney } from './menu-model.js';
 
 const OSM_COPYRIGHT_URL = 'https://www.openstreetmap.org/copyright';
 const START_TIP = '小提示：新光三越、老虎城一帶最熱鬧，路上行人也最多。';
+export const CONTENT_NOTICE = '本遊戲含槍械、暴力與血液畫面';
 
 // 設定頁的列（鍵名 / 範圍對齊契約 §2 SETTINGS_SCHEMA）
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -30,7 +33,10 @@ const SETTING_ROWS = [
   { key: 'invertY', type: 'toggle', label: '反轉 Y 軸' },
   { key: 'volumeMaster', type: 'range', label: '主音量', min: 0, max: 1, step: 0.05, fmt: pct },
   { key: 'volumeMusic', type: 'range', label: '音樂', min: 0, max: 1, step: 0.05, fmt: pct },
-  { key: 'volumeSfx', type: 'range', label: '音效', min: 0, max: 1, step: 0.05, fmt: pct, note: '音效將於後續版本加入' },
+  { key: 'volumeSfx', type: 'range', label: '音效', min: 0, max: 1, step: 0.05, fmt: pct },
+  { key: 'showBlood', type: 'toggle', label: '顯示血液', note: '關閉後不顯示地面血跡與血滴' },
+  { key: 'recoil', type: 'range', label: '後座力', min: 0.2, max: 1, step: 0.1, fmt: pct },
+  { key: 'aimAssist', type: 'toggle', label: '瞄準輔助', note: '只作用於觸控操作' },
   { key: 'showFps', type: 'toggle', label: '顯示 FPS' },
   { key: 'showHints', type: 'toggle', label: '新手提示' },
   { key: 'uiScale', type: 'range', label: '介面大小', min: 0.8, max: 1.3, step: 0.05, fmt: pct },
@@ -65,11 +71,21 @@ export function createMenu({
   getMoney = () => 0,
   hasSave = () => false,
   mapView = null,
+  onOpenGuide = null,
 }) {
   const doc = globalThis.document;
   const win = typeof window !== 'undefined' ? window : null;
   const fsEnabled = !!(doc.fullscreenEnabled || doc.webkitFullscreenEnabled);
-  const model = createMenuModel({ fullscreen: fsEnabled });
+  const hasGuide = typeof onOpenGuide === 'function';
+  const model = createMenuModel({ fullscreen: fsEnabled, guide: hasGuide });
+  // 介面音效（§10 ui:sound）；bus 缺 emit 或 listener 例外都不影響選單
+  const sound = (kind) => {
+    try {
+      if (bus && bus.emit) bus.emit('ui:sound', { kind });
+    } catch (err) {
+      // 忽略
+    }
+  };
   const cleanups = [];
   const listen = (target, type, fn, opts) => {
     if (!target || !target.addEventListener) return;
@@ -104,7 +120,10 @@ export function createMenu({
   const title = h('h1', 'tg-menu-title', '臺中GTA');
   const subtitle = h('div', 'tg-menu-sub', '七期精華區');
   const pauseTitle = h('div', 'tg-menu-pausetitle', '暫停');
-  brand.append(title, subtitle, pauseTitle);
+  // 內容標示：只在開始畫面顯示（menu.css 控制），位於標題下方、不與左欄按鈕重疊
+  const notice = h('div', 'tg-menu-notice', CONTENT_NOTICE);
+  notice.setAttribute('role', 'note');
+  brand.append(title, subtitle, notice, pauseTitle);
   const moneyEl = h('div', 'tg-menu-money');
   head.append(brand, moneyEl);
 
@@ -190,6 +209,7 @@ export function createMenu({
           model.focusItem(def.key);
           settings.set(def.key, v);
           refreshSetting(def.key);
+          sound('click');
           render();
         });
         b.dataset.value = v;
@@ -212,10 +232,12 @@ export function createMenu({
         settings.set(def.key, parseFloat(input.value));
         refreshSetting(def.key);
       });
+      input.addEventListener('change', () => sound('click')); // 放開滑桿時一次，拖曳中不連發
       wrap.append(input, out);
       row.appendChild(wrap);
       update = (value) => {
         const v = Number(value);
+        if (!Number.isFinite(v)) return; // 設定尚未提供此鍵（舊版 settings）時維持滑桿原狀
         if (String(input.value) !== String(v)) input.value = String(v);
         out.textContent = def.fmt(v);
       };
@@ -225,6 +247,7 @@ export function createMenu({
         model.focusItem(def.key);
         settings.set(def.key, !settings.get(def.key));
         refreshSetting(def.key);
+        sound('click');
         render();
       });
       tg.setAttribute('role', 'switch');
@@ -246,6 +269,7 @@ export function createMenu({
       kbNav = false;
       model.focusItem('reset');
       resetSettings();
+      sound('confirm');
       render();
     }),
   );
@@ -310,6 +334,7 @@ export function createMenu({
   for (const [id, text] of helpSets) {
     const b = button('tg-tab', text, () => {
       helpTab = id;
+      sound('click');
       renderHelp();
     });
     b.setAttribute('role', 'tab');
@@ -446,11 +471,26 @@ export function createMenu({
   if (win) listen(win, 'keydown', onKey, true);
 
   // ---------- 效果執行 ----------
+  // 效果 → 介面音效種類（focus / arrow / zoom / none 等不出聲，避免鍵盤導覽時連發）
+  const FX_SOUND = {
+    start: 'confirm',
+    quitToMenu: 'confirm',
+    resume: 'close',
+    guide: 'open',
+    page: 'open',
+    confirm: 'open',
+    cancel: 'cancel',
+    back: 'cancel',
+    activate: 'click',
+    adjust: 'click',
+    fullscreen: 'click',
+  };
   function run(fx) {
     if (!fx) {
       render();
       return;
     }
+    if (FX_SOUND[fx.type]) sound(FX_SOUND[fx.type]);
     switch (fx.type) {
       case 'start':
         render();
@@ -468,6 +508,15 @@ export function createMenu({
       case 'fullscreen':
         toggleFullscreen();
         render();
+        break;
+      case 'guide':
+        // 選單關閉但不 emit game:pause（遊戲仍暫停，由圖鑑面板接手輸入）；整合層在圖鑑關閉時恢復
+        render();
+        try {
+          onOpenGuide();
+        } catch (err) {
+          console.error('[menu] onOpenGuide 失敗', err);
+        }
         break;
       case 'activate':
         if (fx.page === 'settings') adjustSetting(fx.item, 0, true);
@@ -600,7 +649,7 @@ export function createMenu({
       model.close();
       render();
     },
-    // tab：'map' | 'settings' | 'help' | 'stats'；開始畫面顯示中時不處理（回傳 false）
+    // tab：'map' | 'settings' | 'help' | 'stats'；開始畫面顯示中時不處理（回傳 false）；圖鑑關閉後可呼叫 openPause() 回暫停選單
     openPause(tab) {
       if (model.state === 'start') return false;
       const wasOpen = model.state === 'pause';
@@ -609,7 +658,10 @@ export function createMenu({
       kbNav = false;
       setMoney(readMoney());
       render();
-      if (!wasOpen) bus.emit('game:pause', { paused: true, tab: model.tab || undefined });
+      if (!wasOpen) {
+        sound('open');
+        bus.emit('game:pause', { paused: true, tab: model.tab || undefined });
+      }
       return true;
     },
     // 關閉：暫停中 = 繼續遊戲（emit game:pause { paused:false }）；開始畫面 = 單純隱藏
@@ -618,7 +670,10 @@ export function createMenu({
       if (st === 'closed') return;
       model.close();
       render();
-      if (st === 'pause') bus.emit('game:pause', { paused: false });
+      if (st === 'pause') {
+        sound('close');
+        bus.emit('game:pause', { paused: false });
+      }
     },
     isOpen: () => model.state !== 'closed',
     get state() {

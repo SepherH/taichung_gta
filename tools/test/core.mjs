@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-// P3-0 介面核心無頭測試：src/core/events.js（bus）、settings.js、quality.js、actions.js
+// P3-0 / D4-0 介面核心無頭測試：src/core/events.js（bus）、settings.js、quality.js、actions.js、input.js 的 snapshot()
 // 用法：node tools/test/core.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // 比照 tools/test/crowd.mjs：掛 JSON import hook、document 最小替身（core 模組本身不碰 DOM，替身僅確保無副作用）
+// actions：TOUCH_HELP 與 touch.js 左上小鈕（tl1–tl3，含圖鑑）標籤一致
 import { register } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const JSON_HOOK = `
 import { readFileSync } from 'node:fs';
@@ -17,7 +19,7 @@ register(`data:text/javascript,${encodeURIComponent(JSON_HOOK)}`, import.meta.ur
 globalThis.document = { createElement: () => ({ style: {} }) };
 
 const { createBus, bus } = await import('../../src/core/events.js');
-const { createSettings, settings, SETTINGS_SCHEMA, SETTINGS_KEY, LEGACY_SENS_KEYS } = await import('../../src/core/settings.js');
+const { createSettings, settings, SETTINGS_SCHEMA, SETTINGS_KEY, LEGACY_SENS_KEYS, normalizeSetting } = await import('../../src/core/settings.js');
 const { QUALITY_TIERS, QUALITY_IDS, resolveQuality, qualityBudget } = await import('../../src/core/quality.js');
 const { ACTIONS, KEYMAP_HELP, TOUCH_HELP, createActionReader } = await import('../../src/core/actions.js');
 
@@ -169,10 +171,26 @@ function fakeStorage(init = {}) {
   const all = s.getAll();
   check(
     'settings：預設值',
-    all.quality === 'auto' && all.lookSensMouse === 1 && all.lookSensTouch === 1 && all.invertY === false && all.volumeMaster === 0.8 && all.volumeMusic === 0.6 && all.volumeSfx === 0.9 && all.showFps === false && all.showHints === true && all.uiScale === 1,
+    all.quality === 'auto' && all.lookSensMouse === 1 && all.lookSensTouch === 1 && all.invertY === false && all.volumeMaster === 0.8 && all.volumeMusic === 0.6 && all.volumeSfx === 0.9 && all.showFps === false && all.showHints === true && all.uiScale === 1 &&
+      all.showBlood === true && all.recoil === 1 && all.aimAssist === true,
     JSON.stringify(all),
   );
-  check('settings：schema 有 10 個鍵', Object.keys(SETTINGS_SCHEMA).length === 10 && Object.keys(all).length === 10);
+  check('settings：schema 有 13 個鍵（§2 十個 + §11 三個）', Object.keys(SETTINGS_SCHEMA).length === 13 && Object.keys(all).length === 13);
+  check(
+    'settings：§11 schema（showBlood / aimAssist boolean、recoil 0.2–1.0 step 0.1）',
+    SETTINGS_SCHEMA.showBlood.type === 'boolean' && SETTINGS_SCHEMA.aimAssist.type === 'boolean' && SETTINGS_SCHEMA.recoil.type === 'number' &&
+      SETTINGS_SCHEMA.recoil.min === 0.2 && SETTINGS_SCHEMA.recoil.max === 1 && SETTINGS_SCHEMA.recoil.step === 0.1 &&
+      SETTINGS_SCHEMA.showBlood.label === '顯示血液' && SETTINGS_SCHEMA.recoil.label === '後座力' && SETTINGS_SCHEMA.aimAssist.label === '瞄準輔助',
+  );
+  check(
+    'settings：normalizeSetting recoil（0 → 0.2、5 → 1、0.44 → 0.4、0.55 → 0.6、0.7 無浮點誤差、非數 → undefined）',
+    normalizeSetting('recoil', 0) === 0.2 && normalizeSetting('recoil', 5) === 1 && normalizeSetting('recoil', 0.44) === 0.4 && normalizeSetting('recoil', 0.55) === 0.6 &&
+      normalizeSetting('recoil', 0.7) === 0.7 && normalizeSetting('recoil', '0.5') === undefined && normalizeSetting('recoil', NaN) === undefined,
+  );
+  check(
+    'settings：normalizeSetting showBlood / aimAssist 只收 boolean',
+    normalizeSetting('showBlood', false) === false && normalizeSetting('aimAssist', true) === true && normalizeSetting('showBlood', 0) === undefined && normalizeSetting('aimAssist', 'false') === undefined,
+  );
   check('settings：全新且無舊鍵時不寫入 storage', st.writes === 0);
   all.quality = 'low';
   check('settings：getAll 回傳副本', s.get('quality') === 'auto');
@@ -195,10 +213,19 @@ function fakeStorage(init = {}) {
     ['invertY', 1],
     ['showFps', undefined],
     ['noSuchKey', 1],
+    ['showBlood', 'off'],
+    ['aimAssist', null],
+    ['recoil', Infinity],
+    ['recoil', 'max'],
   ];
   const rejected = bad.every(([k, v]) => s.set(k, v) === false);
   check('settings：非法值回 false 且不存', rejected && JSON.stringify(s.getAll()) === before);
   check('settings：enum / boolean 合法值', s.set('quality', 'ultra') && s.get('quality') === 'ultra' && s.set('invertY', true) && s.get('invertY') === true);
+  check(
+    'settings：§11 三鍵 set / 持久化',
+    s.set('showBlood', false) && s.get('showBlood') === false && s.set('aimAssist', false) && s.get('aimAssist') === false && s.set('recoil', 0.33) && s.get('recoil') === 0.3 &&
+      JSON.parse(st.m.get(SETTINGS_KEY)).recoil === 0.3 && JSON.parse(st.m.get(SETTINGS_KEY)).showBlood === false,
+  );
 
   // 訂閱
   const ev = [];
@@ -230,6 +257,7 @@ function fakeStorage(init = {}) {
   check('settings：reset(key) 單鍵回預設', s.get('quality') === 'auto' && s.get('invertY') === true);
   s.reset();
   check('settings：reset() 全部回預設並存檔', s.get('invertY') === false && s.get('lookSensMouse') === 1 && JSON.parse(st.m.get(SETTINGS_KEY)).invertY === false);
+  check('settings：reset() 含 §11 三鍵', s.get('showBlood') === true && s.get('aimAssist') === true && s.get('recoil') === 1 && JSON.parse(st.m.get(SETTINGS_KEY)).recoil === 1);
 }
 {
   // 舊鍵遷移
@@ -265,6 +293,10 @@ function fakeStorage(init = {}) {
   check('settings：損毀 JSON / 非物件 → 預設、不丟例外', ok);
   const s = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ quality: 'bogus', lookSensMouse: 9, invertY: 'yes', extra: 1 }) }) });
   check('settings：存檔內單鍵非法 → 該鍵預設、數值 clamp、未知鍵丟棄', s.get('quality') === 'auto' && s.get('lookSensMouse') === 3 && s.get('invertY') === false && s.getAll().extra === undefined);
+  const sb = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ showBlood: 'no', recoil: -3, aimAssist: 1 }) }) });
+  check('settings：§11 三鍵損毀 → showBlood / aimAssist 預設 true、recoil clamp 0.2', sb.get('showBlood') === true && sb.get('aimAssist') === true && sb.get('recoil') === 0.2);
+  const sOld = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ quality: 'low', uiScale: 1.2 }) }) });
+  check('settings：Phase 3 舊設定（無 §11 鍵）→ 原值保留、新鍵補預設', sOld.get('quality') === 'low' && sOld.get('uiScale') === 1.2 && sOld.get('showBlood') === true && sOld.get('recoil') === 1 && sOld.get('aimAssist') === true);
   // storage 丟例外（無痕模式）
   const throwing = {
     getItem() {
@@ -314,15 +346,17 @@ function fakeStorage(init = {}) {
 // ======================= actions =======================
 {
   const names = Object.keys(ACTIONS);
-  const expected = ['move', 'sprint', 'jump', 'attack', 'aim', 'interact', 'enterExit', 'horn', 'camera', 'lookBack', 'radio', 'phone', 'map', 'pause', 'timeSkip', 'reload'];
-  check('actions：16 個定稿動作', expected.every((n) => names.includes(n)) && names.length === expected.length, names.join(','));
+  const expected = ['move', 'sprint', 'jump', 'attack', 'aim', 'interact', 'enterExit', 'horn', 'camera', 'lookBack', 'weaponCycle', 'slot1', 'slot2', 'slot3', 'phone', 'map', 'pause', 'timeSkip', 'reload'];
+  check('actions：19 個定稿動作（§4 + §12；radio 已移除）', expected.every((n) => names.includes(n)) && names.length === expected.length && !names.includes('radio'), names.join(','));
   check(
     'actions：鍵位對齊契約',
     ACTIONS.attack.keys.join() === 'Mouse0' && ACTIONS.aim.keys.join() === 'Mouse2' && ACTIONS.interact.keys.join() === 'KeyE' && ACTIONS.enterExit.keys.join() === 'KeyF' &&
       ACTIONS.horn.keys.join() === 'KeyH' && ACTIONS.camera.keys.join() === 'KeyV' && ACTIONS.lookBack.keys.join() === 'KeyC' && ACTIONS.map.keys.join() === 'KeyM' &&
       ACTIONS.pause.keys.join() === 'Escape,KeyP' && ACTIONS.timeSkip.keys.join() === 'KeyN' && ACTIONS.reload.keys.join() === 'KeyR' && ACTIONS.jump.keys.join() === 'Space' &&
-      ACTIONS.sprint.keys.join() === 'ShiftLeft,ShiftRight' && ACTIONS.radio.keys.join() === 'KeyQ' && ACTIONS.phone.keys.join() === 'KeyT',
+      ACTIONS.sprint.keys.join() === 'ShiftLeft,ShiftRight' && ACTIONS.weaponCycle.keys.join() === 'KeyQ' && ACTIONS.phone.keys.join() === 'KeyT' &&
+      ACTIONS.slot1.keys.join() === 'Digit1' && ACTIONS.slot2.keys.join() === 'Digit2' && ACTIONS.slot3.keys.join() === 'Digit3',
   );
+  check('actions：aim 按住、attack 可按住（手槍連發）', ACTIONS.aim.hold === true && ACTIONS.attack.hold === true && ACTIONS.attack.label === '攻擊（依武器）');
   check('actions：每個動作有 keys / label / hold', names.every((n) => Array.isArray(ACTIONS[n].keys) && ACTIONS[n].keys.length > 0 && typeof ACTIONS[n].label === 'string' && typeof ACTIONS[n].hold === 'boolean'));
   check('actions：取消的舊鍵不再綁定（O 靈敏度、G 舊喇叭）', !names.some((n) => ACTIONS[n].keys.includes('KeyO') || ACTIONS[n].keys.includes('KeyG')));
   // 同一 code 不綁兩個 action（Escape / KeyP 同屬 pause 不算重複）
@@ -337,7 +371,7 @@ function fakeStorage(init = {}) {
   check('actions：同一 code 不重複綁兩個 action', dups.length === 0, dups.join(' '));
   check('actions：pause 例外（Escape / KeyP 同屬 pause）', owner.get('Escape') === 'pause' && owner.get('KeyP') === 'pause');
   const reserved = names.filter((n) => ACTIONS[n].reserved);
-  check('actions：預留動作 = aim / interact / radio / phone / reload', reserved.sort().join(',') === 'aim,interact,phone,radio,reload', reserved.join(','));
+  check('actions：預留動作只剩 phone（aim / interact / reload 已取消預留）', reserved.join(',') === 'phone', reserved.join(','));
 
   const helpShape = (help) =>
     Array.isArray(help) && help.every((g) => ['步行', '駕駛', '通用'].includes(g.group) && Array.isArray(g.items) && g.items.every((it) => typeof it.keys === 'string' && typeof it.desc === 'string' && (it.action === null || ACTIONS[it.action])));
@@ -349,7 +383,33 @@ function fakeStorage(init = {}) {
   check('actions：KEYMAP_HELP 不列預留 action', leak.length === 0, leak.join(','));
   const helpText = JSON.stringify(KEYMAP_HELP);
   const items = KEYMAP_HELP.flatMap((g) => g.items);
-  check('actions：說明不再列 O 靈敏度 / E 揮拳 / R 翻車，H 只當喇叭', !items.some((i) => ['O', 'E', 'R'].includes(i.keys)) && items.filter((i) => i.keys === 'H').every((i) => i.action === 'horn'));
+  check('actions：說明不再列 O 靈敏度 / 電台，H 只當喇叭、E 只當互動、R 只當裝填', !items.some((i) => i.keys === 'O' || /電台/.test(i.desc)) && items.filter((i) => i.keys === 'H').every((i) => i.action === 'horn') && items.filter((i) => i.keys === 'E').every((i) => i.action === 'interact') && items.filter((i) => i.keys === 'R').every((i) => i.action === 'reload'));
+  check('actions：攻擊說明為「依武器」（不再寫揮拳）', !/揮拳/.test(helpText) && !/揮拳/.test(JSON.stringify(TOUCH_HELP)) && items.some((i) => i.action === 'attack' && i.desc.includes('依武器')));
+  // 觸控說明：武器鈕（點擊循環 / 長按輪盤）、裝填、瞄準、互動鈕、地圖鈕開大地圖
+  const touchItems = TOUCH_HELP.flatMap((g) => g.items);
+  const tcov = new Set(touchItems.map((i) => i.action));
+  check('actions：TOUCH_HELP 含 weaponCycle / reload / aim / interact', ['weaponCycle', 'reload', 'aim', 'interact'].every((a) => tcov.has(a)));
+  const wpn = touchItems.find((i) => i.action === 'weaponCycle');
+  check('actions：觸控武器鈕說明含點擊循環與長按輪盤', !!wpn && wpn.desc.includes('點擊') && wpn.desc.includes('長按') && wpn.desc.includes('輪盤'));
+  check('actions：地圖說明為大地圖（桌機 / 觸控）', [...items, ...touchItems].filter((i) => i.action === 'map').every((i) => i.desc.includes('大地圖')) && touchItems.some((i) => i.action === 'map'));
+  // 左上小鈕（touch.js DEFAULT_BUTTONS 的 tl1–tl3，隱藏的預留手機鈕除外）每顆都在 TOUCH_HELP「通用」有「左上「標籤」」說明
+  {
+    const touchSrc = readFileSync(new URL('../../src/touch.js', import.meta.url), 'utf8');
+    const tl = [...touchSrc.matchAll(/^\s*\{ id: '([\w-]+)', label: '([^']+)'.*slot: 'tl[123]'.*$/gm)].filter((m) => m[1] !== 'tb-phone').map((m) => m[2]);
+    const general = (TOUCH_HELP.find((g) => g.group === '通用') || { items: [] }).items;
+    const lackTl = tl.filter((label) => !general.some((i) => i.keys === `左上「${label}」`));
+    check('actions：TOUCH_HELP「通用」涵蓋左上小鈕（暫停 / 地圖 / 圖鑑）', tl.length >= 3 && tl.includes('圖鑑') && lackTl.length === 0, lackTl.join(',') || tl.join(','));
+    const guide = general.find((i) => i.keys === '左上「圖鑑」');
+    check('actions：圖鑑說明（無對應鍵位 action null、提到小吃圖鑑）', !!guide && guide.action === null && guide.desc.includes('圖鑑'));
+    check('actions：KEYMAP_HELP 不列圖鑑（桌機由暫停選單進入）', !JSON.stringify(KEYMAP_HELP).includes('圖鑑'));
+  }
+  const tleak = [...tcov].filter((a) => a && ACTIONS[a].reserved);
+  check('actions：TOUCH_HELP 不列預留 action', tleak.length === 0, tleak.join(','));
+  // main.js 的 HUD 常駐提示依 (group, action) 取說明列：這些組合必須存在
+  const need = [['步行', 'attack'], ['步行', 'enterExit'], ['步行', 'sprint'], ['通用', 'map'], ['通用', 'pause'], ['駕駛', 'horn'], ['駕駛', 'lookBack'], ['駕駛', 'enterExit'], ['通用', 'camera'], ['步行', 'move']];
+  const has = (help, g, a) => help.some((x) => x.group === g && x.items.some((i) => i.action === a));
+  const lack = need.filter(([g, a]) => !has(KEYMAP_HELP, g, a));
+  check('actions：KEYMAP_HELP 保有 HUD 提示用的 (group, action) 組合', lack.length === 0, lack.join(' '));
   check('actions：H 說明為喇叭、F 含扶起', /"keys":"H","action":"horn"/.test(helpText) && KEYMAP_HELP[1].items.some((i) => i.action === 'enterExit' && i.desc.includes('扶起')));
 
   // reader：假 input
@@ -363,6 +423,71 @@ function fakeStorage(init = {}) {
   held.add('Space');
   pressed.clear();
   check('actions：reader 即時反映 input 狀態', r.down('jump') && !r.pressed('pause'));
+  pressed.add('KeyQ');
+  pressed.add('Digit3');
+  held.add('Mouse2');
+  check('actions：reader 新動作（KeyQ → weaponCycle、Digit3 → slot3、Mouse2 → aim）', r.pressed('weaponCycle') && r.pressed('slot3') && !r.pressed('slot1') && r.down('aim') && r.pressed('radio') === false);
+}
+
+// ======================= input.snapshot（§12） =======================
+// mobile.js 在載入時判定 hasWindow：先在無 window 下載入（initMobile / isTouch 不動作），再裝 window 替身建構 Input
+{
+  const { Input } = await import('../../src/input.js');
+  const winL = new Map();
+  const domL = new Map();
+  const add = (m) => (name, fn) => {
+    if (!m.has(name)) m.set(name, []);
+    m.get(name).push(fn);
+  };
+  globalThis.window = { addEventListener: add(winL), innerWidth: 1280, innerHeight: 720 };
+  const dom = { addEventListener: add(domL) };
+  let input = null;
+  let err = null;
+  try {
+    input = new Input(dom);
+  } catch (e) {
+    err = e;
+  }
+  check('input：node 替身下可建構', !!input, err ? String(err) : '');
+  if (input) {
+    const fire = (m, name, ev) => (m.get(name) || []).forEach((fn) => fn({ preventDefault() {}, ...ev }));
+    const key = (code, type = 'keydown') => fire(winL, type, { code, repeat: false });
+    input.enabled = true;
+    const s0 = input.snapshot();
+    const downKeys = Object.keys(s0.down).sort().join(',');
+    const pressedKeys = Object.keys(s0.pressed).sort().join(',');
+    check('input：snapshot.down 欄位 = sprint / jump / attack / aim / lookBack', downKeys === 'aim,attack,jump,lookBack,sprint', downKeys);
+    check(
+      'input：snapshot.pressed 欄位含 §4 九項 + slot1–3 / weaponCycle / reload',
+      pressedKeys === ['attack', 'jump', 'interact', 'enterExit', 'horn', 'camera', 'map', 'pause', 'timeSkip', 'slot1', 'slot2', 'slot3', 'weaponCycle', 'reload'].sort().join(','),
+      pressedKeys,
+    );
+    check('input：snapshot 保留 move / look / wheel', typeof s0.move.x === 'number' && s0.look.dx === 0 && s0.wheel === 0);
+    key('Digit2');
+    key('KeyQ');
+    key('KeyR');
+    fire(domL, 'mousedown', { button: 2 });
+    fire(domL, 'mousedown', { button: 0 });
+    const s1 = input.snapshot();
+    check('input：Digit2 / KeyQ / KeyR → pressed.slot2 / weaponCycle / reload', s1.pressed.slot2 && !s1.pressed.slot1 && !s1.pressed.slot3 && s1.pressed.weaponCycle && s1.pressed.reload);
+    check('input：右鍵按住 → down.aim、左鍵按住 → down.attack + pressed.attack', s1.down.aim && s1.down.attack && s1.pressed.attack);
+    input.endFrame();
+    const s2 = input.snapshot();
+    check('input：endFrame 後 pressed 清空、按住仍在', !s2.pressed.slot2 && !s2.pressed.weaponCycle && !s2.pressed.reload && s2.down.aim && s2.down.attack);
+    fire(winL, 'mouseup', { button: 2 });
+    const s3 = input.snapshot();
+    check('input：放開右鍵 → down.aim 為假、左鍵仍按住', !s3.down.aim && s3.down.attack);
+    input.touchPress('Digit1', false);
+    input.touchPress('Mouse2', true);
+    const s4 = input.snapshot();
+    check('input：觸控 tap Digit1 → slot1、hold Mouse2 → aim', s4.pressed.slot1 && s4.down.aim);
+    input.enabled = false;
+    const s5 = input.snapshot();
+    check('input：enabled = false 清空（aim / attack / pressed）', !s5.down.aim && !s5.down.attack && !s5.pressed.slot1);
+    key('Digit3');
+    check('input：停用中按鍵不進 pressed', !input.snapshot().pressed.slot3);
+  }
+  delete globalThis.window;
 }
 
 console.log(failed === 0 ? `PASS ${passed}/${passed + failed}` : `FAIL ${failed}/${passed + failed}`);

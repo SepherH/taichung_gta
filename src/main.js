@@ -9,20 +9,28 @@
 //   （世界停止更新、照常渲染、input.enabled = false）；「繼續」在同一手勢內 requestPointerLock；回主選單 = 存檔後回開始畫面
 // 按鍵一律讀 core/actions 的 action：左鍵 / 觸控攻擊 = 攻擊、F 上下車 / 搶車 / 扶起、H 喇叭、V 鏡頭段、C 回頭看、M 地圖、Esc / P 暫停、N 快轉
 // 上車：enter_car 動作播完（animator 自動進 drive）才真正進駕駛，期間鎖輸入；搶車（carjack.js）期間 state.mode = 'carjack' 同樣鎖輸入
+// Phase 4 接線（docs/dev/interfaces.md §10–§19、附錄 B）：
+//   武器 createWeapons（raycast / sweep = PhysicsWorld.castRay / intersections + contacts router 的 collider → 行人 actor）、
+//   模型掛 hero weapon_socket、player.weaponLayer 姿勢 / 動作 / 後座、肩後鏡頭（瞄準中滾輪不縮放）、槍聲 → 行人 hear、彈藥拾取、武器 HUD；
+//   combat 'hit' → combat:hit → 血跡 blood.onHit、ped:knockdown → blood.onKnockdown（bat / bullet 擊倒也掉錢）；
+//   程序音效 createAudio（手勢 unlock、每幀 update）；委託 missions / 導航 nav / 大地圖 bigMap（M）/ 打卡 checkins / 小吃圖鑑 food（G 或選單）；
+//   interactable 仲裁（任務 3 > 打卡 2 > 小吃 1 > 彈藥 0，同級取近）→ 互動提示、E 執行；
+//   全螢幕面板（接單 / 結算、大地圖、圖鑑）開啟時世界與輸入暫停，大地圖 / 圖鑑開啟時不渲染 3D；存檔 v2（weapons / missions / collect）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
 import { TRIVIA } from './data/city.js';
 import { LoadingScreen } from './loading.js';
 import { Input } from './input.js';
+import { registerTouchButton } from './touch.js';
 import { PhysicsOccluder } from './collision.js';
 import { buildWorld, describeLocation } from './world.js';
 import { buildQiuhonggu } from './qiuhonggu.js';
 import { buildBuildings } from './buildings.js';
-import { loadLandmarkModels } from './landmarks/index.js';
+import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
 import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, nearestNamedRoad, surfaceFootways, surfaceRoads } from './citymodel.js';
-import { loadCharacterModels } from './characters/index.js';
+import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
 import { loadVehicleModels } from './vehicle-model.js';
 import { CombatSystem, pedKnockdownPayload } from './combat.js';
 import { Player, PLAYER_RADIUS } from './player.js';
@@ -30,7 +38,7 @@ import { VehicleManager, VEHICLE_TYPES, driveControls } from './vehicle.js';
 import { Traffic } from './traffic.js';
 import { createTrafficLights } from './traffic-lights.js';
 import { createCarjack } from './carjack.js';
-import { createVehicleDamage } from './vehicle-damage.js';
+import { DAMAGE_EXP, DAMAGE_MIN_SPEED, createVehicleDamage, impactDamage } from './vehicle-damage.js';
 import { CameraRig } from './camera.js';
 import { HUD } from './hud.js';
 import { DayNight } from './daynight.js';
@@ -40,16 +48,28 @@ import { bus } from './core/events.js';
 import { settings } from './core/settings.js';
 import { KEYMAP_HELP, TOUCH_HELP } from './core/actions.js';
 import { qualityBudget } from './core/quality.js';
-import { createAutosave, createSaveStore, defaultSave } from './save.js';
-import { createEconomy } from './economy.js';
+import { createAutosave, createSaveStore, defaultSave, SAVE_VERSION } from './save.js';
+import { createEconomy, LOOT_MIN, LOOT_MAX } from './economy.js';
 import { createMenu } from './ui/menu.js';
 import { createMapView } from './ui/map-view.js';
 import { initPhysics, PhysicsWorld } from './physics/world.js';
 import { buildWorldColliders, osmWithBuildings } from './physics/colliders.js';
-import { GROUPS } from './physics/groups.js';
+import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as G_NPC_CAR, PEDESTRIAN as G_PED, DEBRIS as G_DEBRIS } from './physics/groups.js';
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
 import { setActiveByDistance, ACTIVE_RADIUS } from './physics/npc-bodies.js';
+import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, DEFAULT_AMMO_POINTS, WEAPONS } from './weapons/index.js';
+import { makeBatSegment } from './weapons/models.js';
+import { createWeaponHud } from './weapons/hud.js';
+import { attachWeapon, detachWeapon } from './character-animation.js';
+import { createBloodFx } from './blood-fx.js';
+import { createAudio } from './audio/index.js';
+import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions } from './missions/index.js';
+import { buildRoadGraph, createNavigator } from './navigation.js';
+import { createBigMap } from './map/big-map.js';
+import { createCheckins } from './collect/checkins.js';
+import { createFoodGuide } from './collect/food-guide.js';
+import { landmarkPoints } from './core/landmark-points.js';
 
 const MAX_FRAME_DT = 0.1; // 單幀時間上限（s）；物理另有子步上限（world.js DEFAULT_MAX_SUBSTEPS）
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
@@ -68,6 +88,10 @@ const HINT_ATTACK_SEC = 8; // 步行幾秒後出現「攻擊」提示卡
 const HINT_PAUSE_SEC = 30; // 遊玩幾秒後出現「暫停選單」提示卡
 const FOG_NEAR_RATIO = 0.25; // 畫質視距縮短時霧的起點（相對霧終點）
 const SAVE_POS_SHRINK = 0.85; // 存檔位置重疊查詢用的膠囊半徑比例：存下的位置本來就站得住，留一點誤差避免貼牆點被誤判
+const AIM_CANDIDATE_RANGE = 40; // 觸控瞄準輔助的候選行人半徑（m，契約 §13）
+const JUNCTION_SCAN_SEC = 0.5; // 音效「最近路口距離」的查詢間隔（s）
+const SKID_REF = 8; // 側滑速度（m/s）達此值時 skid01 = 1（附錄 B 音效）
+const BASE_URL = import.meta.env.BASE_URL ?? './';
 
 // ---------- 純函式（tools/test/integration-p3.mjs 會擷取本區塊在 node 驗證；不可引用模組內其他識別字）----------
 // @integration-p3:pure-begin
@@ -116,7 +140,73 @@ function perfStats(buf, n) {
   for (const v of a) sum += v;
   return { avg: sum / n, p95: a[Math.min(n - 1, Math.floor(n * 0.95))] };
 }
+// interactable 仲裁（契約 §17）：priority 高者優先（任務 3 > 打卡 2 > 小吃 1 > 彈藥 0），同級取 dist 近者；null 項略過；都沒有回 null
+function pickInteractable(list) {
+  let best = null;
+  let bp = -Infinity;
+  let bd = Infinity;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    if (!it) continue;
+    const p = Number.isFinite(it.priority) ? it.priority : 0;
+    const d = Number.isFinite(it.dist) ? it.dist : Infinity;
+    if (p > bp || (p === bp && d < bd)) {
+      best = it;
+      bp = p;
+      bd = d;
+    }
+  }
+  return best;
+}
+// 存檔統計 = 經濟統計 + 整合層自行累加的欄位（missionsDone / missionsFailed / shotsFired 為本局累計值；
+//   pedsKnockedOut 另加 bat / bullet 擊倒數，economy 只算 punch）
+function statsWithExtra(stats, extra) {
+  return {
+    ...stats,
+    missionsDone: extra.missionsDone,
+    missionsFailed: extra.missionsFailed,
+    shotsFired: extra.shotsFired,
+    pedsKnockedOut: (stats.pedsKnockedOut || 0) + extra.pedsKnockedOut,
+  };
+}
+// 把 +Y 轉到 (dx, dy, dz) 方向的單位四元數（Rapier 膠囊沿本地 Y）；零向量 → 單位四元數；寫入 out（不配置）
+function capsuleRotation(dx, dy, dz, out) {
+  const l = Math.hypot(dx, dy, dz);
+  if (l < 1e-9) {
+    out.x = 0;
+    out.y = 0;
+    out.z = 0;
+    out.w = 1;
+    return out;
+  }
+  const ux = dx / l;
+  const uy = dy / l;
+  const uz = dz / l;
+  if (uy < -1 + 1e-9) {
+    out.x = 1;
+    out.y = 0;
+    out.z = 0;
+    out.w = 0;
+    return out;
+  }
+  // q = (Y × u, 1 + Y·u) 正規化；Y × u = (uz, 0, −ux)
+  const w = 1 + uy;
+  const n = Math.hypot(uz, ux, w);
+  out.x = uz / n;
+  out.y = 0;
+  out.z = -ux / n;
+  out.w = w / n;
+  return out;
+}
 // @integration-p3:pure-end
+
+// 耐久扣值 → 等效撞擊速度（impactDamage 的反函數，以 static 係數估；撞行人係數 0.2 會得到較低速度，偏保守）
+// vehicle:damaged 的 delta 是去重後「多出的部分」，反推值只會偏低，交給委託的合併視窗取最大值
+function impactSpeedFromDamage(vehicle, delta) {
+  const k = impactDamage(vehicle, DAMAGE_MIN_SPEED + 1, 'static'); // = K × 質量係數（relSpeed − 4 = 1）
+  if (!(k > 0) || !(delta > 0)) return 0;
+  return DAMAGE_MIN_SPEED + Math.pow(delta / k, 1 / DAMAGE_EXP);
+}
 
 // 老虎城玻璃等材質的反射環境：scene.environment 已有就沿用；否則以 PMREM 從簡單天空漸層場景產生一張
 //   只給材質 envMap 用，不設成 scene.environment（避免改變全場景光照）；產生後 dispose generator 與暫時場景
@@ -147,10 +237,23 @@ function landmarkEnvMap(renderer, scene) {
   return envMap;
 }
 
+// JSON 讀取（地標 / 委託 / 小吃 manifest 共用）：404、非 JSON（dev server 回退成 index.html）、網路錯誤 → null，不丟例外
+async function fetchJson(url) {
+  try {
+    const res = await fetch(/^(\w+:|\/)/.test(url) ? url : BASE_URL + url, { cache: 'no-cache' });
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (/^\s*</.test(text)) return null;
+    return JSON.parse(text);
+  } catch (err) {
+    return null;
+  }
+}
+
 const loading = new LoadingScreen(TRIVIA);
 
 async function init() {
-  const total = 13;
+  const total = 14;
   let step = 0;
   const progress = async (text) => {
     step++;
@@ -203,6 +306,8 @@ async function init() {
   const landmarks = await loadLandmarkModels((done, n, name) => {
     loading.setProgress((step + done / n) / total, `載入地標模型 ${done}/${n}：${name}`);
   }, { envMap });
+  // 地標點（任務 / 打卡 / 大地圖共用，契約 §17）：manifest 缺檔 → []
+  const landmarkPts = landmarkPoints((await fetchJson('models/manifest.json')) ?? [], projectLatLon);
 
   await progress('載入角色與車輛模型…');
   await Promise.all([loadCharacterModels(), loadVehicleModels()]);
@@ -276,6 +381,265 @@ async function init() {
   const hud = new HUD();
   const help = touch ? TOUCH_HELP : KEYMAP_HELP;
 
+  await progress('準備武器、委託與導航…');
+  // ---------- 武器（W1）：raycast / sweep = PhysicsWorld 查詢 + contacts router 的 collider → actor 對照 ----------
+  const QF_NO_SENSOR = RAPIER.QueryFilterFlags.EXCLUDE_SENSORS;
+  const shotGroups = queryGroups(G_WORLD | G_VEHICLE | G_NPC_CAR | G_PED | G_DEBRIS); // 子彈：世界 / 車 / 行人（不含玩家膠囊與感測區）
+  const pedGroups = queryGroups(G_PED); // 球棒掃掠：只看行人
+  const entityOfCollider = (c) => (c ? router.entityOf(c.handle) : null);
+  const actorOfCollider = (c) => {
+    const ent = entityOfCollider(c);
+    return ent && ent.kind === 'pedestrian' && ent.owner && ent.owner.actor ? ent.owner.actor : null;
+  };
+  // 射線：槍口射線排除玩家自己的膠囊；回傳物件重用（weapons / aim.js 讀完即用，不長期持有）
+  const rayHit = { point: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 }, actor: null, surface: 'world' };
+  const rayQuery = { flags: QF_NO_SENSOR, groups: shotGroups, excludeCollider: undefined };
+  const raycast = (origin, dir, maxDist, opts) => {
+    const self = opts && opts.excludeActor === player.actor;
+    rayQuery.excludeCollider = self && character.enabled ? character.collider : undefined;
+    let h = null;
+    try {
+      h = pw.castRay(origin, dir, maxDist, rayQuery);
+    } catch (err) {
+      h = null;
+    }
+    if (!h) return null;
+    const ent = entityOfCollider(h.collider);
+    const actor = actorOfCollider(h.collider);
+    rayHit.point.x = h.x;
+    rayHit.point.y = h.y;
+    rayHit.point.z = h.z;
+    rayHit.normal.x = h.nx;
+    rayHit.normal.y = h.ny;
+    rayHit.normal.z = h.nz;
+    rayHit.actor = actor && !(opts && opts.excludeActor === actor) ? actor : null;
+    rayHit.surface = ent && (ent.kind === 'vehicle' || ent.kind === 'npcCar') ? 'vehicle' : 'world';
+    return rayHit;
+  };
+  // 膠囊掃掠：from–to 為軸（半長 = |to − from| / 2、半徑 r），與行人剛體重疊者 → actor 陣列（重用）
+  const sweepShape = new RAPIER.Capsule(0.1, 0.1);
+  const sweepPos = { x: 0, y: 0, z: 0 };
+  const sweepRot = { x: 0, y: 0, z: 0, w: 1 };
+  const sweepOut = [];
+  const sweepQuery = { flags: QF_NO_SENSOR, groups: pedGroups };
+  let sweepExclude = null;
+  const sweepHit = (c) => {
+    const a = actorOfCollider(c);
+    if (a && a !== sweepExclude && sweepOut.indexOf(a) < 0) sweepOut.push(a);
+    return true;
+  };
+  const sweep = (from, to, radius, opts) => {
+    sweepOut.length = 0;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    sweepShape.halfHeight = Math.max(1e-3, Math.hypot(dx, dy, dz) / 2);
+    sweepShape.radius = Math.max(1e-3, radius);
+    sweepPos.x = (from.x + to.x) / 2;
+    sweepPos.y = (from.y + to.y) / 2;
+    sweepPos.z = (from.z + to.z) / 2;
+    capsuleRotation(dx, dy, dz, sweepRot);
+    sweepExclude = (opts && opts.excludeActor) || null;
+    try {
+      pw.intersections(sweepPos, sweepRot, sweepShape, sweepHit, sweepQuery);
+    } catch (err) {
+      sweepOut.length = 0;
+    }
+    return sweepOut;
+  };
+  const recoilSetting = () => {
+    const v = settings.get('recoil');
+    return Number.isFinite(v) ? v : 1;
+  };
+  let weaponModels = null; // loadWeaponModels 完成後 { bat, pistol }
+  let batSegment = null; // 球棒模型掛上後的實際棒身世界座標（makeBatSegment）；沒有時 weapons 用程序揮擊弧
+  const weapons = createWeapons({
+    bus,
+    combat,
+    player,
+    settings,
+    now: () => gameTime,
+    isTouch: touch,
+    manifest: getCharacterManifest(),
+    raycast,
+    sweep,
+    // 動畫注入：player.weaponLayer.play；開槍另疊 settings.recoil 強度的加法後座
+    playAnim: (name) => {
+      if (name === 'pistol_fire') player.weaponLayer.addRecoil(recoilSetting());
+      return player.weaponLayer.play(name);
+    },
+    getBatSegment: (grip, tip) => (batSegment ? batSegment(grip, tip) : false),
+  });
+  // 武器模型掛到主角 weapon_socket（缺則右手骨）；空手拿下；駕駛中隱藏
+  const applyWeaponModel = () => {
+    if (!weaponModels) return;
+    const id = weapons.current;
+    const m = id === 'bat' ? weaponModels.bat : id === 'pistol' ? weaponModels.pistol : null;
+    if (!m) {
+      detachWeapon(player.character);
+      return;
+    }
+    if (player.character.weapon !== m.object) {
+      attachWeapon(player.character, m.object, { gripOffset: m.grip.toArray(), rotation: m.socketQuaternion.toArray() });
+    }
+    m.object.visible = state.mode !== 'drive';
+  };
+  loadWeaponModels()
+    .then((m) => {
+      weaponModels = m;
+      batSegment = makeBatSegment(m.bat);
+      applyWeaponModel();
+    })
+    .catch(() => {});
+  bus.on('weapon:equip', () => applyWeaponModel());
+  // 持武器姿勢：球棒 bat_hold、手槍 pistol_hold / 瞄準 pistol_aim（clip 缺 → 退回 hold / 不疊加）
+  let weaponPose = null;
+  const updateWeaponPose = (aiming) => {
+    const id = weapons.current;
+    const want = id === 'bat' ? 'bat_hold' : id === 'pistol' ? (aiming ? 'pistol_aim' : 'pistol_hold') : 'none';
+    if (want === weaponPose) return;
+    weaponPose = want;
+    if (!player.weaponLayer.setPose(want)) player.weaponLayer.setPose(want === 'pistol_aim' ? 'pistol_hold' : 'none');
+  };
+  // 瞄準資料（每幀重用）：鏡頭中心射線、槍口世界座標（模型掛上時）、觸控吸附候選（40 m 內骨架行人）
+  const aim = { origin: camera.position, dir: new THREE.Vector3(0, 0, 1), aiming: false, muzzle: null, candidates: null };
+  const muzzleW = new THREE.Vector3();
+  const aimCandidates = [];
+  const muzzleWorld = () => {
+    const m = weaponModels && weaponModels.pistol;
+    if (!m || !m.muzzle || !m.object.parent || !m.object.visible) return null;
+    m.object.updateWorldMatrix(true, false);
+    return muzzleW.copy(m.muzzle).applyMatrix4(m.object.matrixWorld);
+  };
+  const fillAim = (aimHeld) => {
+    const pistol = weapons.current === 'pistol';
+    camera.getWorldDirection(aim.dir);
+    aim.aiming = !!aimHeld && pistol;
+    aim.muzzle = pistol ? muzzleWorld() : null;
+    aim.candidates = null;
+    if (!touch || !pistol) return aim;
+    aimCandidates.length = 0;
+    const r2 = AIM_CANDIDATE_RANGE * AIM_CANDIDATE_RANGE;
+    for (const p of traffic.peds) {
+      const a = p.actor;
+      if (!a) continue;
+      const dx = a.pos.x - player.pos.x;
+      const dz = a.pos.z - player.pos.z;
+      if (dx * dx + dz * dz <= r2) aimCandidates.push(a);
+    }
+    aim.candidates = aimCandidates;
+    return aim;
+  };
+  // 步行中的武器輸入：1 / 2 / 3 直選、Q 循環、R 裝填；攻擊（空手 / 球棒按一下、手槍按住連發）取代 player.punch()
+  const handleWeaponInput = (snap) => {
+    fillAim(snap.down.aim);
+    if (snap.pressed.slot1) weapons.select(0);
+    else if (snap.pressed.slot2) weapons.select(1);
+    else if (snap.pressed.slot3) weapons.select(2);
+    if (snap.pressed.weaponCycle) weapons.cycle();
+    if (snap.pressed.reload) weapons.reload();
+    const fire = weapons.current === 'pistol' ? snap.down.attack : snap.pressed.attack;
+    if (fire) weapons.attack(aim);
+  };
+  const whud = createWeaponHud({ root: document.body, touchRoot: document.getElementById('touch-ui'), weapons, input, isTouch: touch });
+  const whudState = { driving: false, aimBlend: 0 };
+  gunshotListeners(bus, () => traffic.brains.values()); // weapon:fire → 30 m 內行人 hear({ type: 'gunshot' })
+  const pickups = createAmmoPickups({ scene, bus, points: DEFAULT_AMMO_POINTS, heightAt, canPickup: () => weapons.ammo().reserve < WEAPONS.pistol.reserveMax });
+  bus.on('pickup:ammo', (e) => {
+    const n = weapons.addAmmo(e && e.amount);
+    if (n > 0) hud.toast(`撿到手槍子彈 ×${n}`, 2);
+  });
+
+  // ---------- 流血（W3）：只做地面血跡與血滴；settings.showBlood 由模組自行訂閱 ----------
+  const blood = createBloodFx({ scene, settings, heightAt });
+  combat.on('hit', (e) => bus.emit('combat:hit', e)); // payload 已含契約 §10 全欄位
+  bus.on('combat:hit', (e) => blood.onHit(e));
+  bus.on('ped:knockdown', (e) => blood.onKnockdown(e));
+
+  // ---------- 音效（W2）：首次（與之後每次）使用者手勢 unlock；每幀 update 見 updateAudio ----------
+  const audio = createAudio({ bus, settings });
+  const unlockAudio = () => audio.unlock();
+  for (const ev of ['pointerdown', 'keydown', 'touchend']) window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+
+  // ---------- 委託 / 導航 / 大地圖 / 打卡 / 小吃圖鑑（W4–W6）----------
+  const missions = createMissions({
+    bus,
+    scene,
+    root: document.body,
+    landmarks: landmarkPts,
+    addMoney: (n, reason) => economy.add(n, reason),
+    fetchJson,
+    now: () => gameTime,
+    rng: Math.random,
+    heightAt,
+  });
+  const graph = buildRoadGraph(surfaceRoads);
+  const nav = createNavigator({ bus, graph, scene, heightAt });
+  const checkins = createCheckins({ bus, landmarks: landmarkPts, addMoney: (n, reason) => economy.add(n, reason), root: document.body });
+  const food = createFoodGuide({ bus, scene, root: document.body, fetchJson, addMoney: (n, reason) => economy.add(n, reason) });
+  // 小地圖 / 大地圖標記：各模組 markers() 合併（陣列重用；小地圖另加路邊可開的車）
+  const hudMarkers = [];
+  const mapMarkers = [];
+  const pushAll = (out, list) => {
+    if (list) for (let i = 0; i < list.length; i++) out.push(list[i]);
+  };
+  const collectMarkers = (out, withVehicles) => {
+    out.length = 0;
+    pushAll(out, missions.markers());
+    pushAll(out, nav.markers());
+    pushAll(out, checkins.markers());
+    pushAll(out, food.markers());
+    pushAll(out, pickups.markers());
+    if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven) out.push(c.pos);
+    return out;
+  };
+  const mapPlayer = { x: 0, z: 0, yaw: 0 };
+  const bigMap = createBigMap({
+    root: document.body,
+    bus,
+    landmarks: landmarkPts,
+    getPlayer: () => {
+      mapPlayer.x = focus.x;
+      mapPlayer.z = focus.z;
+      mapPlayer.yaw = state.mode === 'drive' && state.vehicle ? state.vehicle.yaw : player.yaw;
+      return mapPlayer;
+    },
+    getMarkers: () => collectMarkers(mapMarkers, false),
+    getRoute: () => nav.route(),
+    onPick: (x, z) => {
+      nav.setDestination(x, z, '地圖標記', 'map', focus);
+      bigMap.draw();
+    },
+  });
+  // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
+  const interCands = [null, null, null, null];
+  const nearestInteractable = (pos, walking) => {
+    interCands[0] = missions.nearest(pos);
+    interCands[1] = checkins.nearest(pos);
+    interCands[2] = walking ? food.nearest(pos) : null;
+    interCands[3] = walking ? pickups.nearest(pos) : null;
+    return pickInteractable(interCands);
+  };
+  // 互動提示：hud.setInteractPrompt（I4b 新增）存在時與上車提示分開；否則共用 setPrompt（上車 / 扶起提示優先）
+  const setPrompts = (vehicleText, inter) => {
+    const text = inter ? inter.text : null;
+    if (hud.setInteractPrompt) {
+      hud.setPrompt(vehicleText);
+      hud.setInteractPrompt(text);
+    } else hud.setPrompt(vehicleText || text);
+  };
+  // 全螢幕面板：接單 / 結算（missions）、大地圖、圖鑑；開啟中世界與輸入暫停
+  const panelOpen = () => missions.isModalOpen() || bigMap.isOpen() || food.isOpen();
+  const hide3D = () => bigMap.isOpen() || food.isOpen(); // 大地圖 / 圖鑑蓋滿畫面：不渲染 3D
+  const openGuide = () => {
+    if (!state.started) return;
+    food.open();
+    if (menu.isOpen()) menu.close(); // 從暫停選單開：先開圖鑑再關選單（resumeGame 見到面板開著就不鎖滑鼠）
+  };
+  bus.on('ui:openGuide', () => openGuide());
+  // 觸控圖鑑鈕：touch.js 預設註冊為隱藏佔位；此處（input 建立 = initTouch 之後）以同 id 帶 onTap 重新註冊後顯示
+  registerTouchButton({ id: 'tb-guide', label: '圖鑑', slot: 'tl3', showWhen: 'walk', onTap: () => openGuide() });
+
   // ---------- 存檔與經濟 ----------
   let storage;
   try {
@@ -286,12 +650,48 @@ async function init() {
   const store = createSaveStore({ storage });
   const initialLoad = store.load(); // 只為了取得狀態提示（繼續時會重新讀）
   let economy = createEconomy({ bus, initial: initialLoad.data });
+  // 整合層自行累加的統計（economy 不訂閱這些事件）：startGame 時由存檔初始化
+  const extraStats = { missionsDone: 0, missionsFailed: 0, shotsFired: 0, pedsKnockedOut: 0 };
+  const resetExtraStats = (stats) => {
+    extraStats.missionsDone = (stats && stats.missionsDone) || 0;
+    extraStats.missionsFailed = (stats && stats.missionsFailed) || 0;
+    extraStats.shotsFired = (stats && stats.shotsFired) || 0;
+    extraStats.pedsKnockedOut = 0; // 只記本局 bat / bullet 擊倒（存檔值已在 economy 的 pedsKnockedOut 內）
+  };
+  resetExtraStats(initialLoad.data && initialLoad.data.stats);
+  bus.on('mission:complete', () => {
+    extraStats.missionsDone++;
+  });
+  bus.on('mission:fail', () => {
+    extraStats.missionsFailed++;
+  });
+  bus.on('weapon:fire', (e) => {
+    if (e && e.byPlayer) extraStats.shotsFired++;
+  });
+  // economy 的 loot 只認 punch：球棒 / 槍擊打倒路人比照拳擊掉 NT$10–40（reason 'loot'）並記 pedsKnockedOut
+  bus.on('ped:knockdown', (e) => {
+    if (!e || !e.byPlayer || (e.cause !== 'bat' && e.cause !== 'bullet')) return;
+    extraStats.pedsKnockedOut++;
+    economy.add(LOOT_MIN + Math.floor(Math.random() * (LOOT_MAX - LOOT_MIN + 1)), 'loot');
+  });
+  const currentStats = () => statsWithExtra(economy.stats, extraStats);
+  // 存檔 schema v2（契約 §18）：weapons / missions / collect
   const autosave = createAutosave({
     store,
     intervalSec: AUTOSAVE_SEC,
     getState: () => {
       const p = state.mode === 'drive' && state.vehicle ? state.vehicle.pos : player.pos;
-      return { version: 1, ...economy.snapshot(), player: { x: p.x, z: p.z, yaw: player.yaw }, world: { hour: dayNight.hour } };
+      const snap = economy.snapshot();
+      return {
+        version: SAVE_VERSION,
+        money: snap.money,
+        stats: statsWithExtra(snap.stats, extraStats),
+        player: { x: p.x, z: p.z, yaw: player.yaw },
+        world: { hour: dayNight.hour },
+        weapons: weapons.serialize(),
+        missions: missions.serialize(),
+        collect: { checkins: checkins.serialize(), foods: food.serialize() },
+      };
     },
   });
   let saveNotice = {
@@ -325,6 +725,9 @@ async function init() {
     if (player.anim.state !== 'drive') player.anim.trigger('enter_car');
     player.sitOn(v);
     hud.setPrompt(null);
+    hud.setInteractPrompt?.(null);
+    whud.setDriving(true);
+    applyWeaponModel(); // 駕駛中隱藏武器模型
     bus.emit('vehicle:enter', { vehicle: v, carjack });
   };
 
@@ -356,20 +759,16 @@ async function init() {
     state.mode = 'walk';
     player.actor.untargetable = false;
     player.mesh.visible = true;
+    whud.setDriving(false);
+    applyWeaponModel();
     bus.emit('vehicle:exit', { vehicle: v });
     return true;
   };
 
-  // 玩家直接倒地（機車倒地摔下）：combat 沒有公開的「直接倒地」API，同 traffic.spawnEjectedDriver 把 combat 狀態設成 knockdown
-  // （不發 knockdown 事件、hp 不變），之後由 combat.update 的 settleCheck → getup 流程起身
+  // 玩家直接倒地（機車倒地摔下）：combat.knockdownActor（契約 §13；不發 knockdown 事件、hp 不變、播倒地動畫），
+  // 之後由 combat.update 的 settleCheck → getup 流程起身
   const knockDownPlayer = () => {
-    const e = combat.entries && combat.entries.get(player.actor.id);
-    if (!e || e.state === 'knockdown' || e.state === 'dead') return;
-    e.state = 'knockdown';
-    e.stateAt = combat.now();
-    e.windowOpen = false;
-    e.hitTimes.length = 0;
-    player.anim.trigger('knockdown');
+    combat.knockdownActor(player.actor, { cause: 'fall' });
   };
   vehicles.onFall = (v) => {
     if (state.mode === 'drive' && state.vehicle === v) state.pendingFall = v;
@@ -429,6 +828,7 @@ async function init() {
     if (e.target !== player.actor || player.actor.hp > 0) return;
     state.koTimer = PLAYER_KO_SEC;
     bus.emit('player:ko', {});
+    missions.onPlayerKo();
     hud.toast('你被打倒了（醫藥費自動扣款）', PLAYER_KO_SEC);
   });
   const updateKnockout = (dt) => {
@@ -441,10 +841,26 @@ async function init() {
 
   // ---------- 車輛耐久：contacts router → onImpact（以 body.owner 找 Vehicle，未 attach 的車流車由 dmg 忽略）----------
   const byPlayer = (v) => state.mode === 'drive' && state.vehicle === v;
+  // 易碎貨物：玩家駕駛車輛的每次碰撞（≥ IMPACT_MIN = 4 m/s）都通知委託；不依賴 vehicle:crash（只在 ≥ 8 m/s 發出）
+  // 兩個來源：contacts 的 relSpeed（先於耐久計算，不受 dmg 去重 / 未 attach 影響）與 vehicle:damaged 的 delta（反推等效速度）；
+  // 同一次碰撞兩路都回報時，missions 以 IMPACT_MERGE_SEC 視窗只取最大值，不會重複累積
+  const impactArg = { relSpeed: 0 };
+  const reportImpact = (relSpeed) => {
+    if (!(relSpeed >= MISSION_IMPACT_MIN)) return;
+    impactArg.relSpeed = relSpeed;
+    missions.onVehicleImpact(impactArg);
+  };
   const impact = (entity, relSpeed, kind) => {
     const v = entity && entity.owner;
-    if (v) dmg.onImpact(v, { relSpeed, kind, byPlayer: byPlayer(v) });
+    if (!v) return;
+    const mine = byPlayer(v);
+    if (mine) reportImpact(relSpeed);
+    dmg.onImpact(v, { relSpeed, kind, byPlayer: mine });
   };
+  bus.on('vehicle:damaged', ({ vehicle, delta }) => {
+    if (!byPlayer(vehicle) || !(delta > 0)) return;
+    reportImpact(impactSpeedFromDamage(vehicle, delta));
+  });
   router.onVehicleHitWorld(({ vehicle, relSpeed }) => impact(vehicle, relSpeed, 'static'));
   router.onVehicleHitVehicle(({ a, b, relSpeed }) => {
     impact(a, relSpeed, 'vehicle');
@@ -644,13 +1060,108 @@ async function init() {
     roadName = r ? r.road.name : '';
   };
 
+  // ---------- Phase 4 每幀輔助 ----------
+  const missionCtx = { x: 0, z: 0, driving: false };
+  let lastThrottle = 0;
+  // 面板開 / 關的切換：開啟 → 停輸入、放開滑鼠鎖定（不觸發暫停選單）、駕駛中踩煞車；關閉 → 恢復輸入
+  let panelWas = false;
+  const syncPanels = () => {
+    const open = state.started && !state.paused && panelOpen();
+    if (open === panelWas) return open;
+    panelWas = open;
+    if (open) {
+      input.enabled = false;
+      releaseLock();
+      hud.setPrompt(null);
+      hud.setInteractPrompt?.(null);
+      if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
+    } else if (state.started && !state.paused) {
+      input.enabled = true;
+      lastTime = performance.now();
+    }
+    return open;
+  };
+  // 大地圖 / 圖鑑開啟中的鍵盤：Esc 或同一顆開啟鍵（M / G）關閉（接單卡 / 結算面板的 E / Esc 由 missions UI 自己處理）
+  const onPanelKey = (e) => {
+    if (!state.started || state.paused || e.repeat) return;
+    let closed = false;
+    if (bigMap.isOpen() && (e.code === 'Escape' || e.code === 'KeyM')) {
+      bigMap.close();
+      closed = true;
+    } else if (food.isOpen() && (e.code === 'Escape' || e.code === 'KeyG')) {
+      food.close();
+      closed = true;
+    }
+    if (!closed) return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener('keydown', onPanelKey, true);
+
+  // 音效每幀狀態（重用）：聆聽點 = 鏡頭；rpm01 = |速度| / 最高速、skid01 = 側滑速度 / SKID_REF、nearJunction = 最近號誌路口距離
+  const audioState = {
+    x: 0, z: 0, yaw: 0, driving: false, speedKmh: 0, rpm01: 0, throttle: 0, skid01: 0, twoWheeler: false,
+    walkSpeed: 0, grounded: true, nearJunction: null, paused: false,
+  };
+  let junctionT = JUNCTION_SCAN_SEC;
+  let junctionDist = null;
+  const nearestJunction = (dt, x, z) => {
+    junctionT += dt;
+    if (junctionT < JUNCTION_SCAN_SEC) return junctionDist;
+    junctionT = 0;
+    let best = Infinity;
+    for (const sig of lights.signals) {
+      const d = Math.hypot(sig.x - x, sig.z - z);
+      if (d < best) best = d;
+    }
+    junctionDist = Number.isFinite(best) ? best : null;
+    return junctionDist;
+  };
+  const updateAudio = (dt) => {
+    const st = audioState;
+    const driving = state.started && state.mode === 'drive' && !!state.vehicle;
+    const v = driving ? state.vehicle : null;
+    st.x = camera.position.x;
+    st.z = camera.position.z;
+    st.yaw = rig.yaw;
+    st.paused = !state.started || state.paused || panelWas;
+    st.driving = driving;
+    st.speedKmh = v ? v.speedKmh() : 0;
+    st.rpm01 = v ? Math.min(1, Math.abs(v.speed) / (v.spec.maxSpeed || 1)) : 0;
+    st.throttle = v ? lastThrottle : 0;
+    st.twoWheeler = !!(v && v.spec.twoWheeler);
+    st.skid01 = 0;
+    if (v && v.body && v.body.body) {
+      const lv = v.body.body.linvel();
+      const lateral = -lv.x * Math.cos(v.yaw) + lv.z * Math.sin(v.yaw); // 右方 = (−cos yaw, sin yaw)
+      st.skid01 = Math.min(1, Math.abs(lateral) / SKID_REF);
+    }
+    st.walkSpeed = state.started && state.mode === 'walk' ? player.speed : 0;
+    st.grounded = player.onGround;
+    st.nearJunction = state.started ? nearestJunction(dt, focus.x, focus.z) : null;
+    audio.update(dt, st);
+  };
+
   // ---------- 更新 ----------
   // 順序：輸入快照 → 選單 / 快轉 → 角色意圖 / 車輛控制 → 物理 step → 上下車 / 搶車 → 鏡頭 / HUD
   const updateGame = (dt) => {
+    // 全螢幕面板開啟中：世界與輸入暫停（面板自行處理 E / Esc；大地圖 / 圖鑑的 Esc 見 onPanelKey）
+    if (syncPanels()) return;
     const snap = input.snapshot();
-    if (snap.pressed.pause || snap.pressed.map) {
+    if (snap.pressed.pause) {
       // 選單開啟會同步 emit game:pause { paused: true } → 本幀起世界停止更新
-      menu.openPause(snap.pressed.map && !snap.pressed.pause ? 'map' : undefined);
+      menu.openPause();
+      return;
+    }
+    if (snap.pressed.map) {
+      // M：開大地圖（取代暫停選單的地圖頁；選單內地圖頁保留）
+      bigMap.open();
+      syncPanels();
+      return;
+    }
+    if (input.wasPressed('KeyG')) {
+      openGuide();
+      syncPanels();
       return;
     }
     if (snap.pressed.timeSkip) {
@@ -658,56 +1169,73 @@ async function init() {
       hud.toast(fast ? '時間快轉中（再按一次恢復）' : '時間恢復正常', 2.5);
     }
 
+    lastThrottle = 0;
     if (state.mode === 'drive') {
       const v = state.vehicle;
       v.setControls(driveControls(snap.move, snap.down.jump));
+      lastThrottle = snap.move.y;
       if (input.actions.down('horn')) v.honk(); // 按住連續響（honk 自帶冷卻）
+      aim.aiming = false;
     } else {
+      // heavy 委託：步行速度 × missions.speedScale()（駕駛為 1）
+      player.speedScale = missions.speedScale();
       player.update(dt, input, rig.yaw);
-      if (state.mode === 'walk' && snap.pressed.attack) player.punch();
+      // 攻擊 / 切換 / 裝填：weapons（空手時內部呼叫 player.punch()）
+      if (state.mode === 'walk') handleWeaponInput(snap);
+      else aim.aiming = false;
     }
 
     updateKnockout(dt);
     stepWorld(dt, state.mode === 'drive' ? state.vehicle.pos : player.pos);
     if (state.pendingFall) handleFall();
+    weapons.update(dt, aim);
+    updateWeaponPose(aim.aiming);
 
+    let vehiclePrompt = null;
+    let inter = null;
     if (state.mode === 'walk') {
       // F 優先序：翻覆車旁 = 扶起 > 可搶車流車 = 搶車 > 路邊車 = 上車
       const free = !player.controlLocked;
       const over = free ? vehicles.findOverturned(player.pos, ENTER_DIST) : null;
       const jack = free && !over ? cj.canStart(player.pos, traffic.carjackCandidates(player.pos.x, player.pos.z, CARJACK_SCAN)) : null;
       const near = free && !over && !jack ? vehicles.findNearby(player.pos, ENTER_DIST) : null;
-      if (over) hud.setPrompt(`按 F 扶起${over.spec.label}`);
-      else if (jack) hud.setPrompt(`按 F 搶車（${(VEHICLE_TYPES[jack.type] || {}).label || '車'}）`);
-      else if (near) hud.setPrompt(`按 F 上車（${near.spec.label}）`);
-      else hud.setPrompt(null);
+      if (over) vehiclePrompt = `按 F 扶起${over.spec.label}`;
+      else if (jack) vehiclePrompt = `按 F 搶車（${(VEHICLE_TYPES[jack.type] || {}).label || '車'}）`;
+      else if (near) vehiclePrompt = `按 F 上車（${near.spec.label}）`;
       if (jack || near) showHint('enter');
+      pickups.update(dt, player.pos); // 1.5 m 內自動拾取彈藥
+      inter = free ? nearestInteractable(player.pos, true) : null;
+      setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (over) {
           over.upright();
           hud.toast(`已扶起${over.spec.label}`, 2);
         } else if (jack) beginCarjack(jack);
         else if (near) beginEnter(near);
-      }
+      } else if (snap.pressed.interact && inter && typeof inter.act === 'function') inter.act();
       state.walkTime += dt;
       if (state.walkTime >= HINT_ATTACK_SEC) showHint('attack');
     } else if (state.mode === 'entering') {
+      setPrompts(null, null);
       if (player.anim.state === 'drive') enterVehicle(state.vehicle);
       else if (player.anim.state !== 'enter_car') cancelEnter();
     } else if (state.mode === 'carjack') {
+      setPrompts(null, null);
       updateCarjack(dt);
     } else {
       const v = state.vehicle;
       player.sitOn(v, dt);
       // 翻覆（汽車翻覆 / 機車倒地持續 1.5 s）→ F 扶起；耐久歸零熄火 → F 下車
       const flipped = v.isOverturned();
-      if (flipped) hud.setPrompt('翻車了！按 F 扶起');
-      else if (dmg.healthOf(v) === 0) hud.setPrompt('車子熄火了，按 F 下車');
-      else hud.setPrompt(null);
+      if (flipped) vehiclePrompt = '翻車了！按 F 扶起';
+      else if (dmg.healthOf(v) === 0) vehiclePrompt = '車子熄火了，按 F 下車';
+      // 駕駛中也可接委託 / 打卡（E）；小吃與彈藥只在步行
+      inter = nearestInteractable(v.pos, false);
+      setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
         else exitVehicle();
-      }
+      } else if (snap.pressed.interact && inter && typeof inter.act === 'function') inter.act();
     }
 
     const driving = state.mode === 'drive';
@@ -718,6 +1246,18 @@ async function init() {
     state.playTime += dt;
     if (state.playTime >= HINT_PAUSE_SEC) showHint('pause');
     dayNight.update(dt, focus);
+    missionCtx.x = focus.x;
+    missionCtx.z = focus.z;
+    missionCtx.driving = driving;
+    missions.update(dt, missionCtx);
+    nav.update(dt, focus);
+    food.update(dt, player.pos, camera);
+    blood.update(dt, camera);
+    // 後座：weapons 本幀累積的鏡頭 pitch / yaw 增量 → rig（衰減回原位）；瞄準中滾輪不縮放鏡頭距離
+    const kick = weapons.recoilKick();
+    if (kick.pitch || kick.yaw) rig.addRecoil(kick.pitch, kick.yaw);
+    const aiming = !driving && aim.aiming;
+    if (aiming) input.wheel = 0;
     rig.update(dt, input, focus, {
       driving,
       vehicleYaw: driving ? v.yaw : 0,
@@ -728,6 +1268,7 @@ async function init() {
       lookBack: driving && snap.down.lookBack,
       clearRadius: driving ? Math.hypot(v.spec.length, v.spec.width) / 2 : 0,
       clearHeight: driving ? v.spec.height + 0.3 : 0,
+      aim: aiming,
     });
 
     const loc = describeLocation(focus.x, focus.z);
@@ -753,8 +1294,12 @@ async function init() {
       location: loc.text,
       time: dayNight.timeString(),
       fast: dayNight.fast,
-      markers: vehicles.vehicles.filter((c) => !c.driven).map((c) => c.pos),
+      markers: collectMarkers(hudMarkers, true),
+      route: nav.route(),
     });
+    whudState.driving = driving;
+    whudState.aimBlend = rig.aimBlend;
+    whud.update(dt, whudState);
   };
 
   // 開始畫面：鏡頭緩慢環繞老虎城當作背景（世界照常更新）
@@ -801,7 +1346,9 @@ async function init() {
     if (showFps) hud.setFps?.(Math.round(fpsState.fps));
   };
   let drawCalls = 0;
+  // 大地圖 / 圖鑑蓋滿畫面時不渲染 3D（契約 §19；畫布保留最後一幀）
   const render = () => {
+    if (hide3D()) return;
     renderer.render(scene, camera);
     drawCalls = renderer.info.render.calls;
   };
@@ -815,6 +1362,7 @@ async function init() {
       if (state.started) updateGame(dt);
       else updateAttract(dt);
     }
+    updateAudio(dt); // 暫停中也呼叫（paused: true → 持續音源靜音）
     const t1 = performance.now();
     render();
     recordPerf(performance.now() - t1, physMs, t1 - t0 - physMs);
@@ -840,17 +1388,18 @@ async function init() {
     touchHelp: TOUCH_HELP,
     isTouch: touch,
     attribution: ATTRIBUTION,
-    getStats: () => economy.stats,
+    getStats: () => currentStats(),
     getMoney: () => economy.money,
     hasSave: () => store.hasSave(),
     mapView,
+    onOpenGuide: () => openGuide(), // I4b：暫停選單「圖鑑」按鈕
   });
 
   // 桌機滑鼠鎖定：只能在使用者手勢（開始 / 繼續的 click / keydown）內要求
   const lockTarget = renderer.domElement;
   let hadLock = false;
   const requestLock = () => {
-    if (touch || document.pointerLockElement === lockTarget || !lockTarget.requestPointerLock) return;
+    if (touch || panelOpen() || document.pointerLockElement === lockTarget || !lockTarget.requestPointerLock) return;
     try {
       const p = lockTarget.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -870,7 +1419,7 @@ async function init() {
     }
     const lost = hadLock;
     hadLock = false;
-    if (lost && state.started && !state.paused && !menu.isOpen()) menu.openPause();
+    if (lost && state.started && !state.paused && !menu.isOpen() && !panelOpen()) menu.openPause();
   });
 
   // mobile.js 的「開始遊戲」手勢（全螢幕 → 螢幕不變暗、body.playing）掛在 #start-btn 的 click 上：
@@ -942,6 +1491,14 @@ async function init() {
     startNoticeEl = null;
   };
 
+  // 關掉所有全螢幕面板（新局 / 回主選單）
+  const closePanels = () => {
+    if (bigMap.isOpen()) bigMap.close();
+    if (food.isOpen()) food.close();
+    if (missions.isModalOpen()) missions.ui.closePanel();
+    panelWas = false;
+  };
+
   const startGame = (continued) => {
     clearStartNotice();
     const { data } = store.load();
@@ -950,7 +1507,16 @@ async function init() {
     const save = continued ? data : defaultSave();
     economy.dispose();
     economy = createEconomy({ bus, initial: save });
+    resetExtraStats(save.stats);
+    closePanels();
     placePlayer(save);
+    // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
+    weapons.restore(save.weapons);
+    missions.restore(save.missions);
+    checkins.restore(save.collect);
+    food.restore(save.collect);
+    nav.clear('map');
+    blood.clear();
     dayNight.hour = save.world.hour;
     state.started = true;
     state.paused = false;
@@ -961,6 +1527,8 @@ async function init() {
     lastHp = null;
     input.enabled = true;
     hud.setVisible(true);
+    whud.setVisible(true);
+    whud.setDriving(false);
     hud.setMoney?.(economy.money, 0);
     mobileStart();
     setGameActive(true);
@@ -1003,8 +1571,11 @@ async function init() {
     state.started = false;
     state.paused = false;
     input.enabled = false;
+    closePanels();
     hud.setVisible(false);
+    whud.setVisible(false);
     hud.setPrompt(null);
+    hud.setInteractPrompt?.(null);
     setGameActive(false);
     releaseLock();
   };
@@ -1032,6 +1603,7 @@ async function init() {
   loading.ready();
   input.enabled = false;
   hud.setVisible(false);
+  whud.setVisible(false);
   menu.showStart({ canContinue: store.hasSave() });
   showStartNotice(saveNotice);
 
@@ -1065,6 +1637,48 @@ async function init() {
       beginEnter, enterVehicle, exitVehicle, world, buildings, spawn, parked, updateGame: devUpdateGame, updateAttract, render,
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
+      // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
+      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud,
+      // 補手槍備彈（回實際加入數，上限 120）
+      giveAmmo(n = 36) {
+        return weapons.addAmmo(n);
+      },
+      // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
+      nearestPed() {
+        let best = null;
+        let bestD = Infinity;
+        for (const p of traffic.peds) {
+          const a = p.actor;
+          if (!a) continue;
+          const d = Math.hypot(a.pos.x - player.pos.x, a.pos.z - player.pos.z);
+          if (d < bestD) {
+            bestD = d;
+            best = a;
+          }
+        }
+        return best ? { id: best.id, dist: bestD, hp: best.hp, state: combat.stateOf(best) } : null;
+      },
+      // 傳送玩家到 (x, z)（駕駛中先下車；不計里程）
+      teleport(x, z) {
+        if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+        if (state.mode === 'drive') exitVehicle(true);
+        player.placeAt(x, z, player.yaw, terrain);
+        lastPos.copy(player.pos);
+        focus.copy(player.pos);
+        return true;
+      },
+      // 直接接單（測試用）：slug 必須是目前開放的委託；有 UI 時自動按「接下」；回傳是否已進行中
+      startMission(slug) {
+        const m = missions.catalog().find((c) => c.slug === slug);
+        if (!m || missions.active() || missions.offers().indexOf(slug) < 0) return false;
+        const it = missions.nearest(m.from);
+        if (!it || it.id !== `mission:${slug}`) return false;
+        it.act();
+        const els = missions.ui.els;
+        const btn = els && els.panel && els.panel.querySelector ? els.panel.querySelector('.ms-btn-primary') : null;
+        if (btn && missions.ui.mode() === 'offer') btn.click();
+        return !!missions.active();
+      },
       get adapt() {
         return adapt;
       },
@@ -1089,6 +1703,7 @@ async function init() {
               if (state.started) updateGame(dt);
               else updateAttract(dt);
             }
+            updateAudio(dt); // 同 tick：暫停中也呼叫
             const t1 = performance.now();
             const last = i === n - 1;
             if (last) render();

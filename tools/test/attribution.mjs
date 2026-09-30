@@ -3,6 +3,9 @@
 // ③ 以 CSS 規則數值（calc / min / var / env、@media 方向、transform scale 與 transform-origin）推算桌機 / 觸控橫向 / 觸控直向
 //    多種尺寸（640×360 起到 1920×1080）下各元素矩形：授權標示、HUD 元素、觸控鈕 / 踏板兩兩不重疊且都在畫面內；
 // ④ 觸控控制彼此不重疊：搖桿底座靜止位置 × 步行按鈕（直向攻擊鈕）、駕駛踏板 × 手煞 / 下車 / 喇叭鈕。
+// ⑤ Phase 4（I4b）：#attribution z-index 60（HUD 上限）高於 wp- / ms- / cl- 模組 HUD 元素（50–59）與遮罩、DOM 在遮罩之後；
+//    互動鈕（slot-interact）納入版面推算；武器 UI（weapons.css 的 wp-hud 面板與 wp-tb-weapon / reload / aim，含 @media 緊湊排法）
+//    在觸控橫 / 直向各尺寸都在畫面內、互不重疊，且不壓觸控鈕 / #status / HUD / 授權標示 / 小地圖（正式斷言，無 INFO 例外）。
 // 用法：node tools/test/attribution.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -237,7 +240,7 @@ function hudRects(isTouch, driving, vp, scale) {
 }
 
 // 觸控鈕（touch.js 預設按鈕 + 預留的 tl3）與駕駛踏板區
-const WALK_SLOTS = ['main', 'sec1', 'sec2', 'attack', 'tl1', 'tl2', 'tl3'];
+const WALK_SLOTS = ['main', 'sec1', 'sec2', 'attack', 'interact', 'tl1', 'tl2', 'tl3'];
 const DRIVE_SLOTS = ['sec2', 'sec3', 'top1', 'tl1', 'tl2', 'tl3'];
 function controlRects(driving, vp) {
   const out = [];
@@ -406,6 +409,157 @@ for (const [w, h] of TOUCH_PORT) {
   check('觸控提示卡關閉鈕 ≥ 44 px', px(close.width) >= 44 && px(close.height) >= 44, `${close.width}×${close.height}`);
   check('提示卡可點（pointer-events: auto），HUD 其餘不吃指標', rule('#hint-card')['pointer-events'] === 'auto' && rule('#hud')['pointer-events'] === 'none');
 }
+
+// ---------- Phase 4：z-index 與武器鈕欄 ----------
+{
+  const z = Number(base['z-index']);
+  check('#attribution z-index ≤ 60（HUD 上限，低於選單 70–79）', z <= 60, String(z));
+  // 模組 HUD 元素（wp- / ms- / cl-）：z 50–59 者都必須低於授權標示
+  const modZ = [];
+  for (const f of ['src/weapons/weapons.css', 'src/missions/missions.css', 'src/collect/collect.css']) {
+    const src = readFileSync(`${ROOT}${f}`, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const m of src.matchAll(/z-index:\s*(\d+)/g)) {
+      const v = Number(m[1]);
+      if (v >= 50 && v <= 69) modZ.push(`${f.split('/').pop()}:${v}`);
+    }
+  }
+  const maxMod = Math.max(0, ...modZ.map((s) => Number(s.split(':')[1])));
+  check('#attribution 高於所有 wp- / ms- / cl- HUD 元素（z 50–59）', modZ.length > 0 && z > maxMod, `attr ${z} vs ${modZ.join(', ')}`);
+  // style.css 其餘 ≤ 60 的 z-index（遮罩、觸控層、HUD）都不高於授權標示；同為 60 的元素在 DOM 中位於其前（後者在上層）
+  const same = [];
+  let higher = [];
+  for (const r of RULES) {
+    const v = Number(r.decl['z-index']);
+    if (!Number.isFinite(v) || r.sels.some((x) => /#attribution\b/.test(x))) continue;
+    if (v > z && v <= 69) higher.push(`${r.sels.join(',')}:${v}`);
+    if (v === z) same.push(...r.sels.map((x) => (/#([\w-]+)/.exec(x) || [])[1]).filter(Boolean));
+  }
+  check('style.css 沒有 z 高於授權標示的 HUD / 遮罩元素（≤ 69）', !higher.length, higher.join('；'));
+  const attrPos = html.indexOf('id="attribution"');
+  const before = same.every((id) => html.indexOf(`id="${id}"`) >= 0 && html.indexOf(`id="${id}"`) < attrPos);
+  check('同 z-index 的元素（直向遮罩）在 DOM 中位於 #attribution 之前', before, same.join(','));
+}
+
+// 武器 UI（weapons.css：右上面板 .wp-hud、W1 自建於 #touch-ui 的 wp-tb-weapon / reload / aim）版面：
+// 觸控橫向 / 直向各尺寸 × 介面縮放 0.8 / 1，步行時每個元素都在畫面內、彼此不重疊，且不壓 .tbtn（含互動鈕、左上小鈕）/
+// #status（含金錢 +/−）/ #attribution / 小地圖 / 其餘 HUD 文字；按鈕另不壓搖桿底座靜止位置；桌機面板在 #status 下方
+{
+  const wcss = readFileSync(`${ROOT}src/weapons/weapons.css`, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const WR = parseBlocks(wcss, null, []);
+  // var(--x, 後備值) 的後備值含巢狀括號（calc / env）：evalLen 的簡易 var 解析不支援，先以括號配對展開
+  // （有給值的變數 = --hud-scale 代入；其餘 = 整合層未設 → 後備值）
+  const expandVar = (v, vars) => {
+    let out = String(v);
+    for (let i = out.indexOf('var('); i >= 0; i = out.indexOf('var(')) {
+      let depth = 0;
+      let j = i + 3;
+      let comma = -1;
+      for (; j < out.length; j++) {
+        if (out[j] === '(') depth++;
+        else if (out[j] === ')' && --depth === 0) break;
+        else if (out[j] === ',' && depth === 1 && comma < 0) comma = j;
+      }
+      const vname = out.slice(i + 4, comma > 0 ? comma : j).trim();
+      const rep = vname in vars ? String(vars[vname]) : comma > 0 ? out.slice(comma + 1, j).trim() : '0px';
+      out = out.slice(0, i) + rep + out.slice(j + 1);
+    }
+    return out;
+  };
+  const wres = (sels, vp, vars) => {
+    const d = {};
+    for (const sel of sels) for (const r of WR) if (r.sels.includes(sel) && mediaOk(r.media, vp)) Object.assign(d, r.decl);
+    for (const k of Object.keys(d)) d[k] = expandVar(d[k], vars);
+    return d;
+  };
+  const WP_BTNS = ['weapon', 'reload', 'aim'];
+  const wpRects = (isTouch, vp, scale) => {
+    const vars = { '--hud-scale': scale };
+    const hudSel = isTouch ? ['.wp-hud', 'body.touch .wp-hud'] : ['.wp-hud'];
+    const out = [];
+    const hd = wres(hudSel, vp, vars);
+    // 未給固定寬高（桌機）= 隨內容：以圖示 40 × 縮放 + 上下 padding 4 估高度；寬度桌機不計（只驗上下關係）、觸控估 150
+    hd.height = hd.height || `${40 * scale + 8}px`;
+    hd.width = hd.width || (isTouch ? '150px' : '1px');
+    out.push({ name: '.wp-hud', ...box(hd, vp, vars) });
+    if (isTouch) for (const k of WP_BTNS) out.push({ name: `.wp-tb-${k}`, ...box(wres(['.wp-tbtn', `.wp-tb-${k}`, `body.touch .wp-tb-${k}`], vp, vars), vp, vars) });
+    return out;
+  };
+
+  const sizes = [...TOUCH_LAND.map(([w, h]) => ({ w, h, o: '橫向' })), ...TOUCH_PORT.map(([w, h]) => ({ w, h, o: '直向' }))];
+  let rects = 0;
+  let minBtn = Infinity;
+  let worstAtk = 0;
+  const hudPlace = [];
+  for (const vp of sizes) {
+    const bad = [];
+    for (const scale of [0.8, 1]) {
+      const wp = wpRects(true, vp, scale);
+      const hud = hudRects(true, false, vp, scale);
+      const others = [...hud, attrRect(true, vp), ...controlRects(false, vp)];
+      const stick = stickRect(vp);
+      rects += wp.length;
+      for (const a of wp) {
+        if (a.x < -0.01 || a.y < -0.01 || a.x + a.w > vp.w + 0.01 || a.y + a.h > vp.h + 0.01) bad.push(`${a.name} 超出畫面 ${fmt(a)}`);
+        for (const b of others) if (overlap(a, b)) bad.push(`${a.name}[${fmt(a)}] × ${b.name}[${fmt(b)}]`);
+        if (a.name !== '.wp-hud') {
+          minBtn = Math.min(minBtn, a.w, a.h);
+          if (overlap(a, stick)) bad.push(`${a.name}[${fmt(a)}] × 搖桿底座[${fmt(stick)}]`);
+        }
+      }
+      for (let i = 0; i < wp.length; i++) for (let j = i + 1; j < wp.length; j++) if (overlap(wp[i], wp[j])) bad.push(`${wp[i].name} × ${wp[j].name}`);
+      // 武器鈕 / 瞄準鈕沿攻擊鈕周圍（間距 ≤ 80 px）
+      const atk = others.find((r) => r.name === '.slot-attack');
+      for (const a of wp) if (a.name === '.wp-tb-weapon' || a.name === '.wp-tb-aim') worstAtk = Math.max(worstAtk, gap(a, atk));
+      // 面板與 #status 的上下關係：高 ≥ 380 的橫向與直向在下方；高 < 380 橫向（下方放不下）在上方
+      const st = hud.find((r) => r.name === '#status');
+      const p = wp[0];
+      const below = p.y >= st.y + st.h;
+      const above = p.y + p.h <= st.y;
+      if (!(vp.o === '橫向' && vp.h < 380 ? above : below)) hudPlace.push(`${vp.w}×${vp.h}@${scale} ${fmt(p)} vs #status ${fmt(st)}`);
+    }
+    check(`武器 UI 觸控${vp.o} ${vp.w}×${vp.h}（縮放 0.8 / 1）：面板 + 三鈕在畫面內、互不重疊、不壓 .tbtn / #status / #attribution / 小地圖 / HUD / 搖桿`, !bad.length, bad.slice(0, 3).join('；'));
+  }
+  check(`武器 UI 共推算 ${rects} 個矩形；武器鈕 / 裝填鈕 / 瞄準鈕實際尺寸 ≥ 44 px`, rects > 0 && minBtn >= 44, `最小 ${minBtn} px`);
+  check('武器鈕 / 瞄準鈕沿攻擊鈕周圍（間距 ≤ 80 px）', worstAtk <= 80, `最大間距 ${worstAtk.toFixed(0)} px`);
+  check('武器面板在 #status 下方（高 < 380 的橫向改在 #status 上方）', !hudPlace.length, hudPlace.slice(0, 2).join('；'));
+  // 觸控面板縮為一列：固定高 28、寬 112
+  {
+    const d = wres(['.wp-hud', 'body.touch .wp-hud'], { w: 844, h: 390 }, { '--hud-scale': 1 });
+    check('觸控武器面板縮為一列（高 ≤ 32 px、寬 ≤ 120 px、不換行）', px(d.height) <= 32 && px(d.width) <= 120 && d['white-space'] === 'nowrap', `${d.width}×${d.height}`);
+  }
+  // 桌機：面板在 #status（含金錢 +/−）下方
+  {
+    const bad = [];
+    for (const [w, h] of DESKTOP) {
+      for (const scale of scalesFor(w, h)) {
+        const vp = { w, h };
+        const p = wpRects(false, vp, scale)[0];
+        const st = hudRects(false, false, vp, scale).find((r) => r.name === '#status');
+        if (p.y < st.y + st.h) bad.push(`${w}×${h}@${scale} 面板 top ${p.y.toFixed(0)} < #status 底 ${(st.y + st.h).toFixed(0)}`);
+      }
+    }
+    check('桌機武器面板在 #status（含金錢 +/−）下方', !bad.length, bad.slice(0, 2).join('；'));
+  }
+  // 觸控規則定位都帶 safe-area；駕駛中面板與按鈕隱藏
+  {
+    const missing = [];
+    for (const r of WR) {
+      if (!r.sels.some((s) => /body\.touch\b/.test(s))) continue;
+      for (const k of ['left', 'right', 'top', 'bottom']) {
+        const v = r.decl[k];
+        if (v && v !== 'auto' && !/env\(safe-area-inset-/.test(v) && !r.sels.every((s) => /\.wp-reload\b/.test(s))) missing.push(`${r.sels.join(',')} ${k}: ${v}`);
+      }
+    }
+    check('武器 UI 觸控規則定位都套 safe-area', !missing.length, missing.slice(0, 3).join('；'));
+    const hid = (sel) => WR.some((r) => r.sels.includes(sel) && r.decl.display === 'none');
+    check('觸控駕駛中武器面板與按鈕隱藏', hid('body.touch-drive .wp-hud') && hid('body.touch-drive .wp-tbtn'));
+  }
+  const ib = resolve(['.tbtn', '.tbtn.slot-interact']);
+  check('互動鈕 ≥ 44 px、右 / 下緣帶 safe-area', px(ib.width) >= 44 && px(ib.height) >= 44 && /env\(safe-area-inset-right\)/.test(ib.right || '') && /env\(safe-area-inset-bottom\)/.test(ib.bottom || ''), `${ib.width}×${ib.height}`);
+}
+// 開始畫面 / HUD 不再有過時字樣
+check('index.html 不含「無武器」「預留」等過時字樣', !/無武器|預留|後續版本/.test(html));
+check('style.css 註解與規則不含「無武器」「預留」', !/無武器|預留/.test(readFileSync(`${ROOT}src/style.css`, 'utf8')));
 
 console.log(`\n${fail ? 'FAIL' : 'PASS'} ${fail ? fail : pass}/${pass + fail}`);
 if (fail) process.exit(1);

@@ -8,6 +8,7 @@ export const ITEM_LABELS = {
   newGame: '開始新遊戲',
   resume: '繼續',
   map: '地圖',
+  guide: '圖鑑',
   settings: '設定',
   help: '操作說明',
   stats: '統計',
@@ -35,15 +36,16 @@ export function startItems({ canContinue = false } = {}) {
   return canContinue ? ['continue', 'newGame', 'settings', 'help'] : ['newGame', 'settings', 'help'];
 }
 
-export function pauseItems({ fullscreen = false } = {}) {
-  const items = ['resume', 'map', 'settings', 'help', 'stats'];
+// guide：整合層有提供圖鑑（createMenu 的 onOpenGuide）時才列「圖鑑」（排在地圖後面）
+export function pauseItems({ fullscreen = false, guide = false } = {}) {
+  const items = guide ? ['resume', 'map', 'guide', 'settings', 'help', 'stats'] : ['resume', 'map', 'settings', 'help', 'stats'];
   if (fullscreen) items.push('fullscreen');
   items.push('quit');
   return items;
 }
 
-// opts.fullscreen：document.fullscreenEnabled 為真時暫停選單才列「全螢幕」
-export function createMenuModel({ fullscreen = false } = {}) {
+// opts.fullscreen：document.fullscreenEnabled 為真時暫停選單才列「全螢幕」；opts.guide：列「圖鑑」（啟動 → { type: 'guide' }）
+export function createMenuModel({ fullscreen = false, guide = false } = {}) {
   let state = 'closed';
   let canContinue = false;
   let stack = []; // [{ id: 'root' | 子頁 id, items: string[], index }]
@@ -54,7 +56,7 @@ export function createMenuModel({ fullscreen = false } = {}) {
   const pages = () => (state === 'pause' ? PAUSE_PAGES : state === 'start' ? START_PAGES : []);
 
   function makeRoot() {
-    const items = state === 'pause' ? pauseItems({ fullscreen }) : startItems({ canContinue });
+    const items = state === 'pause' ? pauseItems({ fullscreen, guide }) : startItems({ canContinue });
     return { id: 'root', items, index: 0 };
   }
 
@@ -160,6 +162,10 @@ export function createMenuModel({ fullscreen = false } = {}) {
         return resume();
       case 'fullscreen':
         return { type: 'fullscreen' };
+      case 'guide':
+        // 圖鑑是獨立全螢幕面板（food-guide，z 80–89）：選單先關閉再交給整合層開啟
+        close();
+        return { type: 'guide' };
       case 'quit':
         return ask('quit');
       default:

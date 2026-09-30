@@ -1,10 +1,11 @@
 // 鏡頭無頭測試：以 mock terrain（querySurface）與 mock occluder（半空間牆 / 天花板 / 地面的球體掃掠）驅動 src/camera.js 的 CameraRig
 // 驗證俯仰上下限、仰角 80° 時鏡頭離地、仰視不穿牆 / 不穿天花板、預設視角（4.1 m + 越肩 0.3）、轉動換算；
+// W1：肩後瞄準（距離 / 右肩偏移 / FOV / 0.15 s 內插 / 仰角不收窄 / 駕駛忽略）與 addRecoil 衰減
 // A1：V 三段循環、滾輪微調範圍、越肩貼牆縮小、駕駛三段 / 車種比例 / 速度拉遠 / FOV、回正時序、lookBack、shake 衰減
 // 用法：node tools/test/camera.mjs（任一斷言失敗 exit 1）
 import * as THREE from 'three';
 
-const { CameraRig, PITCH_MIN, PITCH_MAX, WALK_DISTS, CAR_DISTS, BIKE_DISTS } = await import('../../src/camera.js');
+const { CameraRig, PITCH_MIN, PITCH_MAX, WALK_DISTS, CAR_DISTS, BIKE_DISTS, AIM_DIST, AIM_SHOULDER, AIM_FOV, AIM_BLEND_SEC, WALK_FOV, SHOULDER_OFFSET } = await import('../../src/camera.js');
 const { LOOK_RAD_PER_UNIT } = await import('../../src/input.js');
 
 let pass = 0;
@@ -359,6 +360,78 @@ check('俯仰範圍：PITCH_MIN ≤ −80°（仰）、PITCH_MAX ≥ 72°（俯�
   n.rig.shake(-1);
   n.rig.shake(NaN);
   check('shake 非正值忽略', n.rig.trauma === 0);
+}
+
+// W1-1. 肩後瞄準：0.15 s 內到位（距離 1.6 m、右肩 0.45 m、FOV 55），放開 0.15 s 內回到原距離 / FOV
+{
+  const { rig, cam, step, camDist, focus } = makeRig();
+  step(240);
+  const d0 = camDist();
+  const n = Math.ceil(AIM_BLEND_SEC * 60);
+  step(n, { aim: true });
+  const dAim = camDist();
+  // 右肩偏移：注視點相對頭部往鏡頭右方（yaw 0 → 右方 = −X）
+  const sh = focus.x - rig._target.x;
+  check('瞄準：0.15 s 內 aimBlend = 1、距離 1.6 m、FOV 55', rig.aimBlend === 1 && Math.abs(dAim - AIM_DIST) < 0.02 && Math.abs(cam.fov - AIM_FOV) < 1e-6, `d=${dAim.toFixed(3)} fov=${cam.fov.toFixed(2)}`);
+  check('瞄準：右肩偏移 0.45 m', Math.abs(sh - AIM_SHOULDER) < 1e-6, `偏移=${sh.toFixed(3)}`);
+  // 內插中途（約一半）
+  const mid = makeRig();
+  mid.step(240);
+  mid.step(Math.round(n / 2), { aim: true });
+  const dm = mid.camDist();
+  check('瞄準內插中途：距離介於原距離與 1.6 m 之間', dm < d0 - 0.3 && dm > AIM_DIST + 0.3 && mid.rig.aimBlend > 0.3 && mid.rig.aimBlend < 0.7, `d=${dm.toFixed(3)} k=${mid.rig.aimBlend.toFixed(2)}`);
+  // 瞄準中仰角 / 俯角範圍不收窄
+  step(1, { aim: true }, { dy: -100000 });
+  step(30, { aim: true });
+  const upP = rig.pitch;
+  step(1, { aim: true }, { dy: 100000 });
+  step(30, { aim: true });
+  const downP = rig.pitch;
+  check('瞄準中俯仰範圍不收窄（仰 80° / 俯 72°）', Math.abs(upP - PITCH_MIN) < 1e-9 && Math.abs(downP - PITCH_MAX) < 1e-9, `${(upP * DEG).toFixed(1)}° / ${(downP * DEG).toFixed(1)}°`);
+  rig.pitch = 0.32;
+  step(n);
+  const dBack = camDist();
+  check('放開瞄準：0.15 s 內回到原距離與步行 FOV', rig.aimBlend === 0 && Math.abs(dBack - d0) < 0.02 && Math.abs(cam.fov - WALK_FOV) < 1e-6, `d=${dBack.toFixed(3)}/${d0.toFixed(3)} fov=${cam.fov.toFixed(2)}`);
+  const sh2 = focus.x - rig._target.x;
+  check('放開瞄準：越肩回到 0.3 m', Math.abs(sh2 - SHOULDER_OFFSET) < 1e-6, `偏移=${sh2.toFixed(3)}`);
+  // 駕駛時忽略 aim
+  const dr = makeRig();
+  dr.step(120, { driving: true, aim: true });
+  check('駕駛中 aim 被忽略（aimBlend 0）', dr.rig.aimBlend === 0);
+}
+
+// W1-2. 瞄準貼牆：右肩偏移隨側向空間縮小，不穿牆
+{
+  const wall = mockOccluder([{ axis: 'x', side: -1, v: -0.5 }]); // 右方（−X）0.5 m 處是牆
+  const { rig, step, focus } = makeRig({ occ: wall });
+  step(60, { aim: true });
+  const sh = focus.x - rig._target.x;
+  check('瞄準貼牆：右肩偏移縮小到牆前（< 0.45 m）', sh < AIM_SHOULDER - 0.2 && sh >= 0, `偏移=${sh.toFixed(3)}`);
+}
+
+// W1-3. addRecoil：立即抬高視線、指數衰減回原位；不改 rig.pitch / rig.yaw
+{
+  const a = makeRig();
+  const b = makeRig();
+  a.step(120, { aim: true });
+  b.step(120, { aim: true });
+  const p0 = a.rig.pitch;
+  const y0 = a.rig.yaw;
+  a.rig.addRecoil(-0.05, 0.01);
+  a.step(1, { aim: true });
+  b.step(1, { aim: true });
+  const dirA = a.cam.getWorldDirection(new THREE.Vector3());
+  const dirB = b.cam.getWorldDirection(new THREE.Vector3());
+  check('addRecoil：當幀視線往上抬（pitch < 0 = 上）', dirA.y > dirB.y + 0.02, `Δy=${(dirA.y - dirB.y).toFixed(3)}`);
+  check('addRecoil：不改 rig.pitch / rig.yaw 本身', a.rig.pitch === p0 && a.rig.yaw === y0);
+  a.step(90, { aim: true });
+  b.step(90, { aim: true });
+  const ang = a.cam.quaternion.angleTo(b.cam.quaternion);
+  check('addRecoil：1.5 s 內衰減回原位', a.rig.recoilPitch === 0 && a.rig.recoilYaw === 0 && ang < 1e-4, `殘差=${ang.toExponential(2)}`);
+  a.rig.addRecoil(-10, 10);
+  check('addRecoil：累積偏移有上限（≤ 12°）', Math.abs(a.rig.recoilPitch) <= (12 / DEG) + 1e-9 && Math.abs(a.rig.recoilYaw) <= (12 / DEG) + 1e-9);
+  a.rig.addRecoil(NaN, Infinity);
+  check('addRecoil：非有限值忽略', Number.isFinite(a.rig.recoilPitch) && Number.isFinite(a.rig.recoilYaw));
 }
 
 console.log(`\n可達最大仰角 ${up.elev.toFixed(1)}°（pitch 下限 ${(-PITCH_MIN * DEG).toFixed(0)}°）、最大俯角 ${(-down.elev).toFixed(1)}°（pitch 上限 ${(PITCH_MAX * DEG).toFixed(0)}°）`);

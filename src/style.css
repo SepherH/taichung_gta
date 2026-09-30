@@ -561,12 +561,14 @@ body {
 
 /* ---------- 授權標示（ODbL 要求常駐；貼最邊角、小字半透明、不吃指標事件） ---------- */
 /* 桌機：右下角。左下是小地圖群組（left/bottom 18px 起）；右下的時速錶群組底緣在 bottom 28px、常駐按鍵提示底緣在 bottom 24px，
-   本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊（tools/test/attribution.mjs 以規則數值逐尺寸推算） */
+   本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊（tools/test/attribution.mjs 以規則數值逐尺寸推算）
+   z-index 60（HUD 上限）：高於武器 / 任務 / 打卡模組的 HUD 元素（wp- / ms- / cl- 的 50–59）與上滑 / 直向遮罩（55 / 60，
+   同為 60 時本元素在 DOM 較後面而在上層）；只有選單（70–79）與全螢幕面板（80–89）會蓋住，兩者都自帶授權標示 */
 #attribution {
   position: fixed;
   right: calc(8px + env(safe-area-inset-right));
   bottom: calc(4px + env(safe-area-inset-bottom));
-  z-index: 30;
+  z-index: 60;
   max-width: calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
   font-size: 11px;
   line-height: 1.4;
@@ -1180,7 +1182,18 @@ body.touch-drive .tbtn[data-show="walk"] {
   right: calc(148px + env(safe-area-inset-right));
 }
 
-/* 左上三顆小鈕（暫停 / 地圖 / 手機預留）：排在小地圖（120px）右側，≥ 44px */
+/* 互動鈕（tb-interact，有互動提示才顯示）：攻擊鈕左側，與跑鈕（sec1）/ 攻擊鈕間距 ≥ 12px；
+   武器鈕欄（weapons.css 的 wp-tb-*，右側 16–144px、底 236px 以上）在其右上方，不重疊；直向時在搖桿底座下方 */
+.tbtn.slot-interact {
+  right: calc(244px + env(safe-area-inset-right));
+  bottom: calc(128px + env(safe-area-inset-bottom));
+  width: 72px;
+  height: 72px;
+  border-color: #7df0ff;
+  color: #7df0ff;
+}
+
+/* 左上三顆小鈕（暫停 / 地圖 / 圖鑑；隱藏的手機鈕也在第三格）：排在小地圖（120px）右側，≥ 44px */
 .tbtn.slot-tl1,
 .tbtn.slot-tl2,
 .tbtn.slot-tl3 {
@@ -1207,7 +1220,7 @@ body.touch-drive .tbtn[data-show="walk"] {
 }
 
 /* 窄直向（寬 ≤ 400px，如 360×640）：左上小鈕間距收為 4px、右上小鈕縮為 48px 並貼右 12px，
-   駕駛時喇叭（top1）與預留的手機鈕（tl3）不重疊（原本 360 寬時重疊 12px） */
+   駕駛時喇叭（top1）與第三格小鈕（tl3）不重疊（原本 360 寬時重疊 12px） */
 @media (orientation: portrait) and (max-width: 400px) {
   .tbtn.slot-tl2 {
     left: calc(192px + env(safe-area-inset-left));

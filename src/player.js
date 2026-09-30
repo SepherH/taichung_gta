@@ -14,8 +14,13 @@
 //   受擊擊退改成 CharacterBody 的水平速度（由角色控制器掃掠，不會穿牆）、受擊時轉身面向攻擊者；倒地不做剛體飛出，原地播倒地動畫
 // 出拳輔助瞄準：combat.assistTarget（前方 ±90°、2.5 m 內最近行人）→ ASSIST_TURN_SEC 內轉向面對，
 //   目標在命中半徑外時再向前小衝步（LUNGE_*，同樣走 CharacterBody 速度），讓 2.5 m 內的目標打得到
+// Phase 4：
+// - 武器動畫層 this.weaponLayer（character-animation.js createWeaponLayer）：上半身持武器姿勢 / 揮棒 / 開槍 / 裝填疊在移動之上；
+//   每次 this.anim.update 之後緊接 weaponLayer.update(同一 dt)（步行物理 / 無物理 / 駕駛坐姿三條路徑都一樣）
+// - this.speedScale（預設 1）：步行速度倍率（heavy 委託 0.6，由整合層每幀設定）；走 / 衝刺頂速都乘上，駕駛不受影響
 import * as THREE from 'three';
-import { createCharacter, getCharacterManifest, CharacterAnimator, playerVariant, variantHeight, DEFAULT_VARIANT } from './characters/index.js';
+import { createCharacter, getCharacterManifest, CharacterAnimator, playerVariant, variantHeight, DEFAULT_VARIANT, characterBoneGroups } from './characters/index.js';
+import { createWeaponLayer } from './character-animation.js';
 import { ASSIST_TURN_SEC, HIT_RADIUS } from './combat.js';
 import { SEAT_HIPS_HEIGHT } from './vehicle-model.js';
 import { pushOutOfCircles } from './collision.js';
@@ -144,6 +149,9 @@ export class Player {
     scene.add(this.mesh);
     const manifest = getCharacterManifest();
     this.anim = new CharacterAnimator(this.character, manifest ? manifest.clips : []);
+    // 武器上半身層（缺 clip / 方塊人時只跑計時，姿勢不疊加）
+    this.weaponLayer = createWeaponLayer(this.anim, { boneGroups: characterBoneGroups(manifest) });
+    this.speedScale = 1; // 步行速度倍率（heavy 委託 0.6）；非有限數或 ≤ 0 當 1
     this.pos = new THREE.Vector3(spawn.x, 0, spawn.z);
     this.yaw = spawn.yaw;
     this.vx = 0;
@@ -308,7 +316,7 @@ export class Player {
       wz /= wl;
     }
     const running = input.down('ShiftLeft') || input.down('ShiftRight');
-    const target = wl > 0 ? (running ? RUN_SPEED : WALK_SPEED) : 0;
+    const target = wl > 0 ? (running ? RUN_SPEED : WALK_SPEED) * this._speedK() : 0;
 
     // 加速 / 減速 / 轉向（與 CharacterBody 相同）
     stepVelocity(this, dt, wx, wz, target);
@@ -372,7 +380,14 @@ export class Player {
     jumpLand(this._jumpSt, dt, this.onGround, this.vy);
 
     this.anim.update(dt, { speed: this.speed, grounded: this.onGround });
+    this.weaponLayer.update(dt);
     this.syncMesh();
+  }
+
+  // 步行速度倍率（speedScale 限 0–1；非法值當 1）
+  _speedK() {
+    const k = this.speedScale;
+    return Number.isFinite(k) && k > 0 ? Math.min(1, k) : 1;
   }
 
   _readIntent(input, camYaw) {
@@ -385,9 +400,11 @@ export class Player {
       this.body.cancelJump();
       return;
     }
+    // 速度倍率縮放意圖長度：CharacterBody 的目標速度 = 走 / 衝刺頂速 × 意圖長度
     const d = moveIntent(input.moveAxis(), camYaw);
-    it.moveX = d.x;
-    it.moveZ = d.z;
+    const k = this._speedK();
+    it.moveX = d.x * k;
+    it.moveZ = d.z * k;
     // 觸控搖桿推過 STICK_RUN 時 input 會寫入 ShiftLeft（input.js），所以「搖桿推到底」也在這裡
     it.run = input.down('ShiftLeft') || input.down('ShiftRight');
     // 跳：只記「按了」；能否起跳（著地 / coyote / 緩衝、動畫是否接受）由 CharacterBody.move 決定
@@ -413,6 +430,7 @@ export class Player {
       this.yaw += angleDelta(this.yaw, Math.atan2(it.moveX, it.moveZ)) * Math.min(1, TURN_RATE * dt);
     }
     this.anim.update(dt, { speed: r.speed, grounded: this.onGround });
+    this.weaponLayer.update(dt);
     this.syncMesh();
   }
 
@@ -487,6 +505,7 @@ export class Player {
     this.pos.copy(this.mesh.position);
     this.yaw = vehicle.yaw;
     this.anim.update(dt, { speed: 0, driving: true });
+    this.weaponLayer.update(dt);
   }
 
   placeAt(x, z, yaw, terrain) {

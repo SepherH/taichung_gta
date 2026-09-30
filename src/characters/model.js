@@ -1,7 +1,9 @@
 // 角色模型：依 public/models/characters/manifest.json 載入骨架人形 glb，快取後以 SkeletonUtils.clone 複製、依材質槽換色。
 //
 // manifest 欄位（美術線產出）：skeleton（骨名）、materialSlots（skin / shirt / pants / hair / shoes）、fps、
-//   clips [{ name, duration, loop }]、variants [{ id, file, height, colors, role? }]、events.punch.hitWindow、poses
+//   clips [{ name, duration, loop, upperBodyOnly? }]、variants [{ id, file, height, colors, role? }]、events.punch.hitWindow、poses
+//   Phase 4（§14，可能缺）：boneGroups { upper, lower }、weaponSocket（'weapon_socket' 字串或 { bone, parent, axes, notes } 物件）；
+//   讀取一律經 weaponSocketBone() / characterBoneGroups()（缺欄位 → 預設值）。glb 骨架可比 skeleton 多出插槽骨（weapon_socket）
 // glb 契約：身高依 variant.height（缺省 DEFAULT_HEIGHT 1.75 m）、原點在兩腳底中心（地面）、+Y 上、面向 glTF +Z；材質名稱 = 材質槽名稱。
 // 主角：role 為 "player" 的 variant（hero，保留模型原材質、不換色；多一個循環 clip idle_pose）；
 //   manifest 沒有、檔案缺失或載入失敗 → playerVariant() 退回 DEFAULT_VARIANT（console.warn 一次，不丟例外）。
@@ -114,6 +116,28 @@ async function doLoad(manifestUrl, fetchImpl) {
 
 export function getCharacterManifest() {
   return cache.manifest;
+}
+
+// 武器插槽骨名稱：manifest weaponSocket 可為字串或 { bone }；缺 → DEFAULT_WEAPON_SOCKET
+export const DEFAULT_WEAPON_SOCKET = 'weapon_socket';
+export const WEAPON_SOCKET_PARENT = 'RightHand'; // 插槽骨缺時改掛的右手骨
+export function weaponSocketBone(manifest = cache.manifest) {
+  const ws = manifest && manifest.weaponSocket;
+  if (typeof ws === 'string' && ws) return ws;
+  if (ws && typeof ws.bone === 'string' && ws.bone) return ws.bone;
+  return DEFAULT_WEAPON_SOCKET;
+}
+
+// 上 / 下半身骨群組：manifest boneGroups 缺（或 upper 不是非空陣列）→ 預設（契約 §14）
+export const DEFAULT_BONE_GROUPS = Object.freeze({
+  upper: Object.freeze(['Spine', 'Chest', 'Neck', 'Head', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand', 'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand', DEFAULT_WEAPON_SOCKET]),
+  lower: Object.freeze(['Hips', 'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot']),
+});
+export function characterBoneGroups(manifest = cache.manifest) {
+  const g = manifest && manifest.boneGroups;
+  const ok = (a) => Array.isArray(a) && a.length > 0 && a.every((n) => typeof n === 'string');
+  if (!g || !ok(g.upper)) return DEFAULT_BONE_GROUPS;
+  return { upper: g.upper, lower: ok(g.lower) ? g.lower : DEFAULT_BONE_GROUPS.lower };
 }
 
 // 玩家用的 variant：manifest 中 role 為 "player" 且已載入者；否則退回 DEFAULT_VARIANT（只 warn 一次）

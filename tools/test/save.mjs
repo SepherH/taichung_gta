@@ -3,6 +3,7 @@
 // 用法：node tools/test/save.mjs（任一斷言失敗 exit 1；最後一行印 PASS n/n 或 FAIL k/n）
 // 項目：load 狀態 new / ok / recovered / corrupt-reset / incompatible、.bak / .corrupt 內容（corrupt-reset 清掉壞槽）、save 失敗回 false、
 //   validateSave 清洗（NaN、負數、未知鍵、缺鍵）、autosave 時序與例外、economy 事件計數 / 金錢 / 醫藥費 / dispose
+// D4-0（schema v2，契約 §18）：v1 舊檔升版不遺失、v2 欄位非法值清洗、陣列去重與上限、備份 / 損毀流程在 v2 下照常
 import { register } from 'node:module';
 
 const JSON_HOOK = `
@@ -76,10 +77,16 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
 // ---------- defaultSave / migrate ----------
 {
   const d = defaultSave();
-  check('defaultSave 版本 / 起始金錢 / 時間 / 位置 null', d.version === 1 && SAVE_VERSION === 1 && d.money === 500 && d.world.hour === 16.5 && d.player.x === null && d.player.z === null);
-  check('defaultSave 統計 10 欄皆 0', Object.keys(d.stats).length === 10 && Object.values(d.stats).every((v) => v === 0));
-  check('defaultSave 每次回新物件', defaultSave() !== defaultSave() && defaultSave().stats !== d.stats);
-  check('migrate：version 2 → null、version 0 → 1、非物件 → null', migrate({ version: 2 }) === null && migrate({ version: 0 }).version === 1 && migrate('x') === null && migrate([]) === null);
+  check('defaultSave 版本 / 起始金錢 / 時間 / 位置 null', d.version === 2 && SAVE_VERSION === 2 && d.money === 500 && d.world.hour === 16.5 && d.player.x === null && d.player.z === null);
+  check('defaultSave 統計 13 欄皆 0（v1 十欄 + missionsDone / missionsFailed / shotsFired）', Object.keys(d.stats).length === 13 && Object.values(d.stats).every((v) => v === 0) && ['missionsDone', 'missionsFailed', 'shotsFired'].every((k) => k in d.stats));
+  check(
+    'defaultSave v2 欄位',
+    JSON.stringify(d.weapons) === JSON.stringify({ slot: 0, ammo: { pistol: { mag: 12, reserve: 36 } } }) &&
+      JSON.stringify(d.missions) === JSON.stringify({ completed: {}, best: {}, cooldowns: {}, active: null }) &&
+      JSON.stringify(d.collect) === JSON.stringify({ checkins: [], foods: [] }),
+  );
+  check('defaultSave 每次回新物件（含巢狀）', defaultSave() !== defaultSave() && defaultSave().stats !== d.stats && defaultSave().weapons.ammo.pistol !== d.weapons.ammo.pistol && defaultSave().collect.checkins !== d.collect.checkins);
+  check('migrate：version 3 → null、version 0 / 1 → 2、非物件 → null', migrate({ version: 3 }) === null && migrate({ version: 0 }).version === 2 && migrate({ version: 1 }).version === 2 && migrate('x') === null && migrate([]) === null);
 }
 
 // ---------- validateSave 清洗 ----------
@@ -93,7 +100,7 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   check('validate：NaN 金錢 → 預設 500、負 savedAt → 0', v && v.money === 500 && v.savedAt === 0);
   check('validate：未知鍵丟棄（頂層 / stats / player / world）', v && !('hacker' in v) && !('extra' in v.stats) && !('god' in v.player) && !('weather' in v.world));
   check('validate：負數 / Infinity 統計 → 0、計數取整數、距離保留小數', v && v.stats.playTimeSec === 0 && v.stats.carjacks === 0 && v.stats.pedsHit === 3 && v.stats.distWalkM === 12.5);
-  check('validate：缺鍵補預設（stats 其餘欄位）', v && Object.keys(v.stats).length === 10 && v.stats.kos === 0);
+  check('validate：缺鍵補預設（stats 其餘欄位）', v && Object.keys(v.stats).length === 13 && v.stats.kos === 0 && v.stats.shotsFired === 0);
   check('validate：x / z 不成對有效 → 皆 null、非數 yaw → 0', v && v.player.x === null && v.player.z === null && v.player.yaw === 0);
   check('validate：hour 30 → 6（mod 24）', v && v.world.hour === 6);
   const empty = validateSave({ version: 1 });
@@ -160,7 +167,7 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
 
 // ---------- incompatible ----------
 {
-  const newer = JSON.stringify({ version: 2, money: 99999 });
+  const newer = JSON.stringify({ version: 3, money: 99999 });
   const s = fakeStorage({ [K]: newer });
   const st = createSaveStore({ storage: s, now: () => 5 });
   const r = st.load();
@@ -170,6 +177,102 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   check('incompatible：hasSave → false', st.hasSave() === false);
   st.clear();
   check('clear 後：主鍵移除、save() 恢復可寫', s.getItem(K) === null && st.save(good()) === true && JSON.parse(s.getItem(K)).money === 1234);
+}
+
+// ---------- schema v2（§18）：v1 升版 / 清洗 / 去重上限 / 備份流程 ----------
+{
+  // 典型 v1 舊檔（Phase 3 main.js 存的形狀）
+  const v1 = {
+    version: 1, savedAt: 123456, money: 4321,
+    stats: { playTimeSec: 3600.5, distWalkM: 812.25, distDriveM: 15000.75, pedsHit: 7, pedsKnockedOut: 11, carjacks: 3, crashes: 9, kos: 2, moneyEarned: 5000, moneySpent: 1179 },
+    player: { x: -210.5, z: 333.25, yaw: -2.5 },
+    world: { hour: 21.75 },
+  };
+  const m = migrate(v1);
+  check('migrate v1 → v2：version 2、v1 各欄原值保留', m.version === 2 && m.money === 4321 && m.savedAt === 123456 && m.player === v1.player && m.world === v1.world && m.stats.distDriveM === 15000.75);
+  check('migrate v1 → v2：補 weapons / missions / collect 與三個新統計', m.weapons.slot === 0 && m.weapons.ammo.pistol.mag === 12 && m.missions.active === null && Array.isArray(m.collect.foods) && m.stats.missionsDone === 0 && m.stats.shotsFired === 0);
+  check('migrate 不改動輸入物件', v1.version === 1 && !('weapons' in v1) && !('missionsDone' in v1.stats));
+  const v = validateSave(v1);
+  const v1Keys = Object.keys(v1.stats);
+  check('validate v1 舊檔：金錢 / 時間 / 位置 / 十項統計全部保留', v.version === 2 && v.money === 4321 && v.savedAt === 123456 && v.player.x === -210.5 && v.player.z === 333.25 && v.player.yaw === -2.5 && v.world.hour === 21.75 && v1Keys.every((k) => v.stats[k] === v1.stats[k]));
+  check('validate v1 舊檔：v2 欄位為預設', JSON.stringify({ w: v.weapons, m: v.missions, c: v.collect }) === JSON.stringify({ w: defaultSave().weapons, m: defaultSave().missions, c: defaultSave().collect }));
+  // 版本標 1 但已帶 v2 欄位（整合層尚未改 version 時）：遷移不蓋掉既有值
+  const mixed = validateSave({ version: 1, weapons: { slot: 2, ammo: { pistol: { mag: 5, reserve: 80 } } }, stats: { shotsFired: 40 }, collect: { checkins: ['tiger_city'] } });
+  check('version 1 但已帶 v2 欄位 → 保留（不以預設覆蓋）', mixed.weapons.slot === 2 && mixed.weapons.ammo.pistol.mag === 5 && mixed.weapons.ammo.pistol.reserve === 80 && mixed.stats.shotsFired === 40 && mixed.collect.checkins.join() === 'tiger_city');
+  check('無 version 的物件視為 v2 清洗', validateSave({ money: 10 }).version === 2 && validateSave({ money: 10 }).weapons.slot === 0);
+
+  // 非法值清洗
+  const bad = validateSave({
+    version: 2,
+    stats: { missionsDone: 3.9, missionsFailed: -1, shotsFired: NaN },
+    weapons: { slot: 3, ammo: { pistol: { mag: 99, reserve: 500 }, rifle: { mag: 30 } }, extra: 1 },
+    missions: {
+      completed: { tiger_city: 2.7, bad_neg: -1, bad_nan: NaN, bad_str: '3', __proto__: 5, '': 1 },
+      best: { tiger_city: 87.25, bad: Infinity },
+      cooldowns: { top_city: 45.5, x: null },
+      active: { slug: 'tiger_city', stage: 'deliver', timer: 30 },
+      junk: true,
+    },
+    collect: { checkins: ['a', 'b', 'a', 5, null, '', 'c', { x: 1 }], foods: 'not-array' },
+  });
+  check('validate v2：新統計取整、負數 / NaN → 0', bad.stats.missionsDone === 3 && bad.stats.missionsFailed === 0 && bad.stats.shotsFired === 0);
+  check('validate v2：weapons.slot 不在 {0,1,2} → 0；未知鍵丟棄', bad.weapons.slot === 0 && !('extra' in bad.weapons) && !('rifle' in bad.weapons.ammo));
+  check('validate v2：mag > 12 → 12、reserve > 120 → 120', bad.weapons.ammo.pistol.mag === 12 && bad.weapons.ammo.pistol.reserve === 120);
+  const neg = validateSave({ version: 2, weapons: { slot: 1, ammo: { pistol: { mag: -3, reserve: 7.8 } } } });
+  check('validate v2：負 mag → 預設 12、reserve 小數取整、slot 1 保留', neg.weapons.slot === 1 && neg.weapons.ammo.pistol.mag === 12 && neg.weapons.ammo.pistol.reserve === 7);
+  check('validate v2：slot 非整數 / 字串 → 0', validateSave({ version: 2, weapons: { slot: 1.5 } }).weapons.slot === 0 && validateSave({ version: 2, weapons: { slot: '2' } }).weapons.slot === 0);
+  check('validate v2：completed 只收字串鍵 → 非負整數（非法值的鍵丟棄）', JSON.stringify(bad.missions.completed) === JSON.stringify({ tiger_city: 2 }), JSON.stringify(bad.missions.completed));
+  check('validate v2：best / cooldowns 保留小數、非有限數 / null 丟棄', JSON.stringify(bad.missions.best) === '{"tiger_city":87.25}' && JSON.stringify(bad.missions.cooldowns) === '{"top_city":45.5}');
+  check('validate v2：missions 未知鍵丟棄、active 只留 { slug, stage }', !('junk' in bad.missions) && JSON.stringify(bad.missions.active) === '{"slug":"tiger_city","stage":"deliver"}');
+  const act = (a) => validateSave({ version: 2, missions: { active: a } }).missions.active;
+  check('validate v2：active 非法（缺 slug / 空 slug / 未知 stage / 陣列 / 字串）→ null', [{ stage: 'pickup' }, { slug: '', stage: 'pickup' }, { slug: 'x', stage: 'fly' }, ['x'], 'x', 5].every((a) => act(a) === null) && act({ slug: 'x', stage: 'pickup' }).stage === 'pickup');
+  check('validate v2：missions 表非物件（陣列 / 字串）→ {}', JSON.stringify(validateSave({ version: 2, missions: { completed: [1, 2], best: 'x', cooldowns: null } }).missions) === JSON.stringify(defaultSave().missions));
+  check('validate v2：checkins 只收非空字串、去重保序', bad.collect.checkins.join(',') === 'a,b,c', bad.collect.checkins.join(','));
+  check('validate v2：foods 非陣列 → []', Array.isArray(bad.collect.foods) && bad.collect.foods.length === 0);
+  const many = Array.from({ length: 450 }, (_, i) => `id${i % 300}`);
+  const capped = validateSave({ version: 2, collect: { checkins: many, foods: many } });
+  check('validate v2：陣列去重後上限 200（保留前 200 個）', capped.collect.checkins.length === 200 && capped.collect.foods.length === 200 && capped.collect.checkins[0] === 'id0' && capped.collect.checkins[199] === 'id199');
+  const bigMap = {};
+  for (let i = 0; i < 300; i++) bigMap[`m${i}`] = i;
+  check('validate v2：completed 鍵數上限 200', Object.keys(validateSave({ version: 2, missions: { completed: bigMap } }).missions.completed).length === 200);
+  check('validate v2：清洗結果可 JSON 來回不變', JSON.stringify(validateSave(JSON.parse(JSON.stringify(bad)))) === JSON.stringify(bad));
+  check('validate v2：clean 後 missions 表原型正常（__proto__ 未污染）', Object.getPrototypeOf(bad.missions.completed) === Object.prototype && !Object.prototype.hasOwnProperty.call(bad.missions.completed, '__proto__'));
+  // JSON 文字中的 __proto__ 鍵（JSON.parse 會產生自有屬性）
+  const protoText = validateSave(JSON.parse('{"version":2,"missions":{"completed":{"__proto__":{"x":1},"ok":1}}}'));
+  check('validate v2：JSON 文字 __proto__ 鍵被丟棄', JSON.stringify(protoText.missions.completed) === '{"ok":1}' && ({}).x === undefined);
+
+  // store：v1 舊檔 load → ok（升版）→ save 寫 v2；v2 資料來回
+  const s = fakeStorage({ [K]: JSON.stringify(v1) });
+  const st = createSaveStore({ storage: s, now: () => 9000 });
+  const r = st.load();
+  check('load v1 舊檔 → ok、資料升為 v2 且不遺失', r.status === 'ok' && r.data.version === 2 && r.data.money === 4321 && r.data.stats.carjacks === 3 && r.data.player.x === -210.5 && r.data.weapons.ammo.pistol.reserve === 36);
+  check('load v1 舊檔：.bak 寫入升版後的 v2', JSON.parse(s.getItem(K + '.bak')).version === 2 && JSON.parse(s.getItem(K + '.bak')).money === 4321);
+  check('load v1 舊檔：主鍵在 save 前不被改寫', JSON.parse(s.getItem(K)).version === 1);
+  const d2 = { ...r.data, weapons: { slot: 2, ammo: { pistol: { mag: 4, reserve: 60 } } }, missions: { completed: { tiger_city: 1 }, best: { tiger_city: 70.5 }, cooldowns: {}, active: { slug: 'top_city', stage: 'pickup' } }, collect: { checkins: ['tiger_city', 'top_city'], foods: ['bubble_tea'] } };
+  check('save v2 → true、主鍵為 v2', st.save(d2) === true && JSON.parse(s.getItem(K)).version === 2);
+  const r2 = createSaveStore({ storage: s }).load();
+  check('v2 存讀來回一致（weapons / missions / collect）', r2.status === 'ok' && r2.data.weapons.slot === 2 && r2.data.weapons.ammo.pistol.mag === 4 && r2.data.missions.best.tiger_city === 70.5 && r2.data.missions.active.slug === 'top_city' && r2.data.collect.checkins.join() === 'tiger_city,top_city' && r2.data.collect.foods.join() === 'bubble_tea' && r2.data.money === 4321);
+  // 備份 / 損毀：v2 主檔壞 → 從 v2 .bak 救回
+  s.setItem(K, '{v2 壞掉');
+  const r3 = createSaveStore({ storage: s }).load();
+  check('v2：主鍵壞 + .bak 有效 → recovered、v2 欄位完整', r3.status === 'recovered' && r3.data.weapons.slot === 2 && r3.data.collect.checkins.length === 2 && s.getItem(K + '.corrupt') === '{v2 壞掉');
+  // 主鍵壞 + .bak 為 v1 舊檔 → recovered 並升版
+  const s4 = fakeStorage({ [K]: 'xx', [K + '.bak']: JSON.stringify(v1) });
+  const r4 = createSaveStore({ storage: s4 }).load();
+  check('v2：主鍵壞 + .bak 為 v1 → recovered 且升版不遺失', r4.status === 'recovered' && r4.data.version === 2 && r4.data.money === 4321 && r4.data.stats.kos === 2);
+  // 兩者皆壞 → corrupt-reset（v2 預設）
+  const s5 = fakeStorage({ [K]: 'bad', [K + '.bak']: '[]' });
+  const r5 = createSaveStore({ storage: s5 }).load();
+  check('v2：主鍵與 .bak 皆壞 → corrupt-reset、預設為 v2', r5.status === 'corrupt-reset' && r5.data.version === 2 && r5.data.weapons.ammo.pistol.mag === 12 && s5.getItem(K) === null && s5.getItem(K + '.bak') === null && s5.getItem(K + '.corrupt') === 'bad');
+  // version 3 → incompatible、不覆寫；.bak 為 v3 時同樣 incompatible
+  const s6 = fakeStorage({ [K]: JSON.stringify({ version: 3, money: 1 }) });
+  const st6 = createSaveStore({ storage: s6 });
+  check('v2：主鍵 version 3 → incompatible、save 不覆寫', st6.load().status === 'incompatible' && st6.save(d2) === false && JSON.parse(s6.getItem(K)).version === 3);
+  const s7 = fakeStorage({ [K]: 'bad', [K + '.bak']: JSON.stringify({ version: 3 }) });
+  check('v2：主鍵壞 + .bak version 3 → incompatible', createSaveStore({ storage: s7 }).load().status === 'incompatible');
+  // economy 以 validateSave 初始化：新統計欄位經 economy.snapshot 仍保留
+  const eco = createEconomy({ initial: { money: 10, stats: { ...defaultSave().stats, missionsDone: 4, shotsFired: 9 } } });
+  check('economy.snapshot 保留 v2 新統計（missionsDone / shotsFired）', eco.snapshot().stats.missionsDone === 4 && eco.snapshot().stats.shotsFired === 9);
 }
 
 // ---------- save 失敗 ----------

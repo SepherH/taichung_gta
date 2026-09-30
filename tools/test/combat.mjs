@@ -1,9 +1,9 @@
 // 無頭驗證 src/combat.js 與 src/npc-ai.js：mock actor / anim / body，手動推進時間
 // 用法：node tools/test/combat.mjs [-v 列出每項斷言]（任一斷言失敗 exit 1）
-import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD, HIT_RADIUS, HIT_HALF_ANGLE, HIT_MAX_DY, KNOCKBACK_DIST, ASSIST_RADIUS, HIT_STOP, pedKnockdownPayload } from '../../src/combat.js';
+import { CombatSystem, PUNCH_DAMAGE, GETUP_MIN_DOWN, GETUP_TIMEOUT, DEAD_HOLD, HIT_RADIUS, HIT_HALF_ANGLE, HIT_MAX_DY, KNOCKBACK_DIST, ASSIST_RADIUS, HIT_STOP, pedKnockdownPayload, hitSide } from '../../src/combat.js';
 import {
   NpcBrain, wireCombatToBrains, createBrainGroup, fighterCount, FIGHT_PUNCH_MIN, FIGHT_PUNCH_MAX, WATCH_MIN_TIME, WATCH_MAX_TIME,
-  HORN_SIDESTEP_MIN, HORN_SIDESTEP_MAX, HORN_LOOK_MIN, HORN_LOOK_MAX, HORN_GLARE_MIN, HORN_GLARE_MAX, PANIC_HOPS, MAX_FIGHTERS, DISPERSE_MIN, DISPERSE_MAX, FLEE_MIN_TIME, FLEE_MAX_TIME,
+  GUNSHOT_RADIUS, HORN_SIDESTEP_MIN, HORN_SIDESTEP_MAX, HORN_LOOK_MIN, HORN_LOOK_MAX, HORN_GLARE_MIN, HORN_GLARE_MAX, PANIC_HOPS, MAX_FIGHTERS, DISPERSE_MIN, DISPERSE_MAX, FLEE_MIN_TIME, FLEE_MAX_TIME,
 } from '../../src/npc-ai.js';
 
 let pass = 0;
@@ -810,7 +810,7 @@ function punch(sys, att, windowSec = 0.15) {
   ok(kn.cause === 'vehicle' && kn.attacker === null && kn.byPlayer === false, '車流車撞人（無駕駛 actor）→ attacker null、byPlayer false');
   ok(kdrv.attacker === player && kdrv.byPlayer === true, 'onVehicleHit 的 driver 參數優先');
   const pk = pedKnockdownPayload(kv);
-  ok(pk && pk.ped === b && pk.cause === 'vehicle' && pk.byPlayer === true && pk.x === 5 && pk.z === 5 && Object.keys(pk).sort().join() === 'byPlayer,cause,ped,x,z', `pedKnockdownPayload → 契約 ped:knockdown { ${pk && Object.keys(pk).join(', ')} }`);
+  ok(pk && pk.ped === b && pk.cause === 'vehicle' && pk.byPlayer === true && pk.x === 5 && pk.z === 5 && pk.weapon === 'vehicle' && Object.keys(pk).sort().join() === 'byPlayer,cause,ped,weapon,x,z', `pedKnockdownPayload → 契約 ped:knockdown { ${pk && Object.keys(pk).join(', ')} }`);
   ok(pedKnockdownPayload({ target: player, cause: 'punch' }) === null, '玩家倒地不轉成 ped:knockdown');
 }
 
@@ -894,6 +894,100 @@ function punch(sys, att, windowSec = 0.15) {
   console.log(`INFO  效能（node）：120 名行人每幀全部 think，平均 ${avg.toFixed(4)} ms、最大 ${maxMs.toFixed(3)} ms；結束時狀態 ${JSON.stringify(modes)}`);
   ok(avg < 0.5, `120 名行人 think 每幀平均 ${avg.toFixed(4)} ms（< 0.5 ms）`);
   ok(list.every((b, i) => b.intent === intents[i]), '意圖物件每幀重用（不重新配置）');
+}
+
+// ---------- 12. Phase 4：applyHit（bat / bullet 去重、側向、擊倒門檻、倒地中不受擊）、拳擊 hit 新欄位、knockdownActor ----------
+{
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const a = mockActor('p', 0, 0, 0, { kind: 'player' });
+  const f = mockActor('f', 0, 1, Math.PI); // 迎面
+  const k = mockActor('k', 0, 2, 0); // 背對攻擊者
+  for (const x of [a, f, k]) sys.register(x);
+  const hits = [];
+  const kds = [];
+  sys.on('hit', (e) => hits.push(e));
+  sys.on('knockdown', (e) => kds.push(e));
+  // 拳擊路徑的 hit 事件補欄位
+  punch(sys, a);
+  const ph = hits[0];
+  ok(ph && ph.weapon === 'fist' && ph.side === 'front' && ph.byPlayer === true && ph.knockdown === false && Number.isFinite(ph.x) && Number.isFinite(ph.y) && Number.isFinite(ph.z) && ph.dirZ === 1,
+    "拳擊 'hit' 補 weapon fist / side / x,y,z / dir / byPlayer / knockdown");
+  // 棒擊去重：同 swingId 對同一人只傷一次，換 swingId 再傷
+  clock += 1;
+  sys.update(0);
+  const s1 = sys.newSwingId();
+  const r1 = sys.applyHit({ attacker: a, target: k, damage: 35, weapon: 'bat', dir: { x: 0, z: 1 }, swingId: s1 });
+  const r2 = sys.applyHit({ attacker: a, target: k, damage: 35, weapon: 'bat', dir: { x: 0, z: 1 }, swingId: s1 });
+  ok(r1 && r2 === null && k.hp === 65 && r1.side === 'back', `棒擊同一揮只傷一次、背後 side back（hp=${k.hp}）`);
+  ok(k.anim.count('hit') === 1, "背後受擊 anim.trigger('hit', { side })");
+  clock += 0.6;
+  sys.update(0);
+  const r3 = sys.applyHit({ attacker: a, target: k, damage: 35, weapon: 'bat', dir: { x: 0, z: 1 }, swingId: sys.newSwingId() });
+  ok(r3 && r3.knockdown && kds.at(-1).cause === 'bat' && kds.at(-1).weapon === 'bat' && sys.stateOf(k) === 'knockdown', '棒擊 4 s 內第 2 下 → 擊倒 cause bat');
+  ok(sys.applyHit({ attacker: a, target: k, damage: 35, weapon: 'bat', dir: { x: 0, z: 1 }, swingId: sys.newSwingId() }) === null && k.hp === 30, '倒地中不再受擊');
+  // 子彈：同一發去重、1.5 s 內 2 發擊倒；間隔 1.6 s 不倒
+  clock += 5;
+  sys.update(0);
+  const g = mockActor('g', 0, 5, Math.PI);
+  g.hp = g.maxHp = 300;
+  sys.register(g);
+  const sid = sys.newSwingId();
+  sys.applyHit({ attacker: a, target: g, damage: 40, weapon: 'pistol', dir: { x: 0, z: 1 }, swingId: sid });
+  ok(sys.applyHit({ attacker: a, target: g, damage: 40, weapon: 'pistol', dir: { x: 0, z: 1 }, swingId: sid }) === null && g.hp === 260, '子彈同一發只計一次');
+  clock += 1.6;
+  sys.update(0);
+  const r4 = sys.applyHit({ attacker: a, target: g, damage: 40, weapon: 'pistol', dir: { x: 0, z: 1 }, swingId: sys.newSwingId() });
+  ok(r4 && !r4.knockdown, '子彈 2 發間隔 1.6 s → 不倒');
+  clock += 1.0;
+  sys.update(0);
+  const r5 = sys.applyHit({ attacker: a, target: g, damage: 40, weapon: 'pistol', dir: { x: 0, z: 1 }, swingId: sys.newSwingId() });
+  ok(r5 && r5.knockdown && kds.at(-1).cause === 'bullet', '子彈 1.5 s 內第 2 發 → 擊倒 cause bullet');
+  const pk = pedKnockdownPayload(kds.at(-1));
+  ok(pk.cause === 'bullet' && pk.weapon === 'pistol', 'ped:knockdown cause bullet / weapon pistol');
+  // hp 歸零：單發擊倒
+  const z = mockActor('z', 0, 3);
+  z.hp = 10;
+  sys.register(z);
+  ok(sys.applyHit({ attacker: a, target: z, damage: 40, weapon: 'pistol', dir: { x: 0, z: 1 } }).knockdown && z.hp === 0, 'hp 歸零 → 單發擊倒');
+  ok(hitSide(0, 0, 1) === 'back' && hitSide(Math.PI, 0, 1) === 'front', 'hitSide：面向 · 攻擊方向 > 0 = back');
+  // knockdownActor：取代直接改 entries
+  const d = mockActor('d', 9, 9);
+  sys.register(d);
+  const n = kds.length;
+  ok(sys.knockdownActor(d) && sys.stateOf(d) === 'knockdown' && kds.length === n && d.anim.count('knockdown') === 1 && sys.knockdownActor(d) === false, 'knockdownActor：倒地、不發事件、重複呼叫 false');
+}
+
+// ---------- 13. Phase 4：槍聲 30 m 內逃跑、被槍擊不還手 ----------
+{
+  clock = 0;
+  const sys = new CombatSystem({ now });
+  const p = mockActor('p', 0, 0, 0, { kind: 'player' });
+  sys.register(p);
+  const near = new NpcBrain({ actor: mockActor('gn', 20, 0) });
+  const out = new NpcBrain({ actor: mockActor('go', GUNSHOT_RADIUS + 1, 0) });
+  near.hear({ type: 'gunshot', x: 0, z: 0 });
+  out.hear({ type: 'gunshot', x: 0, z: 0 });
+  near.update(FRAME, { combat: sys });
+  out.update(FRAME, { combat: sys });
+  ok(near.state === 'flee' && out.state === 'wander', `槍聲 ${GUNSHOT_RADIUS} m 內逃跑、外不理`);
+  let brave = null;
+  for (let i = 0; i < 300 && !brave; i++) {
+    const b = new NpcBrain({ actor: mockActor(`gb${i}`, 0, 1, Math.PI) });
+    if (b.fights) brave = b;
+  }
+  sys.register(brave.actor);
+  wireCombatToBrains(sys, new Map([[brave.actor.id, brave]]));
+  sys.applyHit({ attacker: p, target: brave.actor, damage: 10, weapon: 'pistol', dir: { x: 0, z: 1 } });
+  brave.update(FRAME, { combat: sys });
+  ok(brave.state === 'flee', '會還手的人被槍擊 → 逃跑（不還手）');
+  const brave2 = new NpcBrain({ actor: brave.actor });
+  wireCombatToBrains(sys, new Map([[brave.actor.id, brave2]]));
+  clock += 1;
+  sys.update(0);
+  sys.applyHit({ attacker: p, target: brave.actor, damage: 10, weapon: 'bat', dir: { x: 0, z: 1 } });
+  brave2.update(FRAME, { combat: sys });
+  ok(brave2.state === 'fight', '同一人被棒擊 → 照一般被打（還手）');
 }
 
 console.log(`combat.mjs：通過 ${pass} / ${total}`);

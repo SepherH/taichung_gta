@@ -1,4 +1,4 @@
-// 角色模組匯出：glb 載入 / 複製 / 換色（model.js）與動畫狀態機（animator.js）
+// 角色模組匯出：glb 載入 / 複製 / 換色 / 插槽與骨群組（model.js）與動畫狀態機（animator.js）
 export {
   loadCharacterModels,
   createCharacter,
@@ -12,5 +12,27 @@ export {
   DEFAULT_CHARACTER_MANIFEST,
   DEFAULT_VARIANT,
   MODEL_YAW_OFFSET,
+  weaponSocketBone,
+  characterBoneGroups,
+  DEFAULT_WEAPON_SOCKET,
+  WEAPON_SOCKET_PARENT,
+  DEFAULT_BONE_GROUPS,
 } from './model.js';
-export { CharacterAnimator, PUNCH_HIT_WINDOW, RATE_MIN, RATE_MAX, STATES, LOCOMOTION, ONE_SHOTS, IDLE_POSE, IDLE_POSE_AFTER } from './animator.js';
+export {
+  CharacterAnimator,
+  PUNCH_HIT_WINDOW,
+  BAT_HIT_WINDOW,
+  RATE_MIN,
+  RATE_MAX,
+  STATES,
+  LOCOMOTION,
+  ONE_SHOTS,
+  IDLE_POSE,
+  IDLE_POSE_AFTER,
+  WEAPON_CLIPS,
+  WEAPON_CLIP_FALLBACK,
+  UPPER_POSES,
+  UPPER_ONE_SHOTS,
+  UPPER_BLOCKED,
+  HIT_SIDES,
+} from './animator.js';

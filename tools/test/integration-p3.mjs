@@ -157,6 +157,7 @@ const pure = (() => {
 check('main.js 純函式區塊可擷取並求值（不依賴 import）', !!pure);
 
 // 已移除的鍵：O（靈敏度）、R 翻車、E 揮拳、H 說明；keys 以非英數字切成按鍵記號
+// Phase 4（契約 §12）：R 改為「裝填」、E 改為「互動」屬新綁定，只要說明不是翻車 / 揮拳就不算舊鍵
 const tokens = (keys) => String(keys).split(/[^A-Za-z0-9]+/).filter(Boolean);
 function removedKeyIssues(items) {
   const bad = [];
@@ -164,8 +165,8 @@ function removedKeyIssues(items) {
     const t = tokens(it.keys);
     const text = `${it.keys} ${it.desc}`;
     if (t.includes('O')) bad.push(`O：${text}`);
-    if (t.includes('R') || /翻車|翻正/.test(it.desc)) bad.push(`R 翻車：${text}`);
-    if (t.includes('E') || /揮拳/.test(it.desc) && !/攻擊/.test(it.desc)) bad.push(`E 揮拳：${text}`);
+    if ((t.includes('R') && !/裝填/.test(it.desc)) || /翻車|翻正/.test(it.desc)) bad.push(`R 翻車：${text}`);
+    if ((t.includes('E') && !/互動/.test(it.desc)) || /揮拳/.test(it.desc) && !/攻擊/.test(it.desc)) bad.push(`E 揮拳：${text}`);
     if (/說明/.test(it.desc) || (t.includes('H') && !/喇叭/.test(it.desc))) bad.push(`H 說明：${text}`);
   }
   return bad;

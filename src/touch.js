@@ -1,15 +1,19 @@
 // 觸控操作（B3）：左半螢幕浮動搖桿、右半螢幕拖曳轉視角 / 雙指捏合縮放（步行）或兩塊大踏板（駕駛）、虛擬按鈕
 // 一律用 Pointer Events，每個 pointerId 只綁定一個控制（搖桿 / 視角區 / 各踏板 / 各按鈕各自追蹤），多指同時操作互不搶
 // 按鈕以虛擬鍵碼寫入 Input（hold = 按住期間在 keys、按下當幀在 pressed；tap = 只在 pressed），鍵碼對齊 core/actions.js：
-//   Space 跳 / 手煞車、ShiftLeft 衝刺、KeyF 上下車 / 扶起、Mouse0 攻擊、KeyH 喇叭、Escape 暫停、KeyM 地圖、KeyT 手機（預留）
+//   Space 跳 / 手煞車、ShiftLeft 衝刺、KeyF 上下車 / 扶起、Mouse0 攻擊、KeyE 互動、KeyH 喇叭、Escape 暫停、KeyM 大地圖、KeyT 手機（隱藏）
+// 圖鑑鈕 tb-guide 沒有對應鍵位（core/actions 無此動作）：以 onTap 回呼開啟，整合層用 registerTouchButton 以同 id 重新註冊帶入回呼後顯示
 // 搖桿推到底（≥ 0.9）= 衝刺（input.js 搖桿相容層寫入 ShiftLeft）
 // 駕駛：右半區換成 #touch-pedals（左 = 煞車、右 = 油門），深度 = 手指在踏板內的縱向位置（越下越深），寫入 input.setPedals
 // input.enabled = false（開始前 / 暫停 / 選單）時整個觸控層不吃操作，且 Input 會呼叫 onDisable 釋放所有按住中的觸控
 //
 // 之後的單元新增按鈕只需：registerTouchButton({ id, label, code, mode: 'hold'|'tap', slot, showWhen: 'walk'|'drive'|'always', hidden })
-//   不寫入鍵碼的功能鈕改給 onPress(input)（按下時呼叫），此時可省略 code；hidden: true = 建立但不顯示（預留）
+//   不寫入鍵碼的功能鈕改給 onTap(input)（= onPress，按下時呼叫一次），此時可省略 code；hidden: true = 建立但不顯示
+//   同 id 重新註冊 = 取代（放開舊按鈕並重建）；setTouchButtonVisible(id, on) 動態顯示 / 隱藏（例：tb-interact 有提示才顯示）
 // slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
-//   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、手機，由左往右，排在小地圖右側）
+//   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊）/
+//   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、圖鑑，由左往右，排在小地圖右側；
+//   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
 // 攻擊鈕：id 為 ATTACK_ID 或 label 在 ATTACK_LABELS 內的按鈕一律改放 attack slot
 // 已移除的舊按鈕 id（DEPRECATED_IDS：翻正、靈敏度、舊揮拳、油門 / 煞車鈕）再註冊會被忽略（回傳 null），由 F 扶起與設定頁滑桿取代
@@ -26,7 +30,7 @@ const ATTACK_ID = 'tb-attack';
 const ATTACK_LABELS = ['攻擊', '揮拳'];
 export const DEPRECATED_IDS = ['tb-flip', 'tb-sens', 'tb-punch', 'tb-gas', 'tb-brake'];
 
-export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3'];
+export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'interact', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3'];
 
 const DEFAULT_BUTTONS = [
   // 步行
@@ -34,6 +38,8 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-run', label: '跑', code: 'ShiftLeft', mode: 'hold', slot: 'sec1', showWhen: 'walk' },
   { id: 'tb-enter', label: '上車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'walk' },
   { id: ATTACK_ID, label: '攻擊', code: 'Mouse0', mode: 'tap', slot: 'attack', showWhen: 'walk' },
+  // 互動（接委託 / 打卡 / 收集小吃）：預設隱藏，hud.setInteractPrompt 有提示時才顯示
+  { id: 'tb-interact', label: '互動', code: 'KeyE', mode: 'tap', slot: 'interact', showWhen: 'walk', hidden: true },
   // 駕駛（油門 / 煞車改為踏板）
   { id: 'tb-exit', label: '下車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'drive' },
   { id: 'tb-handbrake', label: '手煞', code: 'Space', mode: 'hold', slot: 'sec3', showWhen: 'drive' },
@@ -42,6 +48,8 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-pause', label: '暫停', code: 'Escape', mode: 'tap', slot: 'tl1', showWhen: 'always' },
   { id: 'tb-map', label: '地圖', code: 'KeyM', mode: 'tap', slot: 'tl2', showWhen: 'always' },
   { id: 'tb-phone', label: '手機', code: 'KeyT', mode: 'tap', slot: 'tl3', showWhen: 'always', hidden: true },
+  // 圖鑑：整合層以同 id 重新註冊並給 onTap（開圖鑑）後才顯示；步行專屬（駕駛中不開全螢幕面板）
+  { id: 'tb-guide', label: '圖鑑', onTap: () => {}, mode: 'tap', slot: 'tl3', showWhen: 'walk', hidden: true },
 ];
 
 const registry = new Map(); // id → def
@@ -70,7 +78,7 @@ function releaseButton(b) {
   if (b.pointerId === null) return;
   b.pointerId = null;
   b.el.classList.remove('active');
-  if (b.def.mode === 'hold' && !b.def.onPress) ui.input.touchRelease(b.def.code);
+  if (b.def.mode === 'hold' && !b.def.onPress && !b.def.onTap) ui.input.touchRelease(b.def.code);
 }
 
 function createButtonEl(def) {
@@ -80,7 +88,7 @@ function createButtonEl(def) {
   el.className = `tbtn slot-${def.slot}`;
   el.setAttribute('data-show', def.showWhen);
   el.textContent = def.label;
-  if (def.hidden) el.hidden = true;
+  el.hidden = !!def.hidden;
   const b = { def, el, pointerId: null };
   el.addEventListener('pointerdown', (e) => {
     prevent(e);
@@ -88,7 +96,8 @@ function createButtonEl(def) {
     b.pointerId = e.pointerId;
     capture(el, e.pointerId);
     el.classList.add('active');
-    if (def.onPress) def.onPress(ui.input);
+    if (def.onTap) def.onTap(ui.input);
+    else if (def.onPress) def.onPress(ui.input);
     else ui.input.touchPress(def.code, def.mode === 'hold');
   });
   for (const type of END_EVENTS) {
@@ -117,13 +126,33 @@ function mountButton(def) {
 export function registerTouchButton(def) {
   if (def && DEPRECATED_IDS.includes(def.id)) return null;
   const d = { mode: 'tap', slot: 'top2', showWhen: 'always', ...def };
-  if (!d.id || (!d.code && !d.onPress)) throw new Error('registerTouchButton 需要 id 與 code（或 onPress）');
+  if (!d.id || (!d.code && !d.onPress && !d.onTap)) throw new Error('registerTouchButton 需要 id 與 code（或 onTap / onPress）');
   if (d.id === ATTACK_ID || ATTACK_LABELS.includes(d.label)) d.slot = 'attack';
   registry.set(d.id, d);
   return ui ? mountButton(d) : null;
 }
 
 for (const def of DEFAULT_BUTTONS) registerTouchButton(def);
+
+// 動態顯示 / 隱藏已註冊的按鈕（尚未 initTouch 時只記在定義上，建立時套用）；隱藏時放開按住中的指標；未知 id 回 false
+export function setTouchButtonVisible(id, on) {
+  const d = registry.get(id);
+  if (!d) return false;
+  const hidden = !on;
+  d.hidden = hidden;
+  const b = ui && ui.buttons.get(id);
+  if (b && b.el.hidden !== hidden) {
+    if (hidden) releaseButton(b);
+    b.el.hidden = hidden;
+  }
+  return true;
+}
+
+// 按鈕目前是否設為顯示（已註冊且非 hidden；不含 CSS 依模式隱藏）
+export function isTouchButtonVisible(id) {
+  const d = registry.get(id);
+  return !!d && !d.hidden;
+}
 
 // ---------- 模式 ----------
 // 'walk' | 'drive'；hud.js 每幀依 state.driving 呼叫

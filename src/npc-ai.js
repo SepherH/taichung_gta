@@ -3,7 +3,9 @@
 //   watch（目擊者圍觀：原地面向事發點，時間到走回漫步）/ dodge（車輛高速逼近時側跳閃開，之後轉 flee）/ down（倒地中，由 CombatSystem 控制）
 //   Phase 3 新增：sidestep（喇叭：在車道上 → 往人行道側跳開）/ look（喇叭：人行道上短暫看向車）/ glare（喇叭：少數人停下瞪人）
 // 刺激：被打（onAttacked）、目擊 8 m 內有人被打或被撞（onWitness：多數逃跑、WATCH_CHANCE 的人圍觀）、車輛高速逼近（update 時由 ctx.vehicles 偵測）、
-//   喇叭（hear）、恐慌擴散（onPanic：有人被打倒 / 被撞時，逃跑的目擊者把恐慌傳給 PANIC_RADIUS 內的人，每人一次、每傳一層衰減一層）
+//   喇叭 / 槍聲（hear）、恐慌擴散（onPanic：有人被打倒 / 被撞時，逃跑的目擊者把恐慌傳給 PANIC_RADIUS 內的人，每人一次、每傳一層衰減一層）
+// Phase 4（契約 §13）：hear({ type: 'gunshot', x, z }) → GUNSHOT_RADIUS 內行人逃跑（不還手，打架 / 圍觀中的也放下逃跑）；
+//   被槍擊（onAttacked 的 weapon === 'pistol'）一律逃跑（倒地者起身後逃），不還手；被棒擊照一般被打（還手比例不變）
 // 群組（createBrainGroup，由 wireCombatToBrains 建立並掛到各 brain.group）：還手人數上限（同一對象最多 MAX_FIGHTERS 人）與恐慌擴散的鄰居查詢
 // 性格：braveness 0..1 依 id 以固定種子（mulberry32）產生；braveness 高於門檻才還手（一般約 25%，壯碩體型較高）
 // 不使用 Math.random：隨機一律來自自帶的 mulberry32
@@ -58,6 +60,8 @@ export const PANIC_DELAY_MAX = 0.5; // 反應時間上限（秒）
 export const MAX_FIGHTERS = 2; // 同一對象（通常是玩家）已有此數量的還手者時，下一個被打的人改逃跑
 export const DISPERSE_MIN = 2; // 還手對象 hp 歸零倒地後，還手者散去的時間下限（秒）
 export const DISPERSE_MAX = 4; // 散去時間上限（秒）
+// 槍聲（Phase 4）
+export const GUNSHOT_RADIUS = 30; // 槍聲此半徑（m）內的行人逃跑
 
 // mulberry32：固定種子的 32-bit 亂數產生器（與 utils.js 同演算法，本檔自帶以免依賴）
 export function mulberry32(seed) {
@@ -130,6 +134,8 @@ export class NpcBrain {
     this.dodge = { x: 0, z: 0, from: { x: 0, z: 0 } }; // 閃避方向與肇事車位置（暫存重用）
     this.horn = { x: 0, z: 0, dirX: 0, dirZ: 0 }; // 最近一次聽到的喇叭（暫存重用）
     this.hornPending = false;
+    this.shot = { x: 0, z: 0 }; // 最近一次聽到的槍聲位置（暫存重用，也當逃離點）
+    this.shotPending = false;
     this.side = { x: 0, z: 0 }; // 側跳方向（往人行道）
     this.faceAt = { x: 0, z: 0 }; // look / glare 面向的點（喇叭來源）
     this.stateDur = 0; // sidestep / look / glare 的持續時間
@@ -145,9 +151,9 @@ export class NpcBrain {
     return this.braveness >= 1 - (this.heavy ? FIGHT_CHANCE_HEAVY : FIGHT_CHANCE);
   }
 
-  // 被打（attacker 為 actor）或被車撞（vehicle 為 { x, z }）
-  onAttacked({ attacker = null, vehicle = null } = {}) {
-    this.pending.push({ type: 'attacked', attacker, vehicle });
+  // 被打（attacker 為 actor）或被車撞（vehicle 為 { x, z }）；weapon：'fist' | 'bat' | 'pistol'（pistol = 被槍擊，一律逃跑）
+  onAttacked({ attacker = null, vehicle = null, weapon = null } = {}) {
+    this.pending.push({ type: 'attacked', attacker, vehicle, weapon });
   }
 
   // 目擊事件：pos 為事發點，threat 為肇事者 actor 或 { pos }（可為 null）；
@@ -157,8 +163,10 @@ export class NpcBrain {
     this.pending.push({ type: 'witness', pos: { x: pos.x, z: pos.z }, threat, panic });
   }
 
-  // 聲音刺激（目前只有喇叭）：{ type: 'horn', x, z, dirX, dirZ }，喇叭前方 HORN_RANGE、±40° 內才記下，下一次 update 處理
+  // 聲音刺激：{ type: 'horn', x, z, dirX, dirZ }，喇叭前方 HORN_RANGE、±40° 內才記下；
+  //   { type: 'gunshot', x, z }：GUNSHOT_RADIUS 內才記下；都在下一次 update 處理
   hear(evt) {
+    if (evt && evt.type === 'gunshot') return this._hearGunshot(evt);
     if (!evt || evt.type !== 'horn') return false;
     const p = this.actor.pos;
     const dx = p.x - evt.x;
@@ -179,6 +187,25 @@ export class NpcBrain {
     h.dirZ = fz;
     this.hornPending = true;
     return true;
+  }
+
+  _hearGunshot(evt) {
+    const p = this.actor.pos;
+    if (!(Math.hypot(p.x - evt.x, p.z - evt.z) <= GUNSHOT_RADIUS)) return false;
+    this.shot.x = evt.x;
+    this.shot.z = evt.z;
+    this.shotPending = true;
+    return true;
+  }
+
+  // 槍聲：倒地中只記下逃離點；其餘狀態（含打架 / 圍觀）一律放下手邊的事逃離槍聲位置
+  _onGunshot() {
+    this.shotPending = false;
+    if (this.state === 'down') {
+      if (!this.fleeFrom) this.fleeFrom = this.shot;
+      return;
+    }
+    this._startFlee(this.shot);
   }
 
   // 恐慌擴散：info = { id, threat, pos, hops }（hops = 已傳幾層）；同一事件每人只收一次
@@ -346,7 +373,8 @@ export class NpcBrain {
         continue;
       }
       if (s.type === 'attacked') {
-        if (s.attacker && this._canFight(s.attacker, ctx)) this._startFight(s.attacker);
+        if (s.weapon === 'pistol') this._startFlee(s.attacker ? { actor: s.attacker } : null);
+        else if (s.attacker && this._canFight(s.attacker, ctx)) this._startFight(s.attacker);
         else if (!(this.state === 'fight' && s.attacker === this.target)) this._startFlee(s.attacker ? { actor: s.attacker } : s.vehicle);
       } else if (this._calm() && this.watches) {
         this._startWatch(s.pos, s.threat);
@@ -401,6 +429,7 @@ export class NpcBrain {
     if (combat && combat.isDown(actor)) {
       if (this.state !== 'down') this._enter('down');
       this._handleStimuli(ctx);
+      if (this.shotPending) this._onGunshot();
       it.mode = 'down';
       return it;
     }
@@ -410,6 +439,7 @@ export class NpcBrain {
     }
 
     this._handleStimuli(ctx);
+    if (this.shotPending) this._onGunshot();
     if (this.hornPending) this._onHorn(ctx, it);
     if (this.state !== 'dodge') {
       const threat = this._vehicleThreat(ctx);
@@ -571,18 +601,18 @@ export function wireCombatToBrains(combat, brains, group = createBrainGroup(brai
     }
   };
   const panicOf = (victim, threat) => ({ id: ++group.incidentSeq, threat, pos: { x: victim.pos.x, z: victim.pos.z }, hops: 0, next: null });
-  const offHit = combat.on('hit', ({ attacker, target }) => {
+  const offHit = combat.on('hit', ({ attacker, target, weapon }) => {
     const b = brains.get(target.id);
     if (b) {
       if (!b.group) b.group = group;
-      b.onAttacked({ attacker });
+      b.onAttacked({ attacker, weapon });
     }
     broadcast(target, attacker, null);
   });
   const offDown = combat.on('knockdown', ({ target, cause, vehicle, attacker }) => {
     if (target.kind === 'player') return; // 玩家倒地：還手者由 NpcBrain._fight 自行散去
     if (cause !== 'vehicle') {
-      // 拳擊擊倒：受擊已在 'hit' 事件處理，這裡只補上帶恐慌的目擊
+      // 拳擊 / 棒擊 / 槍擊擊倒：受擊已在 'hit' 事件處理，這裡只補上帶恐慌的目擊
       broadcast(target, attacker || null, panicOf(target, attacker || null));
       return;
     }

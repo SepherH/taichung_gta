@@ -24,6 +24,21 @@
 //       （事件在跨過邊界的那一幀發出，實際幀時間最多晚一個 dt；punch 被打斷時若窗仍開著會補發 close，clipTime 為打斷時刻）；
 //       on('finished', cb(name))：一次性動作播完（knockdown 播完也會發，之後停住）。
 // 無骨架動畫的方塊人（character.fallback）同樣跑狀態與計時，外觀改用 humanoid.js 的擺臂 / 坐姿。
+//
+// Phase 4（契約 §14）增補：
+// - 定向受擊：trigger('hit', { side: 'front'|'back' }) → 有 hit_front / hit_back clip 用之，缺則一般 hit；
+//   狀態名稱仍是 'hit'（轉換表與 combat 行為不變），實際方向記在 hitSide（'front'|'back'|null）
+// - 武器 clip（WEAPON_CLIPS）：建構時解析來源並記在 weaponClip(name)；缺 clip 退回規則（WEAPON_CLIP_FALLBACK）：
+//   bat_swing_* / pistol_fire → punch、*_hold / pistol_aim → 無（不疊加）、weapon_equip / pistol_reload → 無（略過）、
+//   hit_front / hit_back → hit；缺者記入 missing（{ state, used }），整個程式只 console.info 一次（美術資產可能缺檔）
+// - 上半身一次性動作計時：playUpper(name) → duration|false（weapon_equip / bat_swing_a / bat_swing_b / pistol_fire / pistol_reload），
+//   與全身狀態並行（姿勢由 src/character-animation.js 的武器層疊上去；本檔只管計時與事件，吃同一個 hitStop）
+//   事件：on('batHitWindow', cb(phase, clipTime, name))：bat_swing_* 命中窗（manifest events.<clip>.hitWindow，缺則長度 × BAT_HIT_WINDOW；
+//         clip 以 punch 代替時一律用比例）；被打斷時補發 close
+//         on('fire', cb(clipTime))：pistol_fire 跨過 events.pistol_fire.shotAt（缺則 0）
+//         on('weaponSwap', cb(clipTime))：weapon_equip 跨過 events.weapon_equip.swapAt（缺則長度 × 0.4），整合層此時把武器換到手上
+//         on('upperFinished', cb(name))：上半身一次性動作播完；on('upperCancel', cb(name))：被 hit / knockdown / 上車 / reset 打斷
+//   hit / knockdown / getup / enter_car / drive 狀態中不接受 playUpper（回 false）；進入這些狀態時取消播放中的上半身動作
 import * as THREE from 'three';
 import { animateHumanoid, poseSitting } from '../humanoid.js';
 import { getCharacterManifest } from './model.js';
@@ -50,6 +65,10 @@ const HYSTERESIS = 0.15;
 
 // punch 命中窗退路：manifest 沒有 events.punch.hitWindow（秒）時，改用 punch clip 長度的 35%–55%
 export const PUNCH_HIT_WINDOW = [0.35, 0.55];
+// 球棒命中窗退路：manifest 沒有 events.bat_swing_a/b.hitWindow（或 clip 以 punch 代替）時用 clip 長度的比例（契約 §13）
+export const BAT_HIT_WINDOW = [0.3, 0.55];
+// weapon_equip 換手時間點退路：沒有 events.weapon_equip.swapAt 時用 clip 長度的比例
+const EQUIP_SWAP_RATIO = 0.4;
 
 // 無 clip 也無 manifest 長度時一次性動作的計時秒數（僅方塊人退路用，非美術數值）
 const FALLBACK_ONE_SHOT_SEC = 0.5;
@@ -62,6 +81,30 @@ export const IDLE_POSE_SPEED = 0.1;
 export const LOCOMOTION = ['idle', 'walk', 'run'];
 export const ONE_SHOTS = ['jump', 'punch', 'hit', 'knockdown', 'getup', 'enter_car'];
 export const STATES = [...LOCOMOTION, ...ONE_SHOTS, 'drive'];
+
+// Phase 4 新 clip（manifest clips 的 upperBodyOnly 為 true 者由武器層疊在下半身移動上；hit_front / hit_back 為全身）
+export const HIT_SIDES = ['front', 'back'];
+export const UPPER_POSES = ['bat_hold', 'pistol_hold', 'pistol_aim'];
+export const UPPER_ONE_SHOTS = ['weapon_equip', 'bat_swing_a', 'bat_swing_b', 'pistol_fire', 'pistol_reload'];
+export const WEAPON_CLIPS = ['weapon_equip', 'bat_hold', 'bat_swing_a', 'bat_swing_b', 'pistol_hold', 'pistol_aim', 'pistol_fire', 'pistol_reload', 'hit_front', 'hit_back'];
+// 武器 clip 缺檔退回（空陣列 = 無替代：姿勢不疊加 / 一次性動作略過）
+export const WEAPON_CLIP_FALLBACK = {
+  weapon_equip: [],
+  bat_hold: [],
+  bat_swing_a: ['punch'],
+  bat_swing_b: ['punch'],
+  pistol_hold: [],
+  pistol_aim: [],
+  pistol_fire: ['punch'],
+  pistol_reload: [],
+  hit_front: ['hit'],
+  hit_back: ['hit'],
+};
+// 這些全身狀態中不播上半身動作（武器層也在這些狀態淡出姿勢）
+export const UPPER_BLOCKED = new Set(['hit', 'knockdown', 'getup', 'enter_car', 'drive']);
+// 缺 clip 時無 manifest 長度的上半身一次性動作計時秒數（僅退路）
+const FALLBACK_UPPER_SEC = 0.6;
+let weaponInfoLogged = false; // 武器 clip 缺檔只 console.info 一次（整個程式）
 
 // 缺 clip 時依序嘗試的替代 clip
 const CLIP_FALLBACK = {
@@ -106,11 +149,18 @@ export class CharacterAnimator {
     for (const st of STATES) this._setupState(st, character.clips, meta);
     this.hasIdlePose = character.clips.has(IDLE_POSE);
     if (this.hasIdlePose) this._setupState(IDLE_POSE, character.clips, meta);
-    const win = hitWindow ?? getCharacterManifest()?.events?.punch?.hitWindow;
+    const events = getCharacterManifest()?.events || {};
+    const win = hitWindow ?? events.punch?.hitWindow;
     const punchDur = this._info.get('punch').duration;
     this.hitWindow = validWindow(win)
       ? [Math.min(win[0], punchDur), Math.min(win[1], punchDur)]
       : [punchDur * PUNCH_HIT_WINDOW[0], punchDur * PUNCH_HIT_WINDOW[1]];
+    this._setupWeaponClips(character.clips, meta, events);
+    this.hitSide = null; // 目前 hit 狀態的受擊方向（'front'|'back'|null）
+    this._cur = null; // 目前狀態實際播放的 { action, duration, source }（定向受擊時為 hit_front / hit_back）
+    this.mixerTicks = 0; // mixer 實際推進的次數（武器層程序化後座判斷本幀是否重擺過姿勢）
+    // 上半身一次性動作計時（playUpper）；物件重用，播放中不配置
+    this._up = { name: null, t: 0, duration: 0, win: null, open: false, markAt: -1, marked: false };
 
     this._state = null;
     this._t = 0; // 目前狀態已播放秒數（一次性動作的計時）
@@ -126,7 +176,9 @@ export class CharacterAnimator {
   // 物件池重用：停掉全部動作、回 idle（事件訂閱保留）
   reset() {
     if (this.mixer) this.mixer.stopAllAction();
+    this.cancelUpper();
     this._state = null;
+    this._cur = null;
     this._windowOpen = false;
     this._stop = 0;
     this._enter('idle');
@@ -168,6 +220,130 @@ export class CharacterAnimator {
     this._info.set(st, { action, duration, source });
   }
 
+  // 武器 clip 來源解析（不建立 action：全身的 hit_front / hit_back 在此建立，上半身 clip 由武器層過濾軌道後自建）
+  _setupWeaponClips(clips, meta, events) {
+    this._weapon = new Map(); // name → { clip, source, duration, loop, upperBodyOnly, win, markAt }
+    this._hitSide = new Map(); // 'front' / 'back' → { action, duration, source }
+    const missed = [];
+    for (const name of WEAPON_CLIPS) {
+      let source = clips.has(name) ? name : null;
+      if (!source) {
+        source = WEAPON_CLIP_FALLBACK[name].find((n) => clips.has(n)) || null;
+        this.missing.push({ state: name, used: source });
+        missed.push(name);
+      }
+      const clip = source ? clips.get(source) : null;
+      const m = meta.get(name);
+      const duration = clip ? clip.duration : m && Number.isFinite(m.duration) ? m.duration : FALLBACK_UPPER_SEC;
+      const loop = UPPER_POSES.includes(name);
+      const info = { clip, source, duration, loop, upperBodyOnly: !name.startsWith('hit_'), win: null, markAt: -1 };
+      const ev = events[name] || {};
+      if (name === 'bat_swing_a' || name === 'bat_swing_b') {
+        // manifest 命中窗只對應原 clip 的時間軸；以 punch 代替時改用比例
+        info.win = source === name && validWindow(ev.hitWindow)
+          ? [Math.min(ev.hitWindow[0], duration), Math.min(ev.hitWindow[1], duration)]
+          : [duration * BAT_HIT_WINDOW[0], duration * BAT_HIT_WINDOW[1]];
+      } else if (name === 'pistol_fire') {
+        info.markAt = source === name && Number.isFinite(ev.shotAt) ? Math.min(Math.max(0, ev.shotAt), duration) : 0;
+      } else if (name === 'weapon_equip') {
+        info.markAt = source === name && Number.isFinite(ev.swapAt) ? Math.min(Math.max(0, ev.swapAt), duration) : duration * EQUIP_SWAP_RATIO;
+      }
+      this._weapon.set(name, info);
+    }
+    for (const side of HIT_SIDES) {
+      const name = `hit_${side}`;
+      const w = this._weapon.get(name);
+      if (w.source !== name || !this.mixer) continue; // 缺則沿用一般 hit
+      const action = this.mixer.clipAction(w.clip);
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+      this._hitSide.set(side, { action, duration: w.duration, source: name });
+    }
+    // 方塊人（整份模型未載入）已由 model.js 警告過，不再提示
+    if (missed.length && !this.character.fallback && !weaponInfoLogged) {
+      weaponInfoLogged = true;
+      console.info(`[animator] 角色 glb 缺武器 / 受擊 clip：${missed.join('、')}，改用替代 clip 或略過`);
+    }
+  }
+
+  // 武器 clip 解析結果：{ clip（來源 AnimationClip 或 null）, source, duration, loop, upperBodyOnly } 或 null（非武器 clip）
+  weaponClip(name) {
+    return this._weapon.get(name) || null;
+  }
+
+  // 目前播放中的上半身一次性動作名稱（沒有 → null）
+  get upper() {
+    return this._up.name;
+  }
+
+  // 上半身一次性動作已播秒數
+  get upperTime() {
+    return this._up.t;
+  }
+
+  // 球棒命中窗目前是否開啟
+  get batHitWindowOpen() {
+    return this._up.open;
+  }
+
+  // 開始上半身一次性動作計時；回傳 clip 長度（秒）或 false（未知名稱 / 全身狀態不允許 / weapon_equip、pistol_reload 缺 clip 略過）
+  // 播放中再次呼叫（例如連續揮棒 a → b、連射）會先以打斷處理舊的再重新開始
+  playUpper(name) {
+    if (!UPPER_ONE_SHOTS.includes(name) || UPPER_BLOCKED.has(this._state)) return false;
+    const w = this._weapon.get(name);
+    if (!w.source && (name === 'weapon_equip' || name === 'pistol_reload')) return false;
+    this.cancelUpper();
+    const up = this._up;
+    up.name = name;
+    up.t = 0;
+    up.duration = w.duration;
+    up.win = w.win;
+    up.open = false;
+    up.markAt = w.markAt;
+    up.marked = false;
+    return w.duration;
+  }
+
+  // 取消播放中的上半身一次性動作（命中窗開著時補發 close）；沒有播放中則不做事
+  cancelUpper() {
+    const up = this._up;
+    if (!up.name) return;
+    const name = up.name;
+    up.name = null;
+    if (up.open) {
+      up.open = false;
+      this._emit('batHitWindow', 'close', up.t, name);
+    }
+    this._emit('upperCancel', name);
+  }
+
+  // 上半身計時推進：命中窗 / 開槍 / 換手事件與播完
+  _upperStep(dt) {
+    const up = this._up;
+    const t0 = up.t;
+    const t1 = t0 + dt;
+    up.t = t1;
+    const name = up.name;
+    if (up.win) {
+      const [open, close] = up.win;
+      if (!up.open && t0 < open && t1 >= open) {
+        up.open = true;
+        this._emit('batHitWindow', 'open', open, name);
+      }
+      if (up.open && t1 >= close) {
+        up.open = false;
+        this._emit('batHitWindow', 'close', close, name);
+      }
+    } else if (up.markAt >= 0 && !up.marked && t1 >= up.markAt) {
+      up.marked = true;
+      this._emit(name === 'pistol_fire' ? 'fire' : 'weaponSwap', up.markAt);
+    }
+    if (up.name === name && t1 >= up.duration) {
+      up.name = null;
+      this._emit('upperFinished', name);
+    }
+  }
+
   get state() {
     return this._state;
   }
@@ -189,14 +365,18 @@ export class CharacterAnimator {
     if (set) for (const cb of set) cb(...args);
   }
 
-  _enter(st) {
+  _enter(st, side = null) {
     if (this._state === 'punch' && this._windowOpen) {
       this._windowOpen = false;
       this._emit('punchHitWindow', 'close', this._t);
     }
-    const prev = this._state ? this._info.get(this._state).action : null;
-    const next = this._info.get(st).action;
+    if (UPPER_BLOCKED.has(st)) this.cancelUpper();
+    const prev = this._cur ? this._cur.action : null;
+    const cur = (side && this._hitSide.get(side)) || this._info.get(st);
+    const next = cur.action;
+    this._cur = cur;
     this._state = st;
+    this.hitSide = st === 'hit' ? side : null;
     this._t = 0;
     this._done = false;
     this._idleT = 0;
@@ -225,10 +405,12 @@ export class CharacterAnimator {
   }
 
   // 播放一次性動作；回傳是否被接受（依轉換表）
-  trigger(name) {
+  // opts.side（僅 'hit'）：'front' / 'back' → 有 hit_front / hit_back clip 時播之（狀態名稱仍為 'hit'），其餘值或缺 clip → 一般 hit
+  trigger(name, opts) {
     const can = CAN_TRIGGER[name];
     if (!can || !can(this._state, { done: this._done })) return false;
-    this._enter(name);
+    const side = name === 'hit' && opts && HIT_SIDES.includes(opts.side) ? opts.side : null;
+    this._enter(name, side);
     return true;
   }
 
@@ -243,8 +425,9 @@ export class CharacterAnimator {
       if (dt <= 0) return;
     }
     this._speed = speed;
+    if (this._up.name) this._upperStep(dt);
     const st = this._state;
-    const info = this._info.get(st);
+    const info = this._cur;
     const t0 = this._t;
     this._t += dt;
 
@@ -270,11 +453,13 @@ export class CharacterAnimator {
       }
     }
 
-    const cur = this._info.get(this._state);
+    const cur = this._cur;
     if (cur.action && !ONE_SHOTS.includes(this._state)) cur.action.setEffectiveTimeScale(this._rateFor(this._state, speed));
     if (!animate) return;
-    if (this.mixer) this.mixer.update(dt);
-    else this._poseFallback(dt);
+    if (this.mixer) {
+      this.mixer.update(dt);
+      this.mixerTicks++;
+    } else this._poseFallback(dt);
   }
 
   // 命中窗：跨過開窗秒數發 open、跨過關窗秒數發 close（一幀跨過兩者時依序各發一次）

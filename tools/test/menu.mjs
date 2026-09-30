@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // B1 選單無頭驗證：menu-model 狀態轉換與鍵盤導覽、確認對話框流程、格式化函式、map-view 座標轉換往返誤差、
 //   map 繪製在假 canvas context 上（真 citymodel 資料）、menu.js 在最小 DOM 替身上的事件流程（開始 / 暫停 / 回主選單 / 設定）、menu.css 規範
+// I4b 增補：設定頁 showBlood / recoil / aimAssist 三列、開始畫面內容標示、暫停選單「圖鑑」鈕（onOpenGuide）、ui:sound 音效事件、
+//   操作說明頁由真 KEYMAP_HELP / TOUCH_HELP 產生（新動作有出現）
 // 用法：node tools/test/menu.mjs（任一斷言失敗 exit 1；最後一行印 PASS n/n 或 FAIL k/n）
 import { register } from 'node:module';
 
@@ -315,6 +317,11 @@ const j = (v) => JSON.stringify(v);
   check('Tab 往下、Shift+Tab 往上', p.focus === 'map' && (p.key('Tab', { shift: true }), p.focus === 'resume'));
   check('未知鍵不處理（不攔截）', p.key('KeyW') === null);
   check('fullscreen 項目 → fullscreen 效果', p.activate('fullscreen').type === 'fullscreen' && p.state === 'pause');
+  check('pauseItems 預設無圖鑑、guide:true 時排在地圖後', !M.pauseItems().includes('guide') && j(M.pauseItems({ guide: true })) === j(['resume', 'map', 'guide', 'settings', 'help', 'stats', 'quit']));
+  const g = M.createMenuModel({ guide: true });
+  g.openPause();
+  const gfx = g.activate('guide');
+  check('guide 項目 → { type: guide } 並關閉', gfx.type === 'guide' && g.state === 'closed' && M.ITEM_LABELS.guide === '圖鑑');
 }
 
 // ======================= 格式化 =======================
@@ -427,7 +434,8 @@ check(
 
 // ======================= menu.js（最小 DOM 替身）=======================
 {
-  const events = [];
+  const events = []; // 遊戲事件（ui:sound 另記在 sounds，不混入既有斷言）
+  const sounds = [];
   const handlers = {};
   const bus = {
     on(n, fn) {
@@ -435,11 +443,17 @@ check(
       return () => (handlers[n] = handlers[n].filter((f) => f !== fn));
     },
     emit(n, p) {
-      events.push([n, p]);
+      if (n === 'ui:sound') sounds.push(p && p.kind);
+      else events.push([n, p]);
       for (const fn of handlers[n] || []) fn(p);
     },
   };
-  const DEF = { quality: 'auto', lookSensMouse: 1, lookSensTouch: 1, invertY: false, volumeMaster: 0.8, volumeMusic: 0.6, volumeSfx: 0.9, showFps: false, showHints: true, uiScale: 1 };
+  const lastSound = () => sounds.at(-1);
+  const DEF = {
+    quality: 'auto', lookSensMouse: 1, lookSensTouch: 1, invertY: false, volumeMaster: 0.8, volumeMusic: 0.6, volumeSfx: 0.9,
+    showBlood: true, recoil: 1, aimAssist: true, showFps: false, showHints: true, uiScale: 1,
+  };
+  const RANGE = { uiScale: [0.8, 1.3], recoil: [0.2, 1] };
   const vals = { ...DEF };
   const subs = [];
   const setCalls = [];
@@ -447,7 +461,10 @@ check(
     get: (k) => vals[k],
     set: (k, v) => {
       setCalls.push([k, v]);
-      if (typeof DEF[k] === 'number') v = Math.round(Math.min(k === 'uiScale' ? 1.3 : k.startsWith('vol') ? 1 : 3, Math.max(k === 'uiScale' ? 0.8 : k.startsWith('vol') ? 0 : 0.3, v)) * 100) / 100;
+      if (typeof DEF[k] === 'number') {
+        const [lo, hi] = RANGE[k] || (k.startsWith('vol') ? [0, 1] : [0.3, 3]);
+        v = Math.round(Math.min(hi, Math.max(lo, v)) * 100) / 100;
+      }
       vals[k] = v;
       subs.forEach((fn) => fn(k, v, { ...vals }));
       return true;
@@ -500,17 +517,27 @@ check(
   const link = attr.querySelector('a');
   check('頁尾授權文字含 OSM 連結', attr.textContent.includes('OpenStreetMap') && attr.textContent.includes('ODbL') && link && /openstreetmap\.org\/copyright/.test(link.href));
   check('有存檔：繼續遊戲在第一個', el.findAllClass('tg-nav-item')[0].dataset.item === 'continue');
+  // 內容標示
+  const notice = el.findClass('tg-menu-notice');
+  check('開始畫面內容標示「本遊戲含槍械、暴力與血液畫面」', !!notice && notice.visible && notice.textContent === '本遊戲含槍械、暴力與血液畫面' && el.dataset.mode === 'start');
+  check('內容標示在標頭（不在按鈕左欄內）', !!notice && notice.parentNode === el.findClass('tg-menu-brand') && !el.findClass('tg-menu-nav').findClass('tg-menu-notice'));
+  check('開始畫面沒有「圖鑑」（未提供 onOpenGuide）', !navBtn('guide'));
   navBtn('newGame').click();
   const conf = el.findClass('tg-confirm');
   check('開始新遊戲 → 選單內確認框（非 confirm()）', conf.visible && conf.textContent.includes('覆蓋目前進度') && events.length === 0);
+  check('ui:sound：開確認框 = open', lastSound() === 'open', String(lastSound()));
   el.findClass('tg-confirm-no').click();
   check('取消 → 確認框關閉、仍在開始畫面', !conf.visible && menu.state === 'start');
+  check('ui:sound：取消 = cancel', lastSound() === 'cancel', String(lastSound()));
   navBtn('continue').click();
   check('繼續遊戲 → emit game:start { continued:true } 並關閉', j(events.at(-1)) === j(['game:start', { continued: true }]) && !menu.isOpen() && el.hidden);
+  check('ui:sound：開始 = confirm', lastSound() === 'confirm', String(lastSound()));
 
   // 暫停 + 統計
   menu.openPause('stats');
   check('openPause("stats") → emit game:pause { paused:true, tab:"stats" }', j(events.at(-1)) === j(['game:pause', { paused: true, tab: 'stats' }]));
+  check('ui:sound：開暫停選單 = open', lastSound() === 'open', String(lastSound()));
+  check('暫停選單不顯示內容標示（CSS 隱藏規則）、未提供 onOpenGuide 時無「圖鑑」', el.dataset.mode === 'pause' && !navBtn('guide'));
   check('右上金錢 NT$1,650', el.findClass('tg-menu-money').textContent === 'NT$1,650');
   const stats = el.findClass('tg-page-stats');
   const st = stats.textContent;
@@ -538,6 +565,7 @@ check(
   navBtn('resume').click();
   off();
   check('「繼續」click 內同步 emit game:pause { paused:false }', syncOk && events.length === n0 + 1 && !menu.isOpen());
+  check('ui:sound：繼續 = close', lastSound() === 'close', String(lastSound()));
 
   // 鍵盤：Esc 開關、M 地圖、地圖頁開啟 mapView
   menu.openPause();
@@ -576,11 +604,33 @@ check(
   range.dispatchEvent(new FakeEvent('input'));
   check('滑桿 input 事件即時 settings.set', vals.uiScale === 1.2);
   const toggle = el.findAllClass('tg-set-row').find((r) => r.dataset.item === 'invertY').findClass('tg-toggle');
+  const ns = sounds.length;
   toggle.click();
   check('反轉 Y 開關', vals.invertY === true && toggle.textContent === '開');
-  check('畫質附註與音效附註', el.findClass('tg-page-settings').textContent.includes('重新整理後完整套用') && el.findClass('tg-page-settings').textContent.includes('音效將於後續版本加入'));
+  check('ui:sound：設定開關 = click', sounds.length === ns + 1 && lastSound() === 'click', sounds.slice(ns).join(','));
+  const setText = el.findClass('tg-page-settings').textContent;
+  check('畫質附註保留、音效「後續版本」註記已移除', setText.includes('重新整理後完整套用') && !setText.includes('後續版本'));
+  // 新設定列（§11）
+  const rowOf = (k) => el.findAllClass('tg-set-row').find((r) => r.dataset.item === k);
+  const order = el.findAllClass('tg-set-row').map((r) => r.dataset.item);
+  check('新設定列 showBlood / recoil / aimAssist 存在（在音效之後）', ['showBlood', 'recoil', 'aimAssist'].every((k) => order.indexOf(k) > order.indexOf('volumeSfx')), order.join(','));
+  check('列標題：顯示血液 / 後座力 / 瞄準輔助', rowOf('showBlood').textContent.includes('顯示血液') && rowOf('recoil').textContent.includes('後座力') && rowOf('aimAssist').textContent.includes('瞄準輔助'));
+  const recoilRange = rowOf('recoil').findClass('tg-range');
+  check('後座力滑桿 20%–100%、step 0.1、顯示 100%', recoilRange.min === '0.2' && recoilRange.max === '1' && recoilRange.step === '0.1' && rowOf('recoil').findClass('tg-range-val').textContent === '100%');
+  recoilRange.value = '0.2';
+  recoilRange.dispatchEvent(new FakeEvent('input'));
+  check('後座力滑桿 input → settings.set(recoil, 0.2)、顯示 20%', vals.recoil === 0.2 && rowOf('recoil').findClass('tg-range-val').textContent === '20%');
+  const bloodTg = rowOf('showBlood').findClass('tg-toggle');
+  check('顯示血液預設「開」', bloodTg.textContent === '開' && bloodTg.getAttribute('aria-checked') === 'true');
+  bloodTg.click();
+  check('顯示血液可關閉', vals.showBlood === false && bloodTg.textContent === '關');
+  check('瞄準輔助附註「只作用於觸控」', rowOf('aimAssist').textContent.includes('觸控') && rowOf('aimAssist').findClass('tg-toggle').textContent === '開');
+  // 鍵盤走到 recoil 列 ← 調整
+  for (let i = 0; i < 20 && !rowOf('recoil')._cls.has('tg-focus'); i++) key('ArrowDown');
+  key('ArrowRight');
+  check('鍵盤 → 調整後座力（0.2 → 0.3）', Math.abs(vals.recoil - 0.3) < 1e-9, String(vals.recoil));
   el.findClass('tg-reset-btn').click();
-  check('恢復預設', j(vals) === j(DEF) && out.textContent === '1.0×' && toggle.textContent === '關');
+  check('恢復預設', j(vals) === j(DEF) && out.textContent === '1.0×' && toggle.textContent === '關' && bloodTg.textContent === '開' && rowOf('recoil').findClass('tg-range-val').textContent === '100%');
 
   // 回主選單
   key('Escape');
@@ -605,6 +655,40 @@ check(
   menu2.close();
   menu2.destroy();
 
+  // 暫停選單「圖鑑」（onOpenGuide）
+  let guideCalls = 0;
+  const menu3 = createMenu({ root: body, settings, bus, keymapHelp, touchHelp, attribution: ATTRIBUTION, onOpenGuide: () => guideCalls++ });
+  const nav3 = (id) => menu3.el.findAllClass('tg-nav-item').find((b) => b.dataset.item === id);
+  menu3.showStart({ canContinue: false });
+  check('onOpenGuide：開始畫面仍不列「圖鑑」', !nav3('guide'));
+  nav3('newGame').click();
+  menu3.openPause();
+  const items3 = menu3.el.findAllClass('tg-nav-item').map((b) => b.dataset.item);
+  check('onOpenGuide：暫停選單「圖鑑」排在地圖後', items3.indexOf('guide') === items3.indexOf('map') + 1 && nav3('guide').textContent === '圖鑑', items3.join(','));
+  const g0 = events.length;
+  nav3('guide').click();
+  check('點「圖鑑」→ 呼叫 onOpenGuide、選單關閉、不 emit game:pause', guideCalls === 1 && !menu3.isOpen() && events.length === g0);
+  check('ui:sound：圖鑑 = open', lastSound() === 'open', String(lastSound()));
+  menu3.openPause();
+  for (let i = 0; i < 2; i++) key('ArrowDown');
+  key('Enter');
+  check('鍵盤 ↓↓ Enter 也開圖鑑', guideCalls === 2 && !menu3.isOpen());
+  menu3.destroy();
+
+  // 操作說明由真 KEYMAP_HELP / TOUCH_HELP 產生：Phase 4 新動作有出現
+  const A = await import('../../src/core/actions.js');
+  const menu4 = createMenu({ root: body, settings, bus, keymapHelp: A.KEYMAP_HELP, touchHelp: A.TOUCH_HELP, isTouch: false, attribution: ATTRIBUTION });
+  menu4.openPause('help');
+  const h4 = menu4.el.findClass('tg-page-help');
+  const kbText = h4.textContent;
+  key('ArrowRight');
+  const tText = h4.textContent;
+  check('操作說明（鍵盤）含互動 E / 武器 Q / 裝填 R / 瞄準', ['互動', '循環切換武器', '裝填', '肩後瞄準', '大地圖'].every((w) => kbText.includes(w)));
+  check('操作說明（觸控）含「互動」鈕 / 「武器」鈕', tText.includes('「互動」鈕') && tText.includes('「武器」鈕'));
+  menu4.close();
+  menu4.destroy();
+  check('ui:sound kind 全在契約列舉內', sounds.length > 0 && sounds.every((k) => ['click', 'confirm', 'cancel', 'reward', 'fail', 'open', 'close'].includes(k)), [...new Set(sounds)].join(','));
+
   const kd = win.listenerCount('keydown');
   menu.destroy();
   check('destroy 移除 DOM 與鍵盤監聽', !body.children.includes(el) && win.listenerCount('keydown') === kd - 1 && subs.length === 0);
@@ -622,6 +706,7 @@ check(
   check('安全區 padding（四邊 env(safe-area-inset-*)）', ['top', 'right', 'bottom', 'left'].every((s) => css.includes(`env(safe-area-inset-${s})`)));
   check('直向版面（orientation: portrait）', /@media\s*\(orientation:\s*portrait\)/.test(css));
   check('按鈕 ≥ 44px', /\.tg-btn\s*\{[^}]*min-height:\s*44px/.test(css));
+  check('內容標示樣式：字級 ≥ 13px（clamp）、暫停模式隱藏', /\.tg-menu-notice\s*\{[^}]*font-size:\s*calc\(clamp\(13px/.test(css) && /\.tg-menu\[data-mode='pause'\] \.tg-menu-notice[^{]*\{[^}]*display:\s*none/.test(css));
   const thumbs = [...css.matchAll(/range-thumb\s*\{[^}]*width:\s*(\d+)px/g), ...css.matchAll(/slider-thumb\s*\{[^}]*width:\s*(\d+)px/g)].map((m) => +m[1]);
   check('滑桿 thumb ≥ 28px', thumbs.length >= 2 && thumbs.every((w) => w >= 28), thumbs.join(','));
   check('讀 --tg-ui-scale、字級 clamp()', css.includes('var(--tg-ui-scale') && /clamp\(/.test(css));

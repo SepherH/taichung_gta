@@ -4,7 +4,7 @@
 //   mock 角色控制器 = 無障礙物、腳底不低於地面函式 groundAt(x, z)（含 snap-to-ground），move() 內的加減速 / 跳躍邏輯照常執行
 // 項目：走速 / 衝刺加速時間與頂速、放開停止時間、轉向（保速轉彎、掉頭先煞車）、類比搖桿、跳高（數值與解析）、
 //   coyote time、跳躍輸入緩衝、不可二段跳、jumpGate；Player 層：擊退位移、鎖移動清緩衝、跳躍動畫觸發、小衝步位移；
-//   與 animator 走 / 跑門檻與播放速率相容；mousePunchListener 仍匯出
+//   與 animator 走 / 跑門檻與播放速率相容；mousePunchListener 仍匯出；Phase 4：speedScale（heavy 委託步行速度倍率）、weaponLayer 每幀更新
 import { register } from 'node:module';
 
 const JSON_HOOK = `
@@ -445,6 +445,41 @@ function makePlayer() {
   Q.frame(60);
   const lunge = Q.ch.pos.z - z0;
   check('出拳小衝步：往 2.3 m 外目標衝 ≈ 1.2 m（LUNGE_MAX，±0.05）', Math.abs(lunge - 1.2) < 0.05, `${f3(lunge)} m`);
+}
+
+// ---------- 4b. Phase 4：speedScale（heavy 委託）與武器動畫層 ----------
+{
+  // 放開跑鍵走直線 3 s → 穩態速度 = 走速 × speedScale
+  const steady = (scale, run = false) => {
+    const R = makePlayer();
+    R.player.speedScale = scale;
+    R.input.axis = { x: 0, y: 1 };
+    if (run) R.input.keys.add('ShiftLeft');
+    R.frame(180);
+    return Math.hypot(R.ch.vx, R.ch.vz);
+  };
+  const v1 = steady(1);
+  const v06 = steady(0.6);
+  const r06 = steady(0.6, true);
+  check('speedScale 0.6：走速 4.2 → 2.52 m/s（±0.05）', Math.abs(v1 - CH.WALK_SPEED) < 0.05 && Math.abs(v06 - CH.WALK_SPEED * 0.6) < 0.05, `${f3(v1)} / ${f3(v06)}`);
+  check('speedScale 0.6：衝刺 7.0 → 4.2 m/s（±0.05）', Math.abs(r06 - CH.RUN_SPEED * 0.6) < 0.05, f3(r06));
+  const vBad = steady(Number.NaN);
+  check('speedScale 非法值（NaN）當 1', Math.abs(vBad - CH.WALK_SPEED) < 0.05, f3(vBad));
+
+  const W = makePlayer();
+  const L = W.player.weaponLayer;
+  check('Player.weaponLayer 存在（setPose / play / addRecoil / update / on）', !!L && ['setPose', 'play', 'addRecoil', 'update', 'on'].every((k) => typeof L[k] === 'function'));
+  let threw = null;
+  try {
+    L.setPose('pistol_hold');
+    L.addRecoil(0.5);
+    W.frame(10);
+    L.setPose('none');
+    W.frame(5);
+  } catch (err) {
+    threw = err;
+  }
+  check('武器層隨 syncPhysics 每幀更新不丟例外（缺 clip 時安靜退回）', threw === null, threw ? String(threw) : '');
 }
 
 // ---------- 5. 動畫相容 / 匯出 ----------

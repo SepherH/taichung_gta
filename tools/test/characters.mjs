@@ -59,6 +59,9 @@ const origWarn = console.warn;
 console.warn = (...a) => warnings.push(a.join(' '));
 
 const manifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/characters/manifest.json'), 'utf8'));
+// glb 骨架 = manifest.skeleton + 武器插槽骨（Phase 4 起 20 骨；weaponSocket 可為字串或 { bone } 物件，缺則無插槽骨）
+const socketBone = typeof manifest.weaponSocket === 'string' ? manifest.weaponSocket : manifest.weaponSocket && manifest.weaponSocket.bone;
+const JOINTS = [...new Set([...manifest.skeleton, ...(socketBone ? [socketBone] : [])])];
 
 // ---- 1. glb 契約 ----
 {
@@ -70,8 +73,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'models/characters
     if (o.isBone) bones.push(o.name);
     if (o.isMesh) for (const m of [].concat(o.material)) mats.add(m.name);
   });
-  check('骨頭數 = manifest.skeleton', bones.length === manifest.skeleton.length, `${bones.length} / ${manifest.skeleton.length}`);
-  check('骨名全部對得上', manifest.skeleton.every((n) => bones.includes(n)));
+  check(`骨頭數 = manifest.skeleton + 插槽骨（${JOINTS.length}）`, bones.length === JOINTS.length, `${bones.length} / ${JOINTS.length}`);
+  check('骨名全部對得上', JOINTS.every((n) => bones.includes(n)));
   const names = gltf.animations.map((c) => c.name).sort();
   const want = manifest.clips.map((c) => c.name).sort();
   check('clip 數 = manifest', names.length === want.length, `${names.length} / ${want.length}`);
@@ -110,7 +113,7 @@ const matsOf = (ch) => {
   const ma1 = matsOf(a1);
   const ma2 = matsOf(a2);
   const mb = matsOf(b);
-  check('非 fallback、有 mixer 與 19 骨', !a1.fallback && a1.mixer && a1.bones.size === 19, `bones ${a1.bones.size}`);
+  check(`非 fallback、有 mixer 與 ${JOINTS.length} 骨`, !a1.fallback && a1.mixer && a1.bones.size === JOINTS.length, `bones ${a1.bones.size}`);
   check('不同 shirt 色 → shirt 材質不共用', ma1.get('shirt') !== mb.get('shirt'));
   check('同色 → 全部材質共用', [...ma1.keys()].every((k) => ma1.get(k) === ma2.get(k)));
   check('不同 shirt 色但同 pants 色 → pants 共用', ma1.get('pants') === mb.get('pants'));
@@ -396,7 +399,7 @@ function run(anim, sec, ctx) {
   if (realHero) {
     const heroClips = [...createCharacter({ variant: 'hero' }).clips.keys()];
     const ownIdle = hc.clips.get(IDLE_POSE);
-    check('真 hero.glb：載入、clip 數 = 11（10 + idle_pose）', heroClips.length === 11 && heroClips.includes(IDLE_POSE) && !!ownIdle, heroClips.join(','));
+    check(`真 hero.glb：載入、clip 數 = ${manifest.clips.length + 1}（manifest ${manifest.clips.length} + idle_pose）`, heroClips.length === manifest.clips.length + 1 && heroClips.includes(IDLE_POSE) && !!ownIdle, heroClips.join(','));
     check('主角專屬 idle_pose 不外借給行人', !createCharacter({ variant: 'pedestrian' }).clips.has(IDLE_POSE));
   } else {
     console.log('SKIP  真 hero.glb 載入 / clip 數（工作區沒有 public/models/characters/hero.glb）');
@@ -445,4 +448,5 @@ function run(anim, sec, ctx) {
 
 console.warn = origWarn;
 console.log(`\n通過 ${passes}、失敗 ${failures}；預期中的警告 ${warnings.length} 則`);
+console.log(failures ? `FAIL ${failures}/${passes + failures}` : `PASS ${passes}/${passes}`);
 process.exit(failures ? 1 : 0);
