@@ -1,0 +1,208 @@
+// 存檔：localStorage 讀寫、版本遷移、清洗驗證、備份 / 損毀保留，以及定時自動存檔
+// storage 由呼叫端注入（介面同 localStorage：getItem / setItem / removeItem）；未注入時用 globalThis.localStorage，
+// 仍不可用（node、停用儲存）時退回記憶體；所有讀寫都 try/catch，不向外丟例外
+
+export const SAVE_VERSION = 1;
+
+// 統計欄位：計數類取整數，距離 / 時間類保留小數
+const STAT_INT_KEYS = ['pedsHit', 'pedsKnockedOut', 'carjacks', 'crashes', 'kos', 'moneyEarned', 'moneySpent'];
+const STAT_FLOAT_KEYS = ['playTimeSec', 'distWalkM', 'distDriveM'];
+
+export function defaultSave() {
+  return {
+    version: SAVE_VERSION,
+    savedAt: 0,
+    money: 500,
+    stats: {
+      playTimeSec: 0,
+      distWalkM: 0,
+      distDriveM: 0,
+      pedsHit: 0,
+      pedsKnockedOut: 0,
+      carjacks: 0,
+      crashes: 0,
+      kos: 0,
+      moneyEarned: 0,
+      moneySpent: 0,
+    },
+    player: { x: null, z: null, yaw: 0 },
+    world: { hour: 16.5 },
+  };
+}
+
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// finite 且 ≥ 0 才採用，否則用預設值
+const nonNeg = (v, def) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : def);
+const nonNegInt = (v, def) => Math.floor(nonNeg(v, def));
+// 座標可為負；null / 非有限值 → null（整合端改用出生點）
+const coord = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+// 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
+export function migrate(obj) {
+  if (!isObj(obj)) return null;
+  let v = obj.version === undefined ? SAVE_VERSION : obj.version;
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  if (v > SAVE_VERSION) return null;
+  const out = { ...obj };
+  // 之後新增版本時在此補：if (v < 2) { ...; v = 2; }
+  if (v < 1) v = 1;
+  out.version = v;
+  return out;
+}
+
+// 清洗：數值 finite 且 ≥ 0、未知鍵丟棄、缺鍵補預設；非物件或版本較新 → null
+export function validateSave(obj) {
+  const m = migrate(obj);
+  if (!m) return null;
+  const d = defaultSave();
+  const out = defaultSave();
+  out.savedAt = nonNeg(m.savedAt, d.savedAt);
+  out.money = nonNegInt(m.money, d.money);
+  const st = isObj(m.stats) ? m.stats : {};
+  for (const k of STAT_INT_KEYS) out.stats[k] = nonNegInt(st[k], d.stats[k]);
+  for (const k of STAT_FLOAT_KEYS) out.stats[k] = nonNeg(st[k], d.stats[k]);
+  const p = isObj(m.player) ? m.player : {};
+  out.player.x = coord(p.x);
+  out.player.z = coord(p.z);
+  // x / z 需成對有效，只有一個有效時一起作廢
+  if (out.player.x === null || out.player.z === null) out.player.x = out.player.z = null;
+  out.player.yaw = typeof p.yaw === 'number' && Number.isFinite(p.yaw) ? p.yaw : d.player.yaw;
+  const w = isObj(m.world) ? m.world : {};
+  out.world.hour = nonNeg(w.hour, d.world.hour) % 24;
+  return out;
+}
+
+// 記憶體替身（無 localStorage 時）
+function memoryStorage() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+  };
+}
+
+function defaultStorage() {
+  try {
+    const ls = globalThis.localStorage;
+    if (ls && typeof ls.getItem === 'function') return ls;
+  } catch (e) {
+    // 部分瀏覽器停用儲存時存取 localStorage 本身就會丟例外
+  }
+  return memoryStorage();
+}
+
+export function createSaveStore({ storage, key = 'tcgta.save', now = () => Date.now() } = {}) {
+  const st = storage || defaultStorage();
+  const BAK = key + '.bak';
+  const CORRUPT = key + '.corrupt';
+  let blocked = false; // 讀到較新版本的存檔：不覆寫，直到 clear()
+
+  const get = (k) => {
+    try { return st.getItem(k); } catch (e) { return null; }
+  };
+  const set = (k, v) => {
+    try { st.setItem(k, v); return true; } catch (e) { return false; }
+  };
+  const remove = (k) => {
+    try { st.removeItem(k); } catch (e) { /* 忽略 */ }
+  };
+
+  // 讀一個槽：{ kind: 'empty'|'ok'|'bad'|'newer', raw, data }
+  function readSlot(k) {
+    const raw = get(k);
+    if (raw === null || raw === undefined) return { kind: 'empty', raw: null, data: null };
+    let obj;
+    try { obj = JSON.parse(raw); } catch (e) { return { kind: 'bad', raw, data: null }; }
+    if (isObj(obj) && typeof obj.version === 'number' && obj.version > SAVE_VERSION) {
+      return { kind: 'newer', raw, data: null };
+    }
+    const data = validateSave(obj);
+    return data ? { kind: 'ok', raw, data } : { kind: 'bad', raw, data: null };
+  }
+
+  function load() {
+    const main = readSlot(key);
+    if (main.kind === 'ok') {
+      set(BAK, JSON.stringify(main.data));
+      return { data: main.data, status: 'ok' };
+    }
+    if (main.kind === 'newer') {
+      blocked = true;
+      return { data: defaultSave(), status: 'incompatible' };
+    }
+    if (main.kind === 'bad') set(CORRUPT, main.raw);
+    const bak = readSlot(BAK);
+    if (bak.kind === 'ok') return { data: bak.data, status: 'recovered' };
+    if (bak.kind === 'newer') {
+      blocked = true;
+      return { data: defaultSave(), status: 'incompatible' };
+    }
+    if (main.kind === 'empty' && bak.kind === 'empty') return { data: defaultSave(), status: 'new' };
+    if (main.kind === 'empty' && bak.kind === 'bad') set(CORRUPT, bak.raw);
+    return { data: defaultSave(), status: 'corrupt-reset' };
+  }
+
+  function save(data) {
+    if (blocked) return false;
+    const clean = validateSave(data);
+    if (!clean) return false;
+    let t = 0;
+    try { t = now(); } catch (e) { t = 0; }
+    clean.savedAt = nonNeg(t, 0);
+    let text;
+    try { text = JSON.stringify(clean); } catch (e) { return false; }
+    return set(key, text);
+  }
+
+  function clear() {
+    remove(key);
+    remove(BAK);
+    remove(CORRUPT);
+    blocked = false;
+  }
+
+  // 有可「繼續」的存檔（主鍵或備份可讀且相容）
+  function hasSave() {
+    return readSlot(key).kind === 'ok' || readSlot(BAK).kind === 'ok';
+  }
+
+  return { load, save, clear, hasSave, get blocked() { return blocked; } };
+}
+
+// 自動存檔：tick 累計滿 intervalSec 存一次；flush(reason) 立即存（切背景、暫停、回主選單時）
+export function createAutosave({ store, getState, intervalSec = 15 }) {
+  let acc = 0;
+  let lastReason = null;
+
+  function doSave(reason) {
+    acc = 0;
+    let state;
+    try {
+      state = getState();
+    } catch (e) {
+      console.error('[save] getState 失敗，略過本次存檔', e);
+      return false;
+    }
+    lastReason = reason;
+    try {
+      return store.save(state) === true;
+    } catch (e) {
+      console.error('[save] 存檔失敗', e);
+      return false;
+    }
+  }
+
+  return {
+    tick(dt) {
+      if (typeof dt !== 'number' || !Number.isFinite(dt) || dt <= 0) return false;
+      acc += dt;
+      if (acc < intervalSec) return false;
+      return doSave('interval');
+    },
+    flush(reason = 'manual') {
+      return doSave(reason);
+    },
+    get lastReason() { return lastReason; },
+  };
+}

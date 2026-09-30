@@ -438,15 +438,29 @@ function samplePatch(p, x, z) {
 // ---------- 手感參數推導 ----------
 {
   const src = readFileSync(join(ROOT, 'src/player.js'), 'utf8');
-  const num = (name) => Number((src.match(new RegExp(`const ${name} = ([0-9.]+)`)) || [])[1]);
+  // player.js 不再自帶手感常數：一律由 physics/character.js import（單一來源），半徑仍與 CH.RADIUS 相同
+  const dup = ['WALK_SPEED', 'RUN_SPEED', 'ACCEL', 'DECEL', 'JUMP_SPEED', 'GRAVITY'].filter((n) => new RegExp(`const ${n} = `).test(src));
+  const imp = /import \{[^}]*\bWALK_SPEED\b[^}]*\bRUN_SPEED\b[^}]*\bJUMP_SPEED\b[^}]*\bGRAVITY\b[^}]*\bstepVelocity\b[^}]*\} from '\.\/physics\/character\.js'/.test(src);
   check(
-    'character：WALK / RUN / ACCEL / JUMP / GRAVITY / 半徑與 player.js 相同',
-    num('WALK_SPEED') === CH.WALK_SPEED && num('RUN_SPEED') === CH.RUN_SPEED && num('ACCEL') === CH.ACCEL && num('JUMP_SPEED') === CH.JUMP_SPEED && num('GRAVITY') === CH.GRAVITY && Number((src.match(/PLAYER_RADIUS = ([0-9.]+)/) || [])[1]) === CH.RADIUS,
+    'character：player.js 手感常數由 physics/character.js import（無重複定義）、半徑相同',
+    imp && dup.length === 0 && Number((src.match(/PLAYER_RADIUS = ([0-9.]+)/) || [])[1]) === CH.RADIUS,
+    dup.length ? `重複定義 ${dup.join(', ')}` : '',
   );
+  check(
+    'character：走 4.2、衝刺 7.0；走速 0.5 s、衝刺頂速 1.5 s、衝刺放開 ≤ 0.3 s 停',
+    CH.WALK_SPEED === 4.2 && CH.RUN_SPEED === 7 && Math.abs(CH.WALK_SPEED / CH.ACCEL - 0.5) < 1e-9 &&
+      Math.abs(CH.WALK_SPEED / CH.ACCEL + (CH.RUN_SPEED - CH.WALK_SPEED) / CH.SPRINT_ACCEL - 1.5) < 1e-9 && CH.RUN_SPEED / CH.DECEL <= 0.3,
+    `衝刺停止 ${fmt(CH.RUN_SPEED / CH.DECEL, 3)} s`,
+  );
+  // 離散頂點（起跳步先位移、之後每步先扣重力再位移，同 CharacterBody.move）
+  let dy = CH.JUMP_SPEED * CH.PHYSICS_STEP;
+  let peak = dy;
+  for (let vy = CH.JUMP_SPEED - CH.GRAVITY * CH.PHYSICS_STEP; vy > 0; vy -= CH.GRAVITY * CH.PHYSICS_STEP) peak = dy += vy * CH.PHYSICS_STEP;
+  check('character：60 Hz 離散跳高 ≈ JUMP_HEIGHT 0.94 ±0.01、coyote 0.12 s、緩衝 0.15 s', Math.abs(peak - 0.94) < 0.01 && CH.JUMP_HEIGHT === 0.94 && CH.COYOTE_TIME === 0.12 && CH.JUMP_BUFFER === 0.15, `頂點 ${fmt(peak, 3)} m`);
   const jumpH = CH.JUMP_SPEED ** 2 / (2 * CH.GRAVITY);
   const airT = (2 * CH.JUMP_SPEED) / CH.GRAVITY;
   const height = 2 * (CH.HALF_HEIGHT + CH.RADIUS);
-  console.log(`      推導：跳高 ${fmt(jumpH, 3)} m、滯空 ${fmt(airT, 3)} s、膠囊總高 ${fmt(height, 2)} m、中心離腳底 ${fmt(CH.HALF_HEIGHT + CH.RADIUS + CH.OFFSET, 2)} m、跑速每步 ${fmt(CH.RUN_SPEED / 60, 3)} m`);
+  console.log(`      推導：連續公式跳高 ${fmt(jumpH, 3)} m（離散 ${fmt(peak, 3)} m）、滯空 ${fmt(airT, 3)} s、膠囊總高 ${fmt(height, 2)} m、中心離腳底 ${fmt(CH.HALF_HEIGHT + CH.RADIUS + CH.OFFSET, 2)} m、跑速每步 ${fmt(CH.RUN_SPEED / 60, 3)} m`);
   check('character：0.3 m 台階 < autostep 0.35 < 1 m 台階；跳高 < 1 m（1 m 台階跳不上去也合理）', 0.3 < CH.AUTOSTEP_MAX_HEIGHT && CH.AUTOSTEP_MAX_HEIGHT < 1 && jumpH < 1);
   check('character：爬坡 45° < 滑落 50°、每步跑速 < 半徑（不穿薄牆）', CH.MAX_SLOPE_CLIMB < CH.MIN_SLOPE_SLIDE && CH.RUN_SPEED / 60 < CH.RADIUS);
 }
@@ -631,6 +645,19 @@ const IDLE = { moveX: 0, moveZ: 0 };
     return false;
   });
   check('character：平地 2 秒內落地、腳底 y ≈ 0 ±0.03', r.grounded && tLand >= 0 && tLand <= 2 && Math.abs(r.y) < 0.03, `落地 ${fmt(tLand, 2)} s y=${fmt(r.y)}`);
+
+  // 平地原地跳：頂點 ≈ 0.94 m、落地後回到地面（需宿主執行：真 Rapier 控制器的 grounded / snap 行為）
+  let top = r.y;
+  let first = true;
+  const jr = simulate(1.5, () => {
+    const it = { moveX: 0, moveZ: 0, jump: first };
+    first = false;
+    return it;
+  }, (q) => {
+    top = Math.max(top, q.y);
+    return false;
+  }).r;
+  check('character(rapier)：平地起跳頂點 ≈ 0.94 ±0.03 m、1.5 s 內落回', Math.abs(top - CH.JUMP_HEIGHT) < 0.03 && jr.grounded && Math.abs(jr.y) < 0.03, `頂點 ${fmt(top, 3)} 終點 y=${fmt(jr.y)}`);
 }
 
 {

@@ -23,12 +23,9 @@ import { angleDelta } from './utils.js';
 import { SURFACE_OFFSET } from './data/city.js';
 import { surfaceRoads, surfaceFootways } from './citymodel.js';
 import { closestOnSegment } from './geom.js';
+import { WALK_SPEED, RUN_SPEED, JUMP_SPEED, GRAVITY, stepVelocity, speedForDistance, jumpStep, jumpLand, createJumpState } from './physics/character.js';
 
-const WALK_SPEED = 4.2;
-const RUN_SPEED = 8.5;
-const ACCEL = 24;
-const JUMP_SPEED = 6.5;
-const GRAVITY = 22;
+// 手感常數（走 / 衝刺速度、加減速、跳躍、coyote / 緩衝）單一來源在 src/physics/character.js，無物理模式同樣沿用
 export const PLAYER_RADIUS = 0.35;
 const MAX_WALK_SLOPE = 45; // 可走上的最大坡度（°）
 const MIN_WALK_NY = Math.cos((MAX_WALK_SLOPE * Math.PI) / 180);
@@ -43,9 +40,8 @@ const RESPAWN_SEARCH_RADIUS = 6; // 退回步道重生時，步道點附近找�
 const KO_LOCAL_RADIUS = 3; // 原地起身的搜尋半徑（m）
 const KO_EDGE_RADIUS = 30; // 最近道路邊的搜尋半徑（m）
 const KO_EDGE_GAP = 1; // 道路邊起身點：車道邊線再往外多少（m，落在人行道上）
-// 擊退位移 → CharacterBody 初速：move() 的平滑每步保留 (1 − k)、k = ACCEL·dt / WALK_SPEED（鎖移動時目標速度 0），
-// 位移總和 = v0 · dt / k = v0 · WALK_SPEED / ACCEL，所以 v0 = 位移 × ACCEL / WALK_SPEED
-const KNOCKBACK_GAIN = ACCEL / WALK_SPEED;
+// 擊退位移 → CharacterBody 初速：鎖移動時目標速度 0，stepVelocity 以 DECEL 線性減速，
+// 位移 ≈ v0² / (2·DECEL)，v0 = speedForDistance(位移)（含固定步長修正；不再是線性增益，改成直接設定速度）
 // 出拳小衝步：輔助瞄準目標距離 > LUNGE_FROM 時往目標衝到 LUNGE_STOP 處，最多 LUNGE_MAX（m）
 const LUNGE_STOP = HIT_RADIUS - 0.4;
 const LUNGE_FROM = HIT_RADIUS - 0.25;
@@ -53,6 +49,7 @@ const LUNGE_MAX = 1.2;
 const PLAYER_COLORS = { shirt: '#2e7d4f', pants: '#2b2f3a', skin: '#f1c9a5', hair: '#1b1b1b' }; // 退回行人模型時的服色
 const PLAYER_HP = 100;
 
+// @deprecated 攻擊鍵改由整合層決定（input 的 Mouse0 / 觸控攻擊鈕送 Mouse0，再呼叫 player.punch()）；保留匯出僅供舊碼相容
 // 滑鼠左鍵出拳：在 dom 上監聽 mousedown，回傳 consume()（本幀之前是否按過左鍵，讀完清除）
 // 不論 pointer lock 是否已鎖定都算出拳——未鎖定時同一下點擊另由 input.js 要求鎖定（requestPointerLock 是非同步的，
 // 舊版在這裡檢查「已鎖定」才出拳，未鎖定時的第一下永遠只做鎖定）
@@ -159,6 +156,7 @@ export class Player {
     this.body = null; // 物理模式的 CharacterBody
     this._intent = { moveX: 0, moveZ: 0, jump: false, run: false };
     this._jumpQueued = false;
+    this._jumpSt = createJumpState(); // 無物理模式的 coyote / 跳躍緩衝狀態（物理模式由 CharacterBody 自己管）
     this.locked = false; // 上車動畫等外部鎖定：不讀移動輸入
     this.combat = null;
     this._assist = null; // 輔助瞄準中：{ target（Actor）, t（已轉秒數）}
@@ -200,8 +198,12 @@ export class Player {
       this._assist = null;
       if (attacker) this.yaw = Math.atan2(attacker.pos.x - this.pos.x, attacker.pos.z - this.pos.z);
       if (!this.body || !knockback) return;
-      this.body.vx += knockback.x * KNOCKBACK_GAIN;
-      this.body.vz += knockback.z * KNOCKBACK_GAIN;
+      // 受擊鎖移動：直接改成擊退速度（原本的移動速度不再疊加），減速到停的位移 = |knockback|
+      const d = Math.hypot(knockback.x, knockback.z);
+      const v = d > 1e-9 ? speedForDistance(d) / d : 0;
+      this.body.vx = knockback.x * v;
+      this.body.vz = knockback.z * v;
+      this.body.cancelJump();
     });
   }
 
@@ -224,9 +226,15 @@ export class Player {
       const dz = target.pos.z - this.pos.z;
       const d = Math.hypot(dx, dz);
       if (d > LUNGE_FROM) {
-        const lunge = Math.min(LUNGE_MAX, d - LUNGE_STOP) * KNOCKBACK_GAIN;
-        this.body.vx += (dx / d) * lunge;
-        this.body.vz += (dz / d) * lunge;
+        // 小衝步：朝目標方向的速度設為「以 DECEL 減速到停正好走完衝步距離」（放開移動時）；垂直分量保留
+        const lunge = speedForDistance(Math.min(LUNGE_MAX, d - LUNGE_STOP));
+        const ux = dx / d;
+        const uz = dz / d;
+        const along = this.body.vx * ux + this.body.vz * uz;
+        if (along < lunge) {
+          this.body.vx += ux * (lunge - along);
+          this.body.vz += uz * (lunge - along);
+        }
       }
     }
     return true;
@@ -243,9 +251,11 @@ export class Player {
     if (this.anim.state !== 'punch') this._assist = null;
   }
 
-  // 切到物理模式：body = CharacterBody；move 掛在物理子步前（每子步一次，跳躍在第一個子步消化）
+  // 切到物理模式：body = CharacterBody；move 掛在物理子步前（每子步一次，跳躍按鍵在第一個子步交給 body）
+  // coyote time / 跳躍緩衝在 CharacterBody 內處理；真的起跳那一步才經 jumpGate 觸發 jump 動畫（動畫不接受就不跳）
   attachPhysics(body) {
     this.body = body;
+    body.jumpGate = () => !this.controlLocked && this.anim.trigger('jump');
     body.pw.onBeforeStep((dt) => {
       if (!body.enabled) return;
       const it = this._intent;
@@ -300,10 +310,8 @@ export class Player {
     const running = input.down('ShiftLeft') || input.down('ShiftRight');
     const target = wl > 0 ? (running ? RUN_SPEED : WALK_SPEED) : 0;
 
-    // 平滑加減速
-    const k = Math.min(1, ACCEL * dt / Math.max(target, WALK_SPEED));
-    this.vx += (wx * target - this.vx) * k;
-    this.vz += (wz * target - this.vz) * k;
+    // 加速 / 減速 / 轉向（與 CharacterBody 相同）
+    stepVelocity(this, dt, wx, wz, target);
 
     let x = this.pos.x + this.vx * dt;
     let z = this.pos.z + this.vz * dt;
@@ -342,10 +350,9 @@ export class Player {
     // 跳躍與重力
     const ground = terrain.querySurface(this.pos.x, this.pos.z, this.pos.y, this._q).y;
     this.ground = ground;
-    if (this.onGround && input.wasPressed('Space')) {
+    if (jumpStep(this._jumpSt, dt, input.wasPressed('Space'), this.onGround, () => this.anim.trigger('jump'))) {
       this.vy = JUMP_SPEED;
       this.onGround = false;
-      this.anim.trigger('jump');
     }
     if (this.onGround && this.vy <= 0 && this.pos.y - ground < SNAP_DROP) {
       // 貼地（下坡時不會一直飄起來）
@@ -362,6 +369,7 @@ export class Player {
         this.onGround = false;
       }
     }
+    jumpLand(this._jumpSt, dt, this.onGround, this.vy);
 
     this.anim.update(dt, { speed: this.speed, grounded: this.onGround });
     this.syncMesh();
@@ -374,6 +382,7 @@ export class Player {
       it.moveZ = 0;
       it.run = false;
       this._jumpQueued = false;
+      this.body.cancelJump();
       return;
     }
     const d = moveIntent(input.moveAxis(), camYaw);
@@ -381,7 +390,8 @@ export class Player {
     it.moveZ = d.z;
     // 觸控搖桿推過 STICK_RUN 時 input 會寫入 ShiftLeft（input.js），所以「搖桿推到底」也在這裡
     it.run = input.down('ShiftLeft') || input.down('ShiftRight');
-    if (input.wasPressed('Space') && this.body.grounded && this.anim.trigger('jump')) this._jumpQueued = true;
+    // 跳：只記「按了」；能否起跳（著地 / coyote / 緩衝、動畫是否接受）由 CharacterBody.move 決定
+    if (input.wasPressed('Space')) this._jumpQueued = true;
   }
 
   // 物理 step 之後呼叫：pos = 插值後的腳底位置；朝向追上移動方向；動畫以實際水平速度更新
