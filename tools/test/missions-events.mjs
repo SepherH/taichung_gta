@@ -105,6 +105,7 @@ function setupEvents(opts = {}) {
   return { ev, clock, money, log, of, step };
 }
 const PICK = { x: NM.pickup.x, z: NM.pickup.z };
+check('夜市外送取餐點：移出新光三越陰影後 (557.2, −125.1)，slug / name / radius 不變', NM.pickup.x === 557.2 && NM.pickup.z === -125.1 && NM.pickup.slug === 'shinkong-topcity-district' && NM.pickup.name === '新光三越．大遠百商圈' && NM.pickup.radius === 12);
 const FAR = { x: -500, z: 800 };
 
 // ======================= 1. 純函式 =======================
@@ -146,7 +147,8 @@ const FAR = { x: -500, z: 800 };
       bestRoad = Math.min(bestRoad, Math.hypot(a.x + t * dx - PICK.x, a.z + t * dz - PICK.z));
     }
   }
-  check('取餐點在車道中心線 1 m 內（步行 / 駕駛皆可到）', bestRoad < 1, bestRoad.toFixed(2));
+  // 取餐點移到路緣外的無影空地（不在車道上）：駕駛停在最近車道中心線上仍在取餐半徑內，步行 / 駕駛皆可到
+  check('取餐點離車道中心線 < 取餐半徑 − 2 m（駕駛停在車道上也可取餐，步行 / 駕駛皆可到）', bestRoad < NM.pickup.radius - 2, bestRoad.toFixed(2));
   check('取餐點距新光三越輪廓中心 < 60 m、在地圖界內', b.n === '新光三越' && Math.hypot(cx - PICK.x, cz - PICK.z) < 60 && PICK.x > osm.bounds.x0 && PICK.x < osm.bounds.x1 && PICK.z > osm.bounds.z0 && PICK.z < osm.bounds.z1);
   const r = findRoute(graph, PICK, LANDMARKS[1]);
   check('路網查得到取餐點 → 地標的路線，且 ≥ 直線距離', r && r.lengthM >= Math.hypot(LANDMARKS[1].x - PICK.x, LANDMARKS[1].z - PICK.z), r && r.lengthM.toFixed(0));

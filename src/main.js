@@ -326,7 +326,7 @@ function nearestRoadPoint(px, pz) {
   return best;
 }
 
-// 夜市攤車擺位：取餐點（惠來路道路中心點，events.js pickup）最近的車道 → 垂直方向路緣外 STALL_CURB_GAP + 半個攤車深的兩側候選點
+// 夜市攤車擺位：取餐點（惠來路二段西側路緣外的無影空地，events.js pickup）最近的車道 → 垂直方向路緣外 STALL_CURB_GAP + 半個攤車深的兩側候選點
 // 合格 = 不在車道上、不在步道（footway）上（不擋人行動線）、離建築外牆 ≥ STALL_WALL_GAP；合格者取離牆較遠的一側
 // （避開貼著商場外牆的牆面陰影）；都不合格退回第一側。正面（+Z）朝向該道路點；回傳 placeProp 的 opts（y 由呼叫端取地面高）
 function stallPlacement(pickup, depth) {

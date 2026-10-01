@@ -200,6 +200,24 @@ const fake = {
   const wallD = (p) => { let d = 0; while (d < 30 && !city.buildingAt(p.x, p.z, d)) d++; return d; };
   check('攤車：兩側取離牆較遠者', wallD(spot) > wallD(other), `${wallD(spot)} m vs ${wallD(other)} m`);
   check('攤車：離取餐點 < 取餐半徑（玩家在攤車旁即可按 E 取餐）', Math.hypot(spot.x - pk.x, spot.z - pk.z) < pk.radius, Math.hypot(spot.x - pk.x, spot.z - pk.z).toFixed(2));
+  // 月影：同 daynight.js 19 時月光方向（太陽對面，仰角約 14°），自離地 1 m 往月亮方向每 0.5 m 取樣，遇到牆頂（buildingBase + height）高於射線的建築即在陰影裡
+  const { getTerrain } = await import('../../src/terrain.js');
+  const ter = getTerrain();
+  const ang = ((19 - 6) / 12) * Math.PI;
+  const mv = [-Math.cos(ang), Math.max(-Math.sin(ang), 0.2), 0.35];
+  const mh = Math.hypot(mv[0], mv[2]);
+  const shadowBy = (x, z) => {
+    const y0 = ter.heightAt(x, z) + 1;
+    for (let s = 0.5; s < 400; s += 0.5) {
+      const b = city.buildingAt(x + (mv[0] / mh) * s, z + (mv[2] / mh) * s, 0);
+      if (b && ter.buildingBase(b.id) + b.height > y0 + (mv[1] / mh) * s) return b.name || String(b.id);
+    }
+    return null;
+  };
+  check('月影判定基準：原取餐點（惠來路道路中心 556.3, −107.9）19 時在新光三越陰影裡', shadowBy(556.3, -107.9) === '新光三越');
+  check('取餐點：不在車道 / 步道上、離建築外牆 ≥ STALL_WALL_GAP（不擋人行動線）', !city.onRoadSurface(pk.x, pk.z, 0.3, false) && !city.onRoadSurface(pk.x, pk.z, depth / 2, true) && !city.buildingAt(pk.x, pk.z, H.STALL_WALL_GAP), `${pk.x}, ${pk.z}`);
+  check('取餐點 / 攤車：19 時月光不被建築遮住（移出新光三越陰影）', shadowBy(pk.x, pk.z) === null && shadowBy(spot.x, spot.z) === null, `${shadowBy(pk.x, pk.z)} / ${shadowBy(spot.x, spot.z)}`);
+  check('攤車＝取餐點：兩者距離 ≤ 12 m', Math.hypot(spot.x - pk.x, spot.z - pk.z) <= 12);
   const obj = { position: { set(x, y, z) { Object.assign(this, { x, y, z }); } }, rotation: { y: NaN } };
   const pl = placeProp(obj, { ...spot, y: 12.5 });
   const front = propWorldPoint([0, 0, 1], pl);

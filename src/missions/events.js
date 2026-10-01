@@ -7,7 +7,9 @@
 //   逾時失敗（reason 'timeout'）不扣錢；完成後冷卻 cooldownSec（以注入 now() 秒計），冷卻結束且仍在時段內再開放；repeatable false 者完成一次即不再出現
 //   時段外取餐點不出現（已取餐者可繼續送完，不因跨出時段作廢）；跨午夜時段 { start: 22, end: 2 } 亦可
 // 取餐點：OSM 資料（src/data/osm-city.json）範圍是七期，沒有任何夜市；逢甲夜市投影約 (868, -1612) 在地圖界外（z0 = -632），
-//   改用最接近的既有商圈「新光三越 / 大遠百商圈」：新光三越輪廓（OSM way 148849083，CROWD_MALL_IDS）西側惠來路二段的道路中心點（離線算一次寫死）
+//   改用最接近的既有商圈「新光三越 / 大遠百商圈」：新光三越輪廓（OSM way 148849083，CROWD_MALL_IDS）北側、惠來路二段西側路緣外的人行空地（離線算一次寫死）
+//   選點：不在車道 / 步道上、離建築外牆 ≥ 3 m，且 19 時月光（daynight.js：仰角約 14°、從東偏南照來）不被 63 m 高的新光三越遮住
+//   （原惠來路道路中心點 (556.3, −107.9) 15 m 內全落在商場陰影裡）；main.js stallPlacement 以此點算出的攤車即落在本點，攤車＝取餐點
 //
 // 對外 API（createTimedEvents 回傳；missions/index.js createMissions 已代為建立並合併，整合層通常只碰 createMissions）：
 //   update(dt, ctx)：ctx 同委託 { x, z, driving }，可另帶 gameHour（0–24，優先於 getGameHour()）
@@ -36,7 +38,7 @@ export const NIGHT_MARKET_DELIVERY = {
   id: 'night-market-delivery',
   title: '夜市時段限定外送',
   window: { start: 18, end: 24 }, // 遊戲內時刻區間 [start, end)；end < start 表跨午夜
-  pickup: { slug: 'shinkong-topcity-district', name: '新光三越．大遠百商圈', x: 556.3, z: -107.9, radius: 12 },
+  pickup: { slug: 'shinkong-topcity-district', name: '新光三越．大遠百商圈', x: 557.2, z: -125.1, radius: 12 },
   cooldownSec: 180,
   failCooldownSec: 0,
   repeatable: true,
