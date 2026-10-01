@@ -4,6 +4,8 @@
 //   路徑連續（60 Hz 相鄰幀位移 ≤ MAX_STEP_M、視線轉角 ≤ MAX_TURN_DEG）、全程 ≥ 地形 + SAFE_CLEAR（terrain.querySurface 取樣）且不在建築輪廓內低於屋頂、
 //   循環銜接（末段 → 首段連續、t = duration 與 t = 0 同點）、30 Hz 與 60 Hz 同時刻同鏡位（計時吃渲染 dt、與 simDt 無關）、
 //   進出遊戲（stop → update 不動鏡頭、handoff 由巡覽鏡位平順內插到玩家鏡頭並收斂、start 由玩家鏡頭平順回到巡覽）、
+//   進出遊戲掃描（整輪各時刻 × 3 個玩家鏡頭點，雙向逐幀：高度變化 ≤ 1.6 m/幀、不低於 floor、> 300 m 改淡出淡入且只在全黑時切鏡）、
+//   取景（每段看點視線遮擋率 ≤ 10%、市政府推軌離立面 ≥ 90 m）、
 //   減少動態效果（老虎城慢速環繞、偏好切換平順）、每幀成本、main.js 只接線（靜態檢查）
 // 用法：node tools/test/p6-m6.mjs（任一斷言失敗 exit 1；最後一行印 PASS n/n 或 FAIL k/n）
 import { register } from 'node:module';
@@ -29,6 +31,7 @@ const cm = await import('../../src/citymodel.js');
 const osm = (await import('../../src/data/osm-city.json')).default;
 const { NIGHT_MARKET_DELIVERY } = await import('../../src/missions/events.js');
 const T = await import('../../src/ui/menu-tour.js');
+const geom = await import('../../src/geom.js');
 
 let pass = 0;
 let fail = 0;
@@ -100,7 +103,10 @@ const tour = T.buildTour(deps);
   check(`滑行秒數 ${T.GLIDE_MIN}–${T.GLIDE_MAX} s`, glides.every((g) => g.sec >= T.GLIDE_MIN - 0.1 && g.sec <= T.GLIDE_MAX + 0.1));
   const sum = tour.segments.reduce((a, s) => a + s.sec, 0);
   check('段落表總長 = 一輪秒數', Math.abs(sum - tour.duration) < 1e-6, `${tour.duration.toFixed(1)} s`);
-  for (const s of tour.segments) console.log(`  ${s.t0.toFixed(1).padStart(6)} s  ${s.type.padEnd(6)} ${s.sec.toFixed(1)} s  ${s.name}`);
+  for (const s of tour.segments) {
+    const fr = s.dist !== undefined ? `  （距 ${s.dist.toFixed(0)} m${s.alt !== undefined ? `、高 ${s.alt.toFixed(0)} m` : ''}${s.occ !== undefined ? `、遮擋 ${(s.occ * 100).toFixed(0)}%` : ''}）` : '';
+    console.log(`  ${s.t0.toFixed(1).padStart(6)} s  ${s.type.padEnd(6)} ${s.sec.toFixed(1)} s  ${s.name}${fr}`);
+  }
 }
 
 // ---------- 逐幀：連續 / 高度下限 / 不入建築 ----------
@@ -290,6 +296,174 @@ const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
   check('巡覽中再 start 無作用', mt.active && !mt.blending);
 }
 
+// ---------- 進出遊戲掃描：整輪各時刻 stop → handoff → start，雙向逐幀 ----------
+//   平滑內插：相鄰幀高度變化 ≤ MAX_DY_M、位移 ≤ MAX_HAND_STEP_M、不在建築內、兩端 HANDOFF_MASK_R 外不低於 floor；
+//   距離 > HANDOFF_FADE_DIST → 必走淡出淡入（≤ FADE_SEC），大位移只出現在全黑那一幀
+const MAX_DY_M = 1.6; // handoff / 回主選單相鄰幀高度變化上限（m，= 巡覽每幀位移門檻；模組速率上限 HANDOFF_VRATE 90 m/s = 1.5 m）
+// 平滑內插每幀位移上限（m）：水平 smoothstep 峰值 1.5 × 平均（平均 ≤ max(HANDOFF_SPEED, HANDOFF_FADE_DIST ÷ HANDOFF_MAX) = 120 m/s）與高度速率合成，
+//   再加目標本身每幀的移動（回主選單時目標 = 巡覽鏡位，每幀 ≤ MAX_STEP_M）；改前實測峰值約 600 m/s（10 m/幀）
+const MAX_HAND_STEP_M = Math.hypot(1.5 * Math.max(T.HANDOFF_SPEED, T.HANDOFF_FADE_DIST / T.HANDOFF_MAX), T.HANDOFF_VRATE) * DT + MAX_STEP_M;
+const FLOOR_TOL_M = 0.05; // floor 容差（m）：回主選單時目標（巡覽鏡位）高度在剖面樣本間為曲線、剖面為線性內插，差值為毫米級
+const CUT_ALPHA = 0.95; // 淡出淡入：位移 / 高度超限的幀，淡出量須 ≥ 此值（全黑時切鏡）
+function nearRoadPose(stop) {
+  let best = null;
+  for (const r of cm.surfaceRoads) {
+    for (const pt of r.pts) {
+      if (cm.buildingAt(pt.x, pt.z, 0) || !cm.onRoadSurface(pt.x, pt.z, 0, false)) continue;
+      const d = Math.hypot(pt.x - stop.x, pt.z - stop.z);
+      if (!best || d < best.d) best = { x: pt.x, z: pt.z, d };
+    }
+  }
+  const y = groundY(best.x, best.z) + 2.6;
+  return { x: best.x, y, z: best.z, q: T.lookQuat(best.x, y, best.z, stop.x, y - 1, stop.z, {}), name: stop.key };
+}
+{
+  const floorAt = tour.floorAt;
+  const byKey = Object.fromEntries(tour.stops.map((s) => [s.key, s]));
+  const rigs = [nearRoadPose(byKey.tiger), nearRoadPose(byKey.shinkong), nearRoadPose(byKey.cityhall)];
+  const fades = [];
+  const cam = mockCamera();
+  const mt = T.createMenuTour({ ...deps, camera: cam, fade: (a) => fades.push(a) });
+  mt.update(DT);
+  const agg = { belowMax: -Infinity, fadeShort: 0, smooth: 0, fade: 0, maxDy: 0, maxStep: 0, inside: 0, below: 0, longNoFade: 0, fadeSecMax: 0, cutBad: 0, endBad: 0, maxDist: 0, fadeMaxDist: 0, smoothMaxDist: 0, longFade1100: false, alphaEnd: 0 };
+  // 逐幀記錄一次內插：step() 推一幀並回傳是否仍在內插、from（起點鏡位）、targetAt()（當幀目標鏡位）
+  const record = (step, from, targetAt) => {
+    let prev = snap(cam);
+    let n = 0;
+    let still = true;
+    const fading = [];
+    let first = true;
+    let isFade = false;
+    let dist0 = 0;
+    while (still && n < 600) {
+      still = step();
+      if (first) {
+        isFade = mt.fading;
+        dist0 = dist(from, targetAt());
+        if (isFade) agg.fadeSecMax = Math.max(agg.fadeSecMax, mt.blendSec);
+        first = false;
+      }
+      const cur = snap(cam);
+      const tg = targetAt();
+      const dy = Math.abs(cur.y - prev.y);
+      const st = dist(cur, prev);
+      if (isFade) {
+        if ((dy > MAX_DY_M || st > MAX_HAND_STEP_M) && mt.fade < CUT_ALPHA) agg.cutBad++;
+        fading.push(mt.fade);
+      } else {
+        agg.maxDy = Math.max(agg.maxDy, dy);
+        agg.maxStep = Math.max(agg.maxStep, st);
+        const bIn = cm.buildingAt(cur.x, cur.z, 0);
+        if (bIn && cur.y < terrain.buildingBase(bIn.id) + bIn.height) agg.inside++;
+        if (Math.hypot(cur.x - from.x, cur.z - from.z) > T.HANDOFF_MASK_R && Math.hypot(cur.x - tg.x, cur.z - tg.z) > T.HANDOFF_MASK_R) {
+          const under = floorAt(cur.x, cur.z) - cur.y;
+          agg.belowMax = Math.max(agg.belowMax, under);
+          if (under > FLOOR_TOL_M) agg.below++;
+        }
+      }
+      prev = cur;
+      n++;
+    }
+    if (still || dist(snap(cam), targetAt()) > 1e-6) agg.endBad++;
+    agg.maxDist = Math.max(agg.maxDist, dist0);
+    if (isFade) {
+      agg.fade++;
+      agg.fadeMaxDist = Math.max(agg.fadeMaxDist, dist0);
+      if (dist0 > 1000) agg.longFade1100 = true;
+      if (dist0 <= T.HANDOFF_FADE_DIST) agg.fadeShort++;
+      if (Math.max(...fading) < 0.999) agg.cutBad++;
+    } else {
+      agg.smooth++;
+      agg.smoothMaxDist = Math.max(agg.smoothMaxDist, dist0);
+      if (dist0 > T.HANDOFF_FADE_DIST) agg.longNoFade++;
+    }
+    agg.alphaEnd = Math.max(agg.alphaEnd, mt.fade);
+  };
+  const p = {};
+  const l = {};
+  let cycles = 0;
+  for (const rig of rigs) {
+    const rigWrite = () => {
+      cam.position.set(rig.x, rig.y, rig.z);
+      cam.quaternion.set(rig.q.x, rig.q.y, rig.q.z, rig.q.w);
+    };
+    let span = 0;
+    while (span < mt.path.duration) {
+      for (let i = 0; i < 100; i++) mt.update(DT); // 每輪往前 100 幀（≈ 1.67 s）再進遊戲
+      span += 100 * DT;
+      const tourPose = snap(cam);
+      mt.stop();
+      record(() => {
+        rigWrite();
+        return mt.handoff(DT);
+      }, tourPose, () => rig);
+      rigWrite();
+      mt.start();
+      record(() => {
+        mt.update(DT);
+        return !!mt.blending;
+      }, rig, () => {
+        T.samplePathAt(mt.path, mt.time, p, l);
+        return p;
+      });
+      cycles++;
+      if (cycles > 400) break;
+    }
+  }
+  console.log(`  進出遊戲掃描：${cycles} 輪 × 雙向，平滑 ${agg.smooth}（最遠 ${agg.smoothMaxDist.toFixed(0)} m）/ 淡出淡入 ${agg.fade}（最遠 ${agg.fadeMaxDist.toFixed(0)} m；其中 ≤ ${T.HANDOFF_FADE_DIST} m 但高度速率不可行 ${agg.fadeShort}）`);
+  check(`進出遊戲（平滑內插）相鄰幀高度變化 ≤ ${MAX_DY_M} m`, agg.smooth > 0 && agg.maxDy <= MAX_DY_M, `最大 ${agg.maxDy.toFixed(3)} m（${agg.smooth} 次）`);
+  check(`進出遊戲（平滑內插）相鄰幀位移 ≤ ${MAX_HAND_STEP_M.toFixed(2)} m（≤ ${(MAX_HAND_STEP_M / DT).toFixed(0)} m/s）`, agg.maxStep <= MAX_HAND_STEP_M, `最大 ${agg.maxStep.toFixed(3)} m`);
+  check('進出遊戲（平滑內插）途中不在建築輪廓內低於屋頂', agg.inside === 0, `${agg.inside} 幀`);
+  check(`進出遊戲（平滑內插）兩端 ${T.HANDOFF_MASK_R} m 外全程不低於 floor（容差 ${FLOOR_TOL_M} m）`, agg.below === 0, `${agg.below} 幀；最大低於 ${Math.max(0, agg.belowMax).toFixed(3)} m`);
+  check(`距離 > ${T.HANDOFF_FADE_DIST} m 一律淡出淡入`, agg.longNoFade === 0 && agg.fade > 0, `平滑內插最遠 ${agg.smoothMaxDist.toFixed(0)} m`);
+  check('約 1100 m 的進出遊戲（實測情境）走淡出淡入', agg.longFade1100, `最遠 ${agg.maxDist.toFixed(0)} m`);
+  check(`淡出淡入 ≤ ${T.FADE_SEC} s、只在全黑（淡出量 ≥ ${CUT_ALPHA}）那一幀切鏡、途中到達全黑`, agg.fadeSecMax <= T.FADE_SEC + 1e-9 && agg.cutBad === 0, `最長 ${agg.fadeSecMax.toFixed(2)} s、違規 ${agg.cutBad}`);
+  check('每次內插結束 = 目標鏡位、淡出量歸 0、fade 回呼最後為 0', agg.endBad === 0 && agg.alphaEnd === 0 && fades[fades.length - 1] === 0, `${agg.endBad} 次未收斂`);
+}
+
+// ---------- 取景：看點視線遮擋率、市政府推軌距離 ----------
+const MAX_OCC = 0.1; // 每段（環繞 / 推軌 / 升降 / 低空飛行）看點視線遮擋率上限：OCC_FRAMES 幀 × 5 條射線（看點、頂、底、左右兩側）被其他建築擋住的比例
+{
+  const blocked = T.makeOcclusion(terrain, cm.buildings);
+  const byKey = Object.fromEntries(tour.stops.map((s) => [s.key, s]));
+  const p = {};
+  const l = {};
+  const occ = [];
+  for (const sg of tour.segments) {
+    if (sg.type === 'glide') continue;
+    const r = T.shotOcclusion(null, byKey[sg.key], blocked, null, (u, o) => T.samplePathAt(tour, sg.t0 + u * (sg.t1 - sg.t0), o, l));
+    occ.push(`${sg.key} ${(r * 100).toFixed(0)}%`);
+    sg.occ = r;
+  }
+  const shots = tour.segments.filter((s) => s.type !== 'glide');
+  check(`每段看點視線遮擋率 ≤ ${MAX_OCC * 100}%（含老虎城環繞、捷運市政府站）`, shots.every((s) => s.occ <= MAX_OCC), occ.join(' / '));
+  // 遮擋檢查本身：原取景（朝最近道路、半徑 R + 60 m、高 top + 25 m）的老虎城環繞會被近景高樓擋到（實測約 40%）
+  const tiger = byKey.tiger;
+  const r0 = tiger.ext / 2 + 60;
+  const raw = {};
+  let worst = 0;
+  for (let k = 0; k < 16; k++) {
+    const a0 = (k / 16) * 2 * Math.PI;
+    raw.pos = (u, o) => { const a = a0 + ((14 * 12) / r0) * u; o.x = tiger.x + Math.cos(a) * r0; o.y = tiger.top + 25; o.z = tiger.z + Math.sin(a) * r0; };
+    worst = Math.max(worst, T.shotOcclusion(raw, tiger, blocked, tour.floorAt));
+  }
+  check('遮擋檢查有效：老虎城環繞某些方位遮擋率 > 30%（被選取景避開）', worst > 0.3, `最差方位 ${(worst * 100).toFixed(0)}%`);
+  // 市政府推軌：鏡頭離立面 ≥ max(DOLLY_GAP_MIN, 2 × 高)、高度 ≥ DOLLY_ALT_K × 高
+  const ch = tour.segments.find((s) => s.key === 'cityhall' && s.type === 'dolly');
+  const chStop = byKey.cityhall;
+  const cpt = {};
+  let gap = Infinity;
+  let yMin = Infinity;
+  for (let i = 0; i <= 30; i++) {
+    T.samplePathAt(tour, ch.t0 + (i / 30) * (ch.t1 - ch.t0), p, l);
+    const g = geom.pointInPolygon(p.x, p.z, chStop.poly) ? 0 : Math.sqrt(geom.closestOnPolygon(p.x, p.z, chStop.poly, cpt).d2);
+    gap = Math.min(gap, g);
+    yMin = Math.min(yMin, p.y - chStop.base);
+  }
+  const wantGap = Math.max(T.DOLLY_GAP_MIN, 2 * chStop.top);
+  check(`市政府推軌：離立面 ≥ ${wantGap.toFixed(0)} m（原約 35 m）、離地 ≥ ${(chStop.top * T.DOLLY_ALT_K).toFixed(0)} m`, gap >= wantGap - 1 && yMin >= chStop.top * T.DOLLY_ALT_K - 0.5, `最近 ${gap.toFixed(1)} m、最低 ${yMin.toFixed(1)} m`);
+}
+
 // ---------- 減少動態效果 ----------
 {
   const slow = T.buildReducedTour(deps);
@@ -338,6 +512,7 @@ const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
   check('updateAttract：tour.update → dayNight.update → stepWorld → updateEnvironment（center = 巡覽看點）',
     /tour\.update\(dt\);\s*dayNight\.update\(dt, attractFocus\);\s*stepWorld\(dt, attractFocus\);\s*updateEnvironment\(dt, worldStep\.simDt\);/.test(attract));
   check('舊出生點環繞已移除', !/orbitCenter|orbitT/.test(code));
+  check('淡出淡入接最小黑幕元素（#tour-fade，opts.fade 寫 opacity）', /createElement\('div'\)/.test(code) && /tourFade\.id = 'tour-fade'/.test(code) && /fade: \(a\) => \{\s*tourFade\.style\.opacity = String\(a\);/.test(code));
   check('reducedMotion 接 prefers-reduced-motion', /matchMedia\('\(prefers-reduced-motion: reduce\)'\)/.test(code) && /reducedMotion: \(\) =>/.test(code));
   const sg = code.slice(code.indexOf('const startGame'), code.indexOf('const pauseGame'));
   check('startGame 呼叫 tour.stop()', sg.includes('tour.stop();'));

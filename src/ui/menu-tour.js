@@ -13,8 +13,11 @@
 // 時間（§20 / §25）：巡覽計時吃渲染 dt（屬「相機」），與 simDt 無關——卡頓丟子步時運鏡不變慢；暫停 / 切背景時 loop 不呼叫 update，計時停住
 // 減少動態效果（reducedMotion() 為 true，main.js 接 matchMedia('(prefers-reduced-motion: reduce)')）：改走老虎城慢速環繞 REDUCED_OMEGA rad/s；
 //   偏好中途切換時以 blend 平順轉場
-// 進出遊戲：stop() 記下巡覽最後鏡位 → 遊戲中每幀 rig.update 之後呼叫 handoff(dt)，HANDOFF 秒內由巡覽鏡位內插到玩家鏡頭（位置 smoothstep 線性 + 四元數 slerp，
-//   途中高度不低於 floor 的殘量），結束後不再改動鏡頭；start()（回主選單）由當下鏡頭內插回巡覽路徑（巡覽時間接續上次）
+// 取景：orbit / dolly / crane 以看點視線遮擋率（makeOcclusion / shotOcclusion）窮舉方位角（× 環繞半徑 / 高度）取遮擋最少者；
+//   有輪廓的高建物推軌離立面 ≥ max(DOLLY_GAP_MIN, 2 × 高)、高度 DOLLY_ALT_K × 高
+// 進出遊戲：stop() 記下巡覽最後鏡位 → 遊戲中每幀 rig.update 之後呼叫 handoff(dt)，由巡覽鏡位內插到玩家鏡頭，結束後不再改動鏡頭；
+//   start()（回主選單）由當下鏡頭內插回巡覽路徑（巡覽時間接續上次）。距離 ≤ HANDOFF_FADE_DIST：平滑內插（水平 smoothstep + 四元數 slerp，
+//   高度走開始時建好的剖面：沿途 floor、HANDOFF_VRATE 速率包絡、兩端精確接上）；更遠或高度速率不可行：FADE_SEC 淡出淡入（opts.fade(alpha)，全黑時切鏡）
 import { SpatialGrid, closestOnPolygon, pointInPolygon, polygonBBox, polygonCentroid, polylineInfo, samplePolyline, closestOnSegment } from '../geom.js';
 
 export const SAMPLE_HZ = 10; // 路徑取樣頻率（Hz）
@@ -37,6 +40,15 @@ export const REDUCED_ALT = 70; // 減少動態效果：環繞高度下限（m，
 export const HANDOFF_MIN = 1; // 進出遊戲鏡頭內插秒數下限（s）
 export const HANDOFF_MAX = 2.5; // 進出遊戲鏡頭內插秒數上限（s）
 export const HANDOFF_SPEED = 80; // 內插秒數 = 距離 ÷ 此值（m/s），夾在上下限之間
+export const HANDOFF_VRATE = 90; // 內插途中高度變化速率上限（m/s；60 Hz 每幀 1.5 m，< 巡覽每幀位移門檻 1.6 m）
+export const HANDOFF_MASK_R = BUILDING_PAD + 2; // 內插兩端此水平距離內不套 floor（端點本身合法；玩家鏡頭常在建築 BUILDING_PAD 內）（m）
+export const HANDOFF_FADE_DIST = 300; // 進出遊戲距離超過此值（m），或平滑內插在 HANDOFF_MAX 內無法滿足 HANDOFF_VRATE → 改淡出淡入直接切換
+export const FADE_SEC = 0.6; // 淡出淡入總秒數（前半淡出到全黑、全黑那一幀切鏡、後半淡入）
+const PROFILE_N = 90; // 內插高度剖面樣本數
+export const OCC_STEP = 4; // 看點視線遮擋：射線取樣間距（m）
+export const OCC_FRAMES = 7; // 看點視線遮擋：每段取樣幀數
+export const DOLLY_GAP_MIN = 70; // 推軌：鏡頭軌道離建物立面的最小水平距離（m；且 ≥ 2 × 建物高）
+export const DOLLY_ALT_K = 0.8; // 推軌：鏡頭高度 = 地面 + max(8, 建物高 × 此值)（m）
 export const STALL_SIZE = { ext: 3, top: 2.5 }; // 夜市攤車無 OSM 輪廓：鏡位用的外徑 / 高度（m，同 prop manifest 攤車尺寸量級）
 
 // 鏡位定義：key、顯示名、比對 namedBuildings 名稱的規則（basin / stall 另由專屬資料推導）
@@ -84,7 +96,83 @@ export function makeFloor(terrain, buildings) {
   };
 }
 
-// 鏡位清單：[{ key, name, source, x, z, ext（水平外徑 m）, top（離地高 m）, base（地面 y）, id? }]，資料缺者略過
+// 視線遮擋：blocked(px, py, pz, tx, ty, tz, exclude?) = 鏡頭 → 目標點的線段每 OCC_STEP 取樣，
+//   任一點落在 exclude（id Set）以外的建築輪廓內且低於其屋頂 → true（端點前後 2 m 不算）
+export function makeOcclusion(terrain, buildings) {
+  const grid = new SpatialGrid(25);
+  for (const b of buildings) grid.insert(b, b.bbox.x0, b.bbox.z0, b.bbox.x1, b.bbox.z1);
+  const list = [];
+  const base = (b) => (typeof terrain.buildingBase === 'function' ? terrain.buildingBase(b.id) : 0);
+  return (px, py, pz, tx, ty, tz, exclude = null) => {
+    const len = Math.hypot(tx - px, ty - py, tz - pz);
+    if (len < 4) return false;
+    const n = Math.ceil(len / OCC_STEP);
+    const k0 = 2 / len;
+    for (let i = 0; i <= n; i++) {
+      const k = i / n;
+      if (k < k0 || k > 1 - k0) continue;
+      const x = px + (tx - px) * k;
+      const y = py + (ty - py) * k;
+      const z = pz + (tz - pz) * k;
+      grid.query(x, z, x, z, list);
+      for (const b of list) {
+        if (exclude && exclude.has(b.id)) continue;
+        if (x < b.bbox.x0 || x > b.bbox.x1 || z < b.bbox.z0 || z > b.bbox.z1) continue;
+        if (y < base(b) + b.height && pointInPolygon(x, z, b.poly)) return true;
+      }
+    }
+    return false;
+  };
+}
+
+// 鏡位的目標點（遮擋檢查用，5 點）：看點、中心頂部 90%、中心 20%、垂直視線的左右兩側（半寬 min(外徑 × 0.4, 30 m)）於 50% 高 → out
+function stopTargets(c, px, pz, out) {
+  const h = Math.max(1.5, c.top);
+  let vx = c.x - px;
+  let vz = c.z - pz;
+  const vl = Math.hypot(vx, vz) || 1;
+  vx /= vl;
+  vz /= vl;
+  const w = Math.min(c.ext * 0.4, 30);
+  const set = (i, x, y, z) => {
+    const o = out[i] || (out[i] = {});
+    o.x = x;
+    o.y = y;
+    o.z = z;
+  };
+  set(0, c.x, c.base + h * 0.4, c.z);
+  set(1, c.x, c.base + h * 0.9, c.z);
+  set(2, c.x, c.base + h * 0.2, c.z);
+  set(3, c.x - vz * w, c.base + h * 0.5, c.z + vx * w);
+  set(4, c.x + vz * w, c.base + h * 0.5, c.z - vx * w);
+  out.length = 5;
+  return out;
+}
+
+// 看點視線遮擋率：shot 取樣 OCC_FRAMES 幀（鏡頭高度套 floor，近似成品路徑），每幀 5 條射線到 stopTargets，被擋的比例
+//   posAt(u, o) 預設 = shot.pos；成品路徑驗證可傳入實際取樣函式
+export function shotOcclusion(shot, stop, blocked, floorAt, posAt = null) {
+  const p = {};
+  const tg = [];
+  let hit = 0;
+  let tot = 0;
+  for (let f = 0; f < OCC_FRAMES; f++) {
+    const u = f / (OCC_FRAMES - 1);
+    if (posAt) posAt(u, p);
+    else {
+      shot.pos(u, p);
+      if (floorAt) p.y = Math.max(p.y, floorAt(p.x, p.z));
+    }
+    stopTargets(stop, p.x, p.z, tg);
+    for (const t of tg) {
+      tot++;
+      if (blocked(p.x, p.y, p.z, t.x, t.y, t.z, stop.ids || null)) hit++;
+    }
+  }
+  return tot ? hit / tot : 0;
+}
+
+// 鏡位清單：[{ key, name, source, x, z, ext（水平外徑 m）, top（離地高 m）, base（地面 y）, id?, poly?, ids? }]，資料缺者略過
 export function tourStops({ namedBuildings = [], basins = [], stall = null, terrain }) {
   const ground = makeGround(terrain);
   const out = [];
@@ -103,12 +191,17 @@ export function tourStops({ namedBuildings = [], basins = [], stall = null, terr
       continue;
     }
     let best = null;
-    for (const b of namedBuildings) if (d.re.test(b.name) && (!best || b.area > best.area)) best = b;
+    const ids = new Set(); // 同名建築（同一地標的各棟）：遮擋檢查不算自己擋自己
+    for (const b of namedBuildings) {
+      if (!d.re.test(b.name)) continue;
+      ids.add(b.id);
+      if (!best || b.area > best.area) best = b;
+    }
     if (!best) continue;
     const base = typeof terrain.buildingBase === 'function' ? terrain.buildingBase(best.id) : 0;
     out.push({
       key: d.key, name: d.name, source: `osm B ${best.id}`, id: best.id, x: best.center.x, z: best.center.z,
-      ext: Math.max(best.bbox.x1 - best.bbox.x0, best.bbox.z1 - best.bbox.z0), top: best.height, base,
+      ext: Math.max(best.bbox.x1 - best.bbox.x0, best.bbox.z1 - best.bbox.z0), top: best.height, base, poly: best.poly, ids,
     });
   }
   return out;
@@ -158,8 +251,18 @@ function nearestRoad(roads, x, z, needLen = 0) {
   return best;
 }
 
-// 單一鏡位的運鏡：回傳 { type, sec, pos(u, out), look(u, out) }，u ∈ [0, 1]
-function makeShot(type, stop, roads) {
+// 點到建物輪廓的水平距離（輪廓內 = 0）
+function polyGap(x, z, poly, cp) {
+  return pointInPolygon(x, z, poly) ? 0 : Math.sqrt(closestOnPolygon(x, z, poly, cp).d2);
+}
+
+// 取景候選（遮擋檢查用）：方位角相對預設（朝最近道路）每 22.5° 一個、依偏離量由小到大；環繞另加半徑 / 高度兩檔
+const AZ_STEPS = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 8];
+const OCC_MARGIN = 0.02; // 遮擋率要比目前最佳少超過此值才換（偏好預設方位與較近取景）
+
+// 單一鏡位的運鏡：回傳 { type, sec, pos(u, out), look(u, out), occ? }，u ∈ [0, 1]
+//   ctx = { blocked, floorAt }（有則對 orbit / dolly / crane 做取景遮擋檢查：窮舉方位角 × 半徑 × 高度，取看點視線遮擋率最低者）
+function makeShot(type, stop, roads, ctx = null) {
   const c = stop;
   const near = nearestRoad(roads, c.x, c.z);
   // 鏡頭擺放方向：朝最近道路（開放空間）一側；找不到道路時朝南
@@ -169,18 +272,39 @@ function makeShot(type, stop, roads) {
     dx = (near.x - c.x) / near.dist;
     dz = (near.z - c.z) / near.dist;
   }
+  if (type === 'road') return roadShot(stop, roads, ctx);
+  const variants = type === 'orbit' ? [[1, 0], [1, 1], [1.4, 0], [1.4, 1]] : [[1, 0]];
+  const tries = ctx ? AZ_STEPS.length : 1;
+  let best = null;
+  for (let ai = 0; ai < tries; ai++) {
+    const a = AZ_STEPS[ai] * (Math.PI / 8);
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    for (const [rk, hk] of variants) {
+      const sh = framedShot(type, c, dx * ca - dz * sa, dx * sa + dz * ca, rk, hk);
+      if (!ctx) return sh;
+      sh.occ = shotOcclusion(sh, c, ctx.blocked, ctx.floorAt);
+      if (!best || sh.occ < best.occ - OCC_MARGIN) best = sh;
+      if (best.occ === 0) return best;
+    }
+  }
+  return best;
+}
+
+// 指定擺放方向 (dx, dz)（單位向量，鏡位 → 鏡頭）的 orbit / dolly / crane；rk = 環繞半徑倍率、hk = 1 時環繞多抬高 20 m
+function framedShot(type, c, dx, dz, rk = 1, hk = 0) {
   const sx = -dz; // 側向（推軌方向）
   const sz = dx;
   const lookY = c.base + c.top * 0.4;
   const R = c.ext / 2;
   const sec = SHOT_SEC[type];
   if (type === 'orbit') {
-    const r = R + 60;
-    const h = c.base + c.top + 25;
+    const r = (R + 60) * rk;
+    const h = c.base + c.top + 25 + 20 * hk;
     const a0 = Math.atan2(dz, dx);
     const sweep = (14 * sec) / r; // 弧長速度約 14 m/s
     return {
-      type, sec,
+      type, sec, dist: r, alt: h, azimuth: a0,
       pos: (u, o) => {
         const a = a0 + sweep * u;
         o.x = c.x + Math.cos(a) * r;
@@ -195,11 +319,24 @@ function makeShot(type, stop, roads) {
     };
   }
   if (type === 'dolly') {
-    const d = R + (c.top < 10 ? 22 : 40);
     const len = c.top < 10 ? 40 : 70;
-    const h = c.base + Math.max(8, c.top * 0.5);
+    let d = R + (c.top < 10 ? 22 : 40);
+    let h = c.base + Math.max(8, c.top * 0.5);
+    if (c.poly && c.top >= 10) {
+      // 有輪廓的建物：整條推軌（兩端與中點）離立面 ≥ max(DOLLY_GAP_MIN, 2 × 高)，高度抬到 DOLLY_ALT_K × 高——輪廓與周邊可辨識
+      const gap = Math.max(DOLLY_GAP_MIN, 2 * c.top);
+      const cp = {};
+      d = 10;
+      for (let it = 0; it < 200; it++) {
+        let g = Infinity;
+        for (const t of [-0.5, 0, 0.5]) g = Math.min(g, polyGap(c.x + dx * d + sx * t * len, c.z + dz * d + sz * t * len, c.poly, cp));
+        if (g >= gap) break;
+        d += 2;
+      }
+      h = c.base + Math.max(8, c.top * DOLLY_ALT_K);
+    }
     return {
-      type, sec,
+      type, sec, dist: d, alt: h,
       pos: (u, o) => {
         const t = (u - 0.5) * len;
         o.x = c.x + dx * d + sx * t;
@@ -219,7 +356,7 @@ function makeShot(type, stop, roads) {
     const y0 = c.base + 8;
     const y1 = c.base + c.top + 50;
     return {
-      type, sec,
+      type, sec, dist: d,
       pos: (u, o) => {
         o.x = c.x + dx * d;
         o.y = y0 + (y1 - y0) * smooth(u);
@@ -232,10 +369,16 @@ function makeShot(type, stop, roads) {
       },
     };
   }
-  // road：沿最近的主要道路低空飛行，里程中點對準鏡位最近點，看前方 LOOK_AHEAD
+  return null;
+}
+
+// road：沿最近的主要道路低空飛行，里程中點對準鏡位最近點，看前方 LOOK_AHEAD
+function roadShot(c, roads, ctx) {
+  const type = 'road';
+  const sec = SHOT_SEC[type];
   const len = ROAD_SPEED * sec;
   const rd = nearestRoad(roads, c.x, c.z, len + 40);
-  if (!rd) return makeShot('orbit', stop, roads);
+  if (!rd) return makeShot('orbit', c, roads, ctx);
   const info = { pts: rd.road.pts, cum: rd.road.cum, length: rd.road.length };
   const s0 = clamp(rd.s - len / 2, 0, rd.road.length - len);
   const tmp = { x: 0, z: 0 };
@@ -393,7 +536,7 @@ function samplePath(parts, floorAt) {
   const segments = [];
   let t0 = 0;
   for (const p of parts) {
-    segments.push({ type: p.type, name: p.name || '', key: p.key || '', t0: t0 * scale, t1: (t0 + p.sec) * scale, sec: p.sec * scale });
+    segments.push({ type: p.type, name: p.name || '', key: p.key || '', t0: t0 * scale, t1: (t0 + p.sec) * scale, sec: p.sec * scale, dist: p.dist, alt: p.alt, occ: p.occ });
     t0 += p.sec;
   }
   return { n, duration, px, py, pz, lx, ly, lz, floor, segments };
@@ -432,8 +575,9 @@ export function buildTour(deps) {
   const stops = orderStops(tourStops(deps));
   if (stops.length === 0) return null;
   const roads = deps.roads || [];
+  const ctx = { blocked: makeOcclusion(deps.terrain, deps.buildings || []), floorAt };
   const shots = stops.map((s, i) => {
-    const sh = makeShot(SHOT_TYPES[i % SHOT_TYPES.length], s, roads);
+    const sh = makeShot(SHOT_TYPES[i % SHOT_TYPES.length], s, roads, ctx);
     sh.name = s.name;
     sh.key = s.key;
     return sh;
@@ -567,7 +711,7 @@ export function slerpQuat(a, b, k, out) {
 }
 
 // 控制器：main.js 只接線（updateAttract → update；startGame → stop；updateGame rig.update 之後 → handoff；quitToMenu → start）
-// opts = { camera, terrain, buildings, namedBuildings, roads, basins, stall, reducedMotion: () => boolean, focus?（寫入 { x, y, z } 的物件） }
+// opts = { camera, terrain, buildings, namedBuildings, roads, basins, stall, reducedMotion: () => boolean, focus?（寫入 { x, y, z } 的物件）, fade?: (alpha 0–1) => void }
 export function createMenuTour(opts) {
   const { camera } = opts;
   const reduced = typeof opts.reducedMotion === 'function' ? opts.reducedMotion : () => false;
@@ -578,13 +722,31 @@ export function createMenuTour(opts) {
   const look = { x: 0, y: 0, z: 0 };
   const q = { x: 0, y: 0, z: 0, w: 1 };
   const qo = { x: 0, y: 0, z: 0, w: 1 };
-  // 內插：from = 起點鏡頭（位置 + 四元數），t / dur；kind 'in'（回到巡覽）| 'out'（接回玩家）
-  const blend = { kind: null, t: 0, dur: 1, fx: 0, fy: 0, fz: 0, fq: { x: 0, y: 0, z: 0, w: 1 } };
+  // 內插：from = 起點鏡頭（位置 + 四元數），t / dur；kind 'in'（回到巡覽）| 'out'（接回玩家）；fade = 走淡出淡入（不移動鏡頭）
+  //   a0 = 開始時的淡出量（上一段淡出淡入被打斷時由此接續，不突然變亮）
+  const blend = { kind: null, t: 0, dur: 1, fade: false, a0: 0, fx: 0, fy: 0, fz: 0, fq: { x: 0, y: 0, z: 0, w: 1 } };
+  // 平滑內插的高度剖面（u 等分 PROFILE_N 格，開始內插時建一次）：prof = 鏡頭高度、profT = 建剖面時預測的目標高度
+  const prof = new Float64Array(PROFILE_N + 1);
+  const profT = new Float64Array(PROFILE_N + 1);
+  const profF = new Float64Array(PROFILE_N + 1); // 各樣本水平位置的 floor（兩端遮罩區 = −∞）
+  const floorAt = (full || slow).floorAt;
+  const tp = { x: 0, y: 0, z: 0 };
+  const tl = { x: 0, y: 0, z: 0 };
+  // 目標預測 predict(秒, out)：'in' = 巡覽路徑（時間從開始內插時接續）；'out' = 第一幀 handoff 的玩家鏡頭（之後的漂移在 applyBlend 補上）
+  let predict = null;
+  let alpha = 0; // 目前淡出量（0 = 全亮、1 = 全黑），變動時呼叫 opts.fade(alpha)
   let path = reduced() ? slow : full || slow;
   let time = 0;
   let active = true;
   let first = true;
 
+  const setFade = (a) => {
+    if (a === alpha) return;
+    alpha = a;
+    if (typeof opts.fade === 'function') opts.fade(a);
+  };
+  // 高度先行：回到巡覽（in）先升高再橫移；接回玩家（out）先橫移再下降——貼近街面的那一端走近乎垂直的線，不斜穿旁邊的建築
+  const heightK = (u) => (blend.kind === 'in' ? smooth(Math.min(1, u * 2)) : smooth(Math.max(0, u * 2 - 1)));
   const grab = () => {
     blend.fx = camera.position.x;
     blend.fy = camera.position.y;
@@ -593,31 +755,102 @@ export function createMenuTour(opts) {
     blend.fq.y = camera.quaternion.y;
     blend.fq.z = camera.quaternion.z;
     blend.fq.w = camera.quaternion.w;
+    blend.a0 = alpha;
   };
-  const beginBlend = (kind, tx, ty, tz) => {
+  // 建高度剖面（秒數 dur）：先取 max(原高度曲線, 沿途 floor)（兩端 HANDOFF_MASK_R 內不套 floor），
+  //   再做 HANDOFF_VRATE 的上包絡（提早爬升 / 延後下降），最後與兩端點出發的同速率錐取小——相鄰樣本高度差 ≤ HANDOFF_VRATE × 樣本秒數、
+  //   兩端精確接上起點與目標；回傳滿足這些條件所需的最短秒數（> dur 表示此 dur 不夠）
+  const buildProfile = (dur) => {
+    const N = PROFILE_N;
+    const { fx, fy, fz } = blend;
+    for (let i = 0; i <= N; i++) {
+      const u = i / N;
+      predict(u * dur, tp);
+      const k = smooth(u);
+      const x = fx + (tp.x - fx) * k;
+      const z = fz + (tp.z - fz) * k;
+      prof[i] = fy + (tp.y - fy) * heightK(u);
+      profT[i] = tp.y;
+      profF[i] = Math.hypot(x - fx, z - fz) > HANDOFF_MASK_R && Math.hypot(x - tp.x, z - tp.z) > HANDOFF_MASK_R ? floorAt(x, z) : -Infinity;
+    }
+    // 樣本間線性內插：每個樣本不低於自己與前後樣本的 floor（建築 floor 區寬 ≥ 2 × BUILDING_PAD，遠大於樣本間距 → 區間內不漏邊）
+    for (let i = 0; i <= N; i++) prof[i] = Math.max(prof[i], profF[Math.max(0, i - 1)], profF[i], profF[Math.min(N, i + 1)]);
+    const yEnd = profT[N];
+    let need = 0;
+    for (let i = 1; i < N; i++) {
+      const u = i / N;
+      need = Math.max(need, (prof[i] - fy) / (HANDOFF_VRATE * u), (prof[i] - yEnd) / (HANDOFF_VRATE * (1 - u)));
+    }
+    const k = (HANDOFF_VRATE * dur) / N;
+    for (let i = 1; i <= N; i++) if (prof[i] < prof[i - 1] - k) prof[i] = prof[i - 1] - k;
+    for (let i = N - 1; i >= 0; i--) if (prof[i] < prof[i + 1] - k) prof[i] = prof[i + 1] - k;
+    for (let i = 0; i <= N; i++) prof[i] = Math.min(prof[i], fy + k * i, yEnd + k * (N - i));
+    return need;
+  };
+  // 規劃內插（grab、predict 已設好）：距離 > HANDOFF_FADE_DIST，或 HANDOFF_MAX 秒內滿足不了 HANDOFF_VRATE → 淡出淡入 FADE_SEC；
+  //   否則平滑內插，秒數 = 距離 ÷ HANDOFF_SPEED（夾 HANDOFF_MIN–HANDOFF_MAX），高度需要時再拉長（≤ HANDOFF_MAX）
+  const planBlend = () => {
+    predict(0, tp);
+    const dist = Math.hypot(tp.x - blend.fx, tp.y - blend.fy, tp.z - blend.fz);
+    blend.t = 0;
+    blend.fade = dist > HANDOFF_FADE_DIST;
+    if (blend.fade) {
+      blend.dur = FADE_SEC;
+      return;
+    }
+    let dur = clamp(dist / HANDOFF_SPEED, HANDOFF_MIN, HANDOFF_MAX);
+    for (let it = 0; ; it++) {
+      const need = buildProfile(dur);
+      if (need <= dur + 1e-9) break;
+      if (need > HANDOFF_MAX || it >= 3) {
+        blend.fade = true;
+        dur = FADE_SEC;
+        break;
+      }
+      dur = Math.min(HANDOFF_MAX, need * 1.02);
+    }
+    blend.dur = dur;
+  };
+  const beginBlend = (kind) => {
     grab();
     blend.kind = kind;
-    blend.t = 0;
-    blend.dur = clamp(Math.hypot(tx - blend.fx, ty - blend.fy, tz - blend.fz) / HANDOFF_SPEED, HANDOFF_MIN, HANDOFF_MAX);
+    const p = path;
+    const t0 = time;
+    predict = (t, o) => samplePathAt(p, t0 + t, o, tl);
+    planBlend();
   };
-  // 依 blend 進度把鏡頭從 from 內插到 (x, y, z, qTo)；回傳是否仍在內插
+  // 依 blend 進度把鏡頭從 from 內插到 (x, y, z, qTo)（目標的即時鏡位）；回傳是否仍在內插
   const applyBlend = (dt, x, y, z, qTo) => {
     blend.t += dt;
     const u = clamp(blend.t / blend.dur, 0, 1);
-    const k = smooth(u);
-    // 高度先行：回到巡覽（in）先升高再橫移；接回玩家（out）先橫移再下降——貼近街面的那一端走近乎垂直的線，不斜穿旁邊的建築
-    const ky = blend.kind === 'in' ? smooth(Math.min(1, u * 2)) : smooth(Math.max(0, u * 2 - 1));
-    const bx = blend.fx + (x - blend.fx) * k;
-    let by = blend.fy + (y - blend.fy) * ky;
-    const bz = blend.fz + (z - blend.fz) * k;
-    // 保險：途中不低於 floor；權重在兩端 25% 內漸變到 0（兩端分別是玩家鏡頭與巡覽鏡位，本身就合法）
-    const fl = path.floorAt(bx, bz);
-    if (by < fl) by += (fl - by) * smooth(Math.min(1, 4 * Math.min(u, 1 - u)));
-    camera.position.set(bx, by, bz);
-    slerpQuat(blend.fq, qTo, k, qo);
-    camera.quaternion.set(qo.x, qo.y, qo.z, qo.w);
+    if (blend.fade) {
+      // 前半：停在起點淡出到全黑；後半（全黑那一幀切鏡）：直接用目標鏡位淡入
+      if (u < 0.5) {
+        setFade(blend.a0 + (1 - blend.a0) * smooth(u * 2));
+        camera.position.set(blend.fx, blend.fy, blend.fz);
+        camera.quaternion.set(blend.fq.x, blend.fq.y, blend.fq.z, blend.fq.w);
+      } else {
+        setFade(smooth(2 - 2 * u));
+        camera.position.set(x, y, z);
+        camera.quaternion.set(qTo.x, qTo.y, qTo.z, qTo.w);
+      }
+    } else {
+      if (blend.a0 > 0) setFade(blend.a0 * (1 - smooth(Math.min(1, u * 4))));
+      const k = smooth(u);
+      const bx = blend.fx + (x - blend.fx) * k;
+      const bz = blend.fz + (z - blend.fz) * k;
+      // 高度 = 剖面（已含 floor 與速率限制）+ 目標實際高度與預測的差（依高度權重補上，結束時精確 = 目標）
+      const s = u * PROFILE_N;
+      const i = Math.min(PROFILE_N - 1, Math.floor(s));
+      const f = s - i;
+      const by = prof[i] + (prof[i + 1] - prof[i]) * f + (y - (profT[i] + (profT[i + 1] - profT[i]) * f)) * heightK(u);
+      camera.position.set(bx, by, bz);
+      slerpQuat(blend.fq, qTo, k, qo);
+      camera.quaternion.set(qo.x, qo.y, qo.z, qo.w);
+    }
     if (blend.t >= blend.dur) {
       blend.kind = null;
+      setFade(0);
       return false;
     }
     return true;
@@ -636,6 +869,16 @@ export function createMenuTour(opts) {
     get blending() {
       return blend.kind;
     },
+    // 目前內插是否走淡出淡入、目前淡出量（0–1）、內插秒數
+    get fading() {
+      return !!blend.kind && blend.fade;
+    },
+    get fade() {
+      return alpha;
+    },
+    get blendSec() {
+      return blend.dur;
+    },
     get path() {
       return path;
     },
@@ -650,8 +893,7 @@ export function createMenuTour(opts) {
         // 偏好切換：從當下鏡頭內插到新路徑（新路徑時間從 0 起）
         path = wantSlow ? slow : full;
         time = 0;
-        samplePathAt(path, time, pos, look);
-        beginBlend('in', pos.x, pos.y, pos.z);
+        beginBlend('in');
       }
       time = (time + dt) % path.duration;
       samplePathAt(path, time, pos, look);
@@ -688,7 +930,14 @@ export function createMenuTour(opts) {
       q.y = camera.quaternion.y;
       q.z = camera.quaternion.z;
       q.w = camera.quaternion.w;
-      if (blend.dur === null) blend.dur = clamp(Math.hypot(tx - blend.fx, ty - blend.fy, tz - blend.fz) / HANDOFF_SPEED, HANDOFF_MIN, HANDOFF_MAX);
+      if (blend.dur === null) {
+        predict = (t, o) => {
+          o.x = tx;
+          o.y = ty;
+          o.z = tz;
+        };
+        planBlend();
+      }
       return applyBlend(dt, tx, ty, tz, q);
     },
     // 回到主選單：恢復巡覽（時間接續），從當下鏡頭內插回路徑
@@ -696,8 +945,7 @@ export function createMenuTour(opts) {
       if (active) return;
       active = true;
       first = false;
-      samplePathAt(path, time, pos, look);
-      beginBlend('in', pos.x, pos.y, pos.z);
+      beginBlend('in');
     },
   };
 }

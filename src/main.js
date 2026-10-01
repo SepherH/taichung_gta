@@ -1703,6 +1703,11 @@ async function init() {
   const reduceMotionMq = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   const tourStall = stallSlots.find((s) => s.key === STALL_BASE_KEY) || stallSlots[0];
   const attractFocus = new THREE.Vector3();
+  // 進出遊戲距離過遠（> HANDOFF_FADE_DIST 300 m）時的淡出淡入：最小全螢幕黑幕（蓋 3D 畫面、在 HUD z 10 與選單 z 70 之下、不吃滑鼠）
+  const tourFade = document.createElement('div');
+  tourFade.id = 'tour-fade';
+  tourFade.style.cssText = 'position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:8;';
+  document.body.appendChild(tourFade);
   const tour = createMenuTour({
     camera,
     terrain,
@@ -1713,6 +1718,9 @@ async function init() {
     stall: tourStall ? { x: tourStall.pl.x, z: tourStall.pl.z } : { ...NIGHT_MARKET_DELIVERY.pickup, source: 'NIGHT_MARKET_DELIVERY.pickup' },
     reducedMotion: () => !!(reduceMotionMq && reduceMotionMq.matches),
     focus: attractFocus,
+    fade: (a) => {
+      tourFade.style.opacity = String(a);
+    },
   });
   const updateAttract = (dt) => {
     tour.update(dt);

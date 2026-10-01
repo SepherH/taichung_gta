@@ -755,10 +755,13 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - **型態**：`SHOT_TYPES` orbit 12 s / dolly 9 s / crane 10 s / road 11 s 依序輪替（road = 最近主要道路中心線上方 `ROAD_ALT` 10 m、14 m/s）；段間 Hermite 滑行（位置與速度 C1 連續、弧頂加高），秒數 = 距離 ÷ 45 m/s，夾 4–14 s；目前一輪約 138 s
 - **不穿地 / 不穿建物**：載入時以 10 Hz 取樣整輪，水平與看點循環平滑 1.2 s；高度 ≥ `floor` = max(地形（湖面取較高）+ `SAFE_CLEAR` 4 m, 水平 10 m 內建築頂 + 6 m)，並以 ≤ 12 m/s 的前後向包絡提早爬升；執行期 Catmull-Rom 內插、不配置物件
 - **時間步（§20）**：巡覽計時屬**渲染時間**——`update(dt)` 吃 `core/loop.js` 的渲染 `dt`（≤ `MAX_FRAME_DT`），不吃 `simDt`；卡頓丟子步時運鏡不變慢、與幀率無關（30 / 60 Hz 同時刻同鏡位）。暫停 / 切背景時 loop 不呼叫 `updateAttract`，計時停住。世界照常：`updateAttract` 仍為 `dayNight.update → stepWorld → updateEnvironment(dt, worldStep.simDt)`，模擬部分照舊吃 simDt；center 改為巡覽看點（`attractFocus`，原為老虎城中心）
-- **進出遊戲**：`startGame` → `tour.stop()`；`updateGame` 在 `rig.update` 之後 `tour.handoff(dt)`，1–2.5 s（距離 ÷ 80 m/s）由巡覽最後鏡位內插到 rig 鏡位（水平 smoothstep、高度後半程才下降、四元數 slerp、途中不低於 floor），之後不再動鏡頭；`quitToMenu` → `tour.start()`（時間接續，先升高再橫移回路徑）。不讀寫存檔、不碰遊戲狀態
+- **進出遊戲**：`startGame` → `tour.stop()`；`updateGame` 在 `rig.update` 之後 `tour.handoff(dt)`；`quitToMenu` → `tour.start()`（時間接續）。不讀寫存檔、不碰遊戲狀態。內插方式（M6F）：
+  - **平滑內插**（距離 ≤ `HANDOFF_FADE_DIST` 300 m）：秒數 = 距離 ÷ 80 m/s（夾 1–2.5 s），水平 smoothstep、四元數 slerp；高度在開始內插時沿預定水平路徑建 90 格剖面（原高度曲線〔out 後半程才下降 / in 先升高〕與沿途 `floor` 取大、兩端 `HANDOFF_MASK_R` 12 m 內不套 floor），再做 `HANDOFF_VRATE` 90 m/s 的上包絡（提早爬升 / 延後下降）並與兩端點出發的同速率錐取小 → 相鄰幀高度變化 ≤ 1.5 m（60 Hz）且不低於 floor；速率不夠時把秒數拉長（≤ 2.5 s）。回主選單時目標 = 巡覽路徑（依時間預測），結束後不再動鏡頭
+  - **淡出淡入**（距離 > 300 m，或 2.5 s 內滿足不了 90 m/s 高度速率）：`FADE_SEC` 0.6 s——前 0.3 s 停在起點淡出到全黑、全黑那一幀切到目標（玩家鏡頭 / 巡覽當前鏡位）、後 0.3 s 淡入；被打斷時由當下淡出量接續。黑幕 = main.js 建的最小 DOM 元素 `#tour-fade`（全螢幕黑、`pointer-events:none`、z-index 8：蓋 3D 畫面、在 HUD 10 與選單 70 之下），經 `opts.fade(alpha)` 寫 `opacity`；模組本身不碰 DOM（`fading` / `fade` / `blendSec` 可讀）
+- **取景（M6F）**：orbit / dolly / crane 在 `makeShot` 做看點視線遮擋檢查（`makeOcclusion` + `shotOcclusion`）：每段取 7 幀 × 5 條射線（看點、頂 90%、底 20%、左右兩側 50% 高）每 4 m 取樣，落在其他建築（同名地標各棟不算）輪廓內且低於屋頂即算被擋；方位角以朝最近道路為預設、每 22.5° 一個候選（環繞另加半徑 ×1 / ×1.4、高度 +0 / +20 m），取遮擋率最低者（要少 > 2% 才換）。目前老虎城環繞起始方位 30° → −36°（原 43% → 0%）、捷運市政府站環繞 32° → 145° 且高 35 → 55 m（原 40% → 0%）。有輪廓且高 ≥ 10 m 的推軌：整條軌道離立面 ≥ max(`DOLLY_GAP_MIN` 70 m, 2 × 高)、高度 = 地面 + max(8, 0.8 × 高)——市政府離立面約 35 → 90 m、高 22.5 → 36 m
 - **減少動態效果**：main.js 注入 `reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches`；為真時改走老虎城固定高度慢速環繞（`REDUCED_OMEGA` 0.03 rad/s、半徑 150 m、高度 max(70 m, 整圈 floor)），偏好中途切換時內插轉場
-- **效能**：每幀只做一次 Catmull-Rom + lookAt 四元數（node 實測 < 1 µs）；建路徑約 10 ms（載入時一次）；手機 / low 檔同樣生效
-- **回歸**：`node tools/test/p6-m6.mjs`（鏡位、型態秒數、60 Hz 每幀位移 ≤ 1.6 m / 轉角 ≤ 1.5°、全程 ≥ 地形 + 4 m 且不在建築內、循環接縫、handoff / start、減少動態效果、main.js 接線）
+- **效能**：每幀只做一次 Catmull-Rom + lookAt 四元數（node 實測 < 1 µs）；建路徑約 30 ms（含取景遮擋檢查，載入時一次）；內插剖面在開始內插時建一次（90 格）；手機 / low 檔同樣生效
+- **回歸**：`node tools/test/p6-m6.mjs`（鏡位、型態秒數、60 Hz 每幀位移 ≤ 1.6 m / 轉角 ≤ 1.5°、全程 ≥ 地形 + 4 m 且不在建築內、循環接縫、handoff / start、進出遊戲整輪掃描〔平滑內插每幀高度變化 ≤ 1.6 m、不低於 floor、> 300 m 一律淡出淡入 ≤ 0.6 s 且只在全黑時切鏡〕、每段看點視線遮擋率 ≤ 10%、市政府推軌離立面 ≥ 90 m、減少動態效果、main.js 接線）
 
 ---
 
