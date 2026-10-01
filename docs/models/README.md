@@ -120,6 +120,45 @@ blender -b -P tools/blender/characters/build_characters.py
 blender -b -P tools/blender/vehicles/build_vehicles.py
 ```
 
+## 垃圾車（事件車，`garbage_truck`）
+
+| 檔案 | 用途 |
+|---|---|
+| `tools/blender/vehicles/garbage_truck.py` | 來源腳本（**不在** `build_vehicles.py` 的 `MODULES` 內，單獨執行） |
+| `assets/blender/vehicles/garbage_truck.blend`、`garbage_truck_side.jpg` | Blender 來源檔與車斗側面貼圖原檔（512×256） |
+| `public/models/vehicles/garbage_truck.glb` | 遊戲用（貼圖已內嵌） |
+| `docs/models/garbage_truck-manifest-entry.json` | 建議的 `vehicles/manifest.json` 條目（腳本產出；manifest 本身未改，由開發線接） |
+| `docs/models/previews/garbage_truck-front34.png` / `-side.png` / `-rear34.png` | 三視角預覽 |
+
+臺灣常見後裝壓縮式垃圾車的一般外觀、虛構塗裝（黃色車身 + 綠色腰線；車斗兩側白底綠色回收箭頭貼圖，無文字、無徽章；空白車牌）。
+節點與座標契約同其他車：`body` + `wheel_fl` / `wheel_fr` / `wheel_rl` / `wheel_rr`，另多一個 `decal` 節點（車斗兩側貼圖，獨立網格、不參與 `paint` 換色）。
+材質 `beacon` 是駕駛室頂與尾門頂的琥珀色警示燈（帶 emission，未列入 `vehicle-model.js` 的 `EMISSIVE_MATERIALS`）。
+車尾（glTF −Z 面）下方深色凹槽是投入口，兩側有扶手、下方有站人踏板。
+
+```sh
+blender -b -P tools/blender/vehicles/garbage_truck.py
+```
+
+接進遊戲時注意：glb 內嵌 JPEG 貼圖，node 測試以 `GLTFLoader` 解析前要先 `globalThis.self ??= globalThis`（同 `tools/test/characters.mjs` 載 hero.glb 的作法），
+否則整個 parse 失敗、該車型退回程序化車；補上後貼圖在 node 端降級成無貼圖（瀏覽器端正常）。
+
+# 道具（public/models/props/）
+
+| 檔案 | 用途 |
+|---|---|
+| `tools/blender/props/night_market_stall.py` | 夜市攤車來源腳本（借用 `vehicles/vehicle_lib.py` 的造型 / 材質 / 預覽函式） |
+| `assets/blender/props/night_market_stall.blend`、`night_market_stall_sign.jpg` | Blender 來源檔與招牌貼圖原檔（512×192） |
+| `public/models/props/night_market_stall.glb`、`manifest.json` | 遊戲用；manifest 有寬 / 深 / 高、取餐點 `counter`、面數、位元組數 |
+| `docs/models/previews/night_market_stall-front34.png` / `-rear34.png` | 預覽 |
+
+夜市不鏽鋼攤車 + 紅白遮雨棚 + 招牌（虛構店名「阿福鹽酥雞」，本機生圖，無真實商標）。原點在地面、外接盒中心正下方，
+顧客面（招牌、展示櫃）朝 glTF +Z；節點 `body` + `sign`；`bulb` 材質帶 emission。`counter` 是取餐點（glTF 座標）。
+目前沒有程式載入 `props/manifest.json`，給「夜市時段外送」取餐點擺放用，接法由開發線決定。
+
+```sh
+blender -b -P tools/blender/props/night_market_stall.py
+```
+
 # 可平鋪貼圖（public/art/tiles/）
 
 由 `tools/blender/tiles/build_tiles.py` 產生：由本機生圖工具產出的材質底圖（原圖未入 repo；重建時以環境變數 `TILE_SRC_DIR` 指定原圖目錄，缺檔改純程序生成）
