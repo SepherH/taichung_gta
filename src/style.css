@@ -559,6 +559,22 @@ body {
   text-align: center;
 }
 
+/* 鏡頭段位提示（src/ui/cam-view-hint.js，hud.showCamView）：V 鍵 / 觸控「視角」鈕切段後顯示 1.2 s；準星正下方置中、不吃指標事件 */
+#cam-view-hint {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 40px);
+  transform: translateX(-50%);
+  width: max-content;
+  padding: 4px 14px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 14px;
+  font-size: calc(15px * var(--hud-scale, 1));
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* ---------- 授權標示（ODbL 要求常駐；貼最邊角、小字半透明、不吃指標事件） ---------- */
 /* 桌機：右下角。左下是小地圖群組（left/bottom 18px 起）；右下的時速錶群組底緣在 bottom 28px、常駐按鍵提示底緣在 bottom 24px，
    本標示高約 15px（bottom 4px → 約 19px）位於其下方，不重疊（tools/test/attribution.mjs 以規則數值逐尺寸推算）
@@ -1213,6 +1229,38 @@ body.touch-drive .tbtn[data-show="walk"] {
 
 .tbtn.slot-tl3 {
   left: calc(252px + env(safe-area-inset-left));
+}
+
+/* 視角鈕（tb-view，slot-view，步行 / 駕駛共用；虛擬 KeyV 循環鏡頭段位）：
+   橫向 = 右上第三格（右 148–204 / y 12–68，喇叭 top1 / 電台 top2 的左側；與左上小鈕 tl1–tl3 x 140–300 不重疊）；
+   極矮橫向（高 < 380）右上被武器面板（weapons.css，右 76–188、top 26–54）佔用 → 左移到右 196–244、48px；
+   直向右上排不下（右上第三格會壓到左上 tl2 / tl3）→ 移到左上小鈕列下方、小地圖右側（x 136–180、y 114–158；
+   在 #status 76–106 下方、提示膠囊 180 上方，直向新手提示卡 x ≥ 50% + 4 在其右側） */
+.tbtn.slot-view {
+  top: calc(12px + env(safe-area-inset-top));
+  right: calc(148px + env(safe-area-inset-right));
+  width: 56px;
+  height: 56px;
+  font-size: 14px;
+}
+
+@media (orientation: landscape) and (max-height: 379px) {
+  .tbtn.slot-view {
+    right: calc(196px + env(safe-area-inset-right));
+    width: 48px;
+    height: 48px;
+  }
+}
+
+@media (orientation: portrait) {
+  .tbtn.slot-view {
+    top: calc(114px + env(safe-area-inset-top));
+    right: auto;
+    left: calc(136px + env(safe-area-inset-left));
+    width: 44px;
+    height: 44px;
+    font-size: 13px;
+  }
 }
 
 .tbtn[hidden] {

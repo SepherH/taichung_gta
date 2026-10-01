@@ -13,7 +13,7 @@
 // slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
 //   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊；駕駛時橫向移到下車鈕左側、直向移到右半下車鈕正下方，見 style.css slot-interact）/
 //   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、圖鑑，由左往右，排在小地圖右側；
-//   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）
+//   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）/ view（視角鈕 tb-view：橫向右上第三格、直向左上小鈕列下方，見 style.css slot-view）
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
 // 攻擊鈕：id 為 ATTACK_ID 或 label 在 ATTACK_LABELS 內的按鈕一律改放 attack slot
 // 已移除的舊按鈕 id（DEPRECATED_IDS：翻正、靈敏度、舊揮拳、油門 / 煞車鈕）再註冊會被忽略（回傳 null），由 F 扶起與設定頁滑桿取代
@@ -30,7 +30,7 @@ const ATTACK_ID = 'tb-attack';
 const ATTACK_LABELS = ['攻擊', '揮拳'];
 export const DEPRECATED_IDS = ['tb-flip', 'tb-sens', 'tb-punch', 'tb-gas', 'tb-brake'];
 
-export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'interact', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3'];
+export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'interact', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3', 'view'];
 
 const DEFAULT_BUTTONS = [
   // 步行
@@ -48,6 +48,8 @@ const DEFAULT_BUTTONS = [
   // 共用：左上三顆小鈕
   { id: 'tb-pause', label: '暫停', code: 'Escape', mode: 'tap', slot: 'tl1', showWhen: 'always' },
   { id: 'tb-map', label: '地圖', code: 'KeyM', mode: 'tap', slot: 'tl2', showWhen: 'always' },
+  // 視角（I6a，§23.2）：虛擬 KeyV = core/actions camera → main.js rig.update cycleView（段位寫回 settings、HUD 顯示「鏡頭：近 / 中 / 遠」）
+  { id: 'tb-view', label: '視角', code: 'KeyV', mode: 'tap', slot: 'view', showWhen: 'always' },
   { id: 'tb-phone', label: '手機', code: 'KeyT', mode: 'tap', slot: 'tl3', showWhen: 'always', hidden: true },
   // 圖鑑：整合層以同 id 重新註冊並給 onTap（開圖鑑）後才顯示；步行專屬（駕駛中不開全螢幕面板）
   { id: 'tb-guide', label: '圖鑑', onTap: () => {}, mode: 'tap', slot: 'tl3', showWhen: 'walk', hidden: true },

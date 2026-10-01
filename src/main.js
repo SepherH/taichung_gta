@@ -46,7 +46,7 @@ import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
 import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
 import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
-import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp } from './prop-model.js';
+import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
 import { CombatSystem, pedKnockdownPayload } from './combat.js';
 import { Player, PLAYER_RADIUS } from './player.js';
 import { VehicleManager, VEHICLE_TYPES, driveControls } from './vehicle.js';
@@ -85,6 +85,8 @@ import { createAudio } from './audio/index.js';
 import { createRadio } from './audio/radio.js';
 import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions, trackMissionStats } from './missions/index.js';
 import { NIGHT_MARKET_DELIVERY } from './missions/events.js';
+import { applyBeacon } from './missions/garbage-truck.js';
+import { camViewSettingKey, camViewsFromSettings, isCamViewKey } from './ui/cam-view-hint.js';
 import { buildRoadGraph, createNavigator, findRoute, projectToGraph } from './navigation.js';
 import { createBigMap } from './map/big-map.js';
 import { createCheckins } from './collect/checkins.js';
@@ -358,8 +360,9 @@ function stallPlacement(pickup, depth) {
 }
 
 // 夜間發光登記（daynight registerNight）；同一共用材質只登記一次（與 vehicle.js registerModelNight 同上限：glb 原 emissiveIntensity）
+// 名稱含 beacon 的材質（垃圾車警示燈）不登記：亮度由 syncGarbageTruck 每幀 applyBeacon 設定，登記了會被 daynight 每幀覆寫（§23.5）
 function registerNightOnce(m) {
-  if (!m || nightMaterials.some((e) => e.material === m)) return;
+  if (!m || (typeof m.name === 'string' && m.name.includes('beacon')) || nightMaterials.some((e) => e.material === m)) return;
   registerNight(m, m.emissiveIntensity || 1);
 }
 
@@ -443,14 +446,14 @@ async function init() {
   await progress('載入角色與車輛模型…');
   await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]);
   // 夜市攤車（prop-model.js）：夜市外送取餐點旁、離牆較遠的路側，正面朝道路；各畫質（含 low）都擺；glb 缺檔 → createPropModel null，不擺
-  // stallBox：擺好後的外接盒（底面中心 + yaw + manifest 尺寸），物理世界建好後補靜態碰撞體
+  // stallBox：propColliderBox（§23.1 定值：半尺寸 1.11 / 1.52 / 0.78，寬含遮雨棚外伸），物理世界建好後補靜態碰撞體
   const stall = createPropModel('night_market_stall');
   let stallBox = null;
   if (stall) {
     const info = propInfo('night_market_stall');
     const spot = stallPlacement(NIGHT_MARKET_DELIVERY.pickup, info ? info.depth : 1.5);
     const pl = placeProp(stall, { ...spot, y: heightAt(spot.x, spot.z) });
-    if (info) stallBox = { ...pl, width: info.width, depth: info.depth, height: info.height };
+    stallBox = propColliderBox('night_market_stall', pl);
     scene.add(stall);
     for (const m of propEmissiveMaterials('night_market_stall')) registerNightOnce(m);
   }
@@ -522,6 +525,7 @@ async function init() {
   const rig = new CameraRig(camera, occluder, terrain);
   rig.yaw = spawn.yaw;
   rig.playerHeight = player.height; // 步行目標點依主角身高
+  rig.setViews(camViewsFromSettings(settings)); // 鏡頭段位（§23.2：camWalkView / camDriveView，缺鍵 = 預設中段）
 
   await progress('繪製小地圖…');
   const hud = new HUD();
@@ -754,7 +758,8 @@ async function init() {
   });
   const graph = buildRoadGraph(surfaceRoads);
   // 垃圾車車體：manifest garbage_truck 經 createVehicleModel 建立的純視覺模型（不建剛體、不進 VehicleManager / traffic → 不可上車 / 劫車、不進車流）；
-  // 每幀 syncGarbageTruck 依 missions.truckState() 擺位 / 朝向，null 隱藏；beacon 等發光材質沿用 registerNight（夜間發光）；glb 缺檔 → 無車體（事件照常）
+  // 每幀 syncGarbageTruck 依 missions.truckState() 擺位 / 朝向，null 隱藏；車燈等發光材質沿用 registerNight（夜間發光），
+  // beacon（警示燈）不登記 daynight，改由 applyBeacon(模板材質, tk.beaconLevel) 每幀設亮度（脈衝 × 日夜，garbage-truck.js）；glb 缺檔 → 無車體（事件照常）
   const truckModel = createVehicleModel('garbage_truck');
   const truckMesh = truckModel ? truckModel.root : null;
   if (truckMesh) {
@@ -764,6 +769,7 @@ async function init() {
     scene.add(truckMesh);
     for (const m of vehicleTemplateMaterials('garbage_truck')) if (EMISSIVE_MATERIALS.includes(m.name)) registerNightOnce(m);
   }
+  const truckMaterials = truckMesh ? vehicleTemplateMaterials('garbage_truck') : []; // 模板共用材質（applyBeacon 只動名稱含 beacon 者）
   const truckWheelR = truckModel ? truckModel.spec.wheelRadius || 0.46 : 0.46;
   // simDt：與 missions 推進車體的時間相同（輪子滾動角 = 行駛距離 / 輪徑）
   const syncGarbageTruck = (simDt) => {
@@ -776,6 +782,7 @@ async function init() {
     truckMesh.visible = true;
     truckMesh.position.set(tk.x, heightAt(tk.x, tk.z), tk.z);
     truckMesh.rotation.y = tk.heading;
+    applyBeacon(truckMaterials, tk.beaconLevel);
     const roll = ((tk.speed || 0) * simDt) / truckWheelR;
     if (roll) for (const w of truckMesh.userData.wheels) w.rotation.x += roll;
   };
@@ -1196,6 +1203,7 @@ async function init() {
       if (!showFps) hud.setFps?.(null);
     } else if (key === 'showHints') hud.setHintsEnabled?.(!!value);
     else if (key === 'weather') applyWeatherPref(value);
+    else if (isCamViewKey(key)) rig.setViews(camViewsFromSettings(settings)); // 設定頁改段位（V 鍵寫回的同值再套一次無副作用）
   });
   bus.on('weather:setting', (e) => applyWeatherPref(e && e.value));
 
@@ -1280,7 +1288,12 @@ async function init() {
   };
 
   // ---------- Phase 4 每幀輔助 ----------
-  const missionCtx = { x: 0, z: 0, driving: false };
+  const missionCtx = { x: 0, z: 0, driving: false, night: 0 }; // night：dayNight.night（0–1），垃圾車警示燈亮度
+  // V 鍵 / 觸控「視角」鈕切段（rig.update onViewChange，同幀最多一次）→ 寫回設定、HUD 顯示「鏡頭：近 / 中 / 遠」1.2 s
+  const onCamViewChange = (kind, index) => {
+    settings.set(camViewSettingKey(kind), index);
+    hud.showCamView(index);
+  };
   let lastThrottle = 0;
   // 面板開 / 關的切換：開啟 → 停輸入、放開滑鼠鎖定（不觸發暫停選單）、駕駛中踩煞車；關閉 → 恢復輸入
   let panelWas = false;
@@ -1479,6 +1492,7 @@ async function init() {
     missionCtx.x = focus.x;
     missionCtx.z = focus.z;
     missionCtx.driving = driving;
+    missionCtx.night = dayNight.night;
     // 委託 / 外送 / 垃圾車屬模擬時間（§20）：吃本幀實際推進的 simDt（stepWorld 之後才讀得到；暫停 / 面板開啟時 updateGame 不跑）
     missions.update(worldStep.simDt, missionCtx);
     syncGarbageTruck(worldStep.simDt);
@@ -1501,6 +1515,7 @@ async function init() {
       clearRadius: driving ? Math.hypot(v.spec.length, v.spec.width) / 2 : 0,
       clearHeight: driving ? v.spec.height + 0.3 : 0,
       aim: aiming,
+      onViewChange: onCamViewChange,
     });
 
     const loc = describeLocation(focus.x, focus.z);

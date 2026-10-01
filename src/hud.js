@@ -28,12 +28,14 @@
 //   觸控換台鈕 tb-radio（top2，駕駛專屬；沿用 touch.js 按鈕樣式 / pointer 處理，送虛擬鍵 KeyQ = core/actions radioNext）
 //   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）與 'event-truck'（垃圾車，會移動）著色且超出半徑時貼邊
 //   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」、'garbage'（垃圾車入帳）加「清運」
+// Phase 6（I6a）：hud.showCamView(index) → 畫面上方短暫顯示「鏡頭：近 / 中 / 遠」1.2 s（src/ui/cam-view-hint.js，倒數吃 update 的渲染 dt）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
 import { setTouchMode, setTouchButtonVisible, registerTouchButton } from './touch.js';
 import { MARKER_COLORS as BASE_MARKER_COLORS, CAR_MARKER_COLOR } from './map/marker-colors.js';
+import { createCamViewHint } from './ui/cam-view-hint.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
@@ -160,6 +162,7 @@ export class HUD {
       });
     }
     this._buildPhase5();
+    this._camViewHint = createCamViewHint({ parent: this.root });
     this.mapCanvas = this._buildMap();
     if (typeof window !== 'undefined' && window.addEventListener) {
       window.addEventListener('resize', () => this._applyScale());
@@ -558,6 +561,11 @@ export class HUD {
     st.setProperty('--hud-scale', String(hud));
   }
 
+  // 鏡頭段位提示（index 0–2 = 近 / 中 / 遠）；回傳是否顯示
+  showCamView(index) {
+    return this._camViewHint.show(index);
+  }
+
   // ---------- 每幀 ----------
   // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers, money, hp, hpMax, vehicleLabel, roadName, weatherIcon, radio }
   update(dt, state) {
@@ -601,6 +609,7 @@ export class HUD {
       this._moneyDeltaTimer -= dt;
       if (this._moneyDeltaTimer <= 0) this.moneyDeltaEl.classList.add('hidden');
     }
+    this._camViewHint.update(dt);
     this._updateHints(dt);
     if (Number.isFinite(state.x) && Number.isFinite(state.z)) this._drawMinimap(state);
   }

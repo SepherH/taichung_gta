@@ -45,7 +45,7 @@ const GROUPS = [
   ['垃圾車路線：createMissions 注入 routeFor（graph 閉包、findRoute / projectToGraph）', [
     'routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng)', 'function garbageTruckRoute(graph, p, rng)', 'findRoute(graph, near, far)',
     /import \{[^}]*\bprojectToGraph\b[^}]*\} from '\.\/navigation\.js';/]],
-  ['垃圾車車體：createVehicleModel(\'garbage_truck\') 純視覺、每幀依 truckState 擺位 / 隱藏、beacon registerNight', [
+  ['垃圾車車體：createVehicleModel(\'garbage_truck\') 純視覺、每幀依 truckState 擺位 / 隱藏、車燈 registerNight（beacon 改 applyBeacon，I6a）', [
     "createVehicleModel('garbage_truck')", 'missions.truckState()', 'truckMesh.visible = false', 'truckMesh.rotation.y = tk.heading',
     "vehicleTemplateMaterials('garbage_truck')", 'EMISSIVE_MATERIALS.includes(m.name)', 'registerNight(m, m.emissiveIntensity || 1)', 'scene.add(truckMesh)']],
   ['時間步（§20）：missions.update / 車體同步吃 worldStep.simDt', ['missions.update(worldStep.simDt, missionCtx)', 'syncGarbageTruck(worldStep.simDt)']],
@@ -60,7 +60,7 @@ const GROUPS = [
   ['事件提示：event:closed 依 payload id 查該事件自身狀態（追垃圾車中外送關閉仍提示）', ['!missions.eventRunning(e && e.id)']],
   ['夜市攤車碰撞：colliders.addStaticBox（物理世界建好後、各畫質皆有）', [
     /import \{[^}]*\baddStaticBox\b[^}]*\} from '\.\/physics\/colliders\.js';/, 'if (stallBox) addStaticBox(RAPIER, pw.world, stallBox);',
-    'stallBox = { ...pl, width: info.width, depth: info.depth, height: info.height }']],
+    "stallBox = propColliderBox('night_market_stall', pl)"]], // I6a：§23.1 碰撞盒定值（原 manifest 外接盒）
   ['觸控文字：createMissions 注入 isTouch（目標列 / 字幕「點「互動」鈕」，missions 內不讀 DOM / navigator）', [
     /createMissions\(\{[^}]*\bisTouch: touch\b[^}]*\}\);/]],
 ];
