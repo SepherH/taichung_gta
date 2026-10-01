@@ -52,17 +52,19 @@ const GROUPS = [
   ['音效：garbageTruckDist（無車 Infinity）→ LOOPS.garbage_truck（music 群組、< 220 m、ctrl.set、暫停 0）', [
     'garbageTruckDist: Infinity', 'st.garbageTruckDist = tk && Number.isFinite(tk.distM) ? tk.distM : Infinity', 'LOOPS.garbage_truck',
     "startLoop('garbage_truck', music)", 'export const TRUCK_ON = 220', 'loops.garbage_truck.ctrl.set(state, now)', 'loopGain(loops.garbage_truck, paused ? 0 : 1, now)']],
+  // I6c：攤位改為 job-props.js stallRow（原攤車 + 變體混擺，鍵名缺模型退回原攤車），擺放 / 發光 / 碰撞逐格處理
   ['夜市攤車：Promise.all 加 loadPropModels、night_market_stall + placeProp + 夜間發光', [
-    'await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]);', "createPropModel('night_market_stall')",
-    'placeProp(stall,', "propEmissiveMaterials('night_market_stall')", 'scene.add(stall)', 'NIGHT_MARKET_DELIVERY.pickup']],
+    'await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]))[2];', 'createPropModel(s.model)',
+    'placeProp(obj, { x: s.pl.x, z: s.pl.z, y: s.pl.y, yaw: s.pl.yaw });', 'propEmissiveMaterials(s.model)', 'scene.add(obj)',
+    'stallPlacement(NIGHT_MARKET_DELIVERY.pickup, propInfo(STALL_BASE_KEY)?.depth ?? 1.56)']],
   ['標記：event-truck（小地圖 / 大地圖）', ['event-truck']],
   ['事件提示：垃圾車 available / closed 不沿用夜市外送文字', ["e.kind === 'truck'", "e.id === 'garbage-truck'"]],
   ['事件提示：event:closed 依 payload id 查該事件自身狀態（追垃圾車中外送關閉仍提示）', ['!missions.eventRunning(e && e.id)']],
   ['夜市攤車碰撞：colliders.addStaticBox（物理世界建好後、各畫質皆有）', [
-    /import \{[^}]*\baddStaticBox\b[^}]*\} from '\.\/physics\/colliders\.js';/, 'if (stallBox) addStaticBox(RAPIER, pw.world, stallBox);',
-    "stallBox = propColliderBox('night_market_stall', pl)"]], // I6a：§23.1 碰撞盒定值（原 manifest 外接盒）
+    /import \{[^}]*\baddStaticBox\b[^}]*\} from '\.\/physics\/colliders\.js';/, 'for (const b of [...stallBoxes, ...valetBoxes]) addStaticBox(RAPIER, pw.world, b);',
+    'stallBoxes.push(s.box)']], // I6a：§23.1 碰撞盒定值；I6c：每格 s.box = propColliderBox('night_market_stall', pl)（job-props.js stallRow，p6-i6c.mjs 驗）
   ['觸控文字：createMissions 注入 isTouch（目標列 / 字幕「點「互動」鈕」，missions 內不讀 DOM / navigator）', [
-    /createMissions\(\{[^}]*\bisTouch: touch\b[^}]*\}\);/]],
+    /createMissions\(\{[^]*?\bisTouch: touch\b[^]*?\n  \}\);/]], // I6c：注入 jobSpots 物件字面值後改為多行比對
 ];
 for (const [name, list] of GROUPS) {
   const miss = missing(list);
@@ -76,9 +78,9 @@ for (const [name, list] of GROUPS) {
   const m = traffic.match(/const CAR_TYPES = \[([^\]]*)\]/);
   check('traffic.js CAR_TYPES 不含 garbage_truck（不進車流）', !!m && !m[1].includes('garbage_truck'), m ? m[1] : '找不到 CAR_TYPES');
   // 攤車 / 垃圾車不因畫質略過（各畫質都擺）：建立處不受 tier / budget 條件包住
-  const stallAt = mainSrc.indexOf("const stall = createPropModel('night_market_stall');");
+  const stallAt = mainSrc.indexOf('const obj = createPropModel(s.model);'); // I6c：攤位逐格建立（stallRow）
   const stallCtx = mainSrc.slice(mainSrc.lastIndexOf('await Promise.all', stallAt), mainSrc.indexOf('\n  }\n', stallAt));
-  check('夜市攤車不依畫質略過（Promise.all 之後直接建立，無 tier / budget 條件）', stallAt > 0 && stallCtx.length < 900 && !/tier|budget|quality/.test(stallCtx));
+  check('夜市攤車不依畫質略過（Promise.all 之後直接建立，無 tier / budget 條件）', stallAt > 0 && stallCtx.length < 2000 && !/tier|budget|quality/.test(stallCtx));
 }
 {
   // 提示 bug：setPrompts 不再無條件 setPrompt(車輛) 後 setInteractPrompt(null)（後者蓋掉「按 F 上車」）

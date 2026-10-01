@@ -34,6 +34,9 @@
 //   T（actions phone）/ 觸控 tb-phone（tl4）在 started && !paused && !panelOpen() && !menu.isOpen() 時開；手機不列入 panelOpen（世界照跑），
 //   開啟中 input.enabled = false（syncPhone）；任務 App = missions.listings(focus)、導航 → nav.setDestination(…, 'phone')、
 //   地圖 App → 關手機開大地圖、設定 App → 關手機開暫停選單設定頁；Esc / T / 返回鈕由 phone.js keydown capture 處理
+// 打工委託（I6c，§23.4 / §24）：createMissions 注入 jobSpots（夜市跑單 = oyster 攤 + 攤主側 stallBack + sidewalkNear、代客泊車 = job-props.js VALET_SITES）、
+//   spawnValetCar（vehicles.adopt + dmg.attach）/ releaseValetCar（拉手煞轉路邊停放、遠了回收）/ healthOf（dmg.healthOf）；missionCtx.vehicle = 駕駛中的車；
+//   夜市攤位 = 原攤車 + oyster / tea 變體混擺（缺模型退回原攤車）、泊車亭 valet_stand（缺模型退回程式幾何，碰撞只取亭身）、接單攤檯面 takeout_bag
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -51,6 +54,7 @@ import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, neare
 import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
+import { STALL_BASE_KEY, TAKEOUT_BAG_KEY, TAKEOUT_BAG_LOCAL, VALET_SITES, VALET_STAND_KEY, buildValetStandFallback, createSidewalkNear, runStallSpot, stallRow, valetSpots, valetStandBoxes } from './job-props.js';
 import { CombatSystem, pedKnockdownPayload } from './combat.js';
 import { Player, PLAYER_RADIUS } from './player.js';
 import { VehicleManager, VEHICLE_TYPES, driveControls } from './vehicle.js';
@@ -127,6 +131,13 @@ const TRUCK_MIN_ROUTE_M = 100; // 太短的路線不用（垃圾車在折線上 
 const STALL_CURB_GAP = 1.2; // 夜市攤車離路緣（m）
 const STALL_WALL_GAP = 3; // 夜市攤車離建築外牆至少（m）
 const STALL_CLEAR_SCAN = 20; // 攤車兩側比較離牆距離時的掃描上限（m）
+const VALET_CLEAR_M = 4; // 代客泊車接單時，清掉上一趟留在客人車位 / 車格這個半徑內的泊車車（m）
+const VALET_CAR_LOOKS = [ // 代客泊車的客人車（不含機車 / 大車：車格判定以轎車尺寸設計）
+  { type: 'sedan', color: '#1d1f24' },
+  { type: 'sedan', color: '#e9e9ea' },
+  { type: 'suv', color: '#5b6470' },
+  { type: 'sedan', color: '#8c1c24' },
+];
 const BASE_URL = import.meta.env.BASE_URL ?? './';
 const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值（'auto' = 自動切換）
 
@@ -450,19 +461,48 @@ async function init() {
   const landmarkPts = landmarkPoints((await fetchJson('models/manifest.json')) ?? [], projectLatLon);
 
   await progress('載入角色與車輛模型…');
-  await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]);
-  // 夜市攤車（prop-model.js）：夜市外送取餐點旁、離牆較遠的路側，正面朝道路；各畫質（含 low）都擺；glb 缺檔 → createPropModel null，不擺
-  // stallBox：propColliderBox（§23.1 定值：半尺寸 1.11 / 1.52 / 0.78，寬含遮雨棚外伸），物理世界建好後補靜態碰撞體
-  const stall = createPropModel('night_market_stall');
-  let stallBox = null;
-  if (stall) {
-    const info = propInfo('night_market_stall');
-    const spot = stallPlacement(NIGHT_MARKET_DELIVERY.pickup, info ? info.depth : 1.5);
-    const pl = placeProp(stall, { ...spot, y: heightAt(spot.x, spot.z) });
-    stallBox = propColliderBox('night_market_stall', pl);
-    scene.add(stall);
-    for (const m of propEmissiveMaterials('night_market_stall')) registerNightOnce(m);
+  const propModels = (await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]))[2];
+  const hasProp = (k) => propModels.has(k); // 道具鍵名（manifest id）的 glb 是否載入成功
+  // 夜市攤位（prop-model.js + job-props.js stallRow）：原攤車 night_market_stall 在原位（夜市外送取餐點旁、離牆較遠的路側，正面朝道路），
+  //   變體 night_market_stall_oyster / night_market_stall_tea 沿路緣左右各一格（STALL_ROW_PITCH）混擺；變體缺模型 → 退回原攤車、原攤車也缺 → 該格不擺
+  //   （外送 / 打工照常，座標仍由 stallRow 算出）；碰撞盒一律 propColliderBox('night_market_stall', pl)（§23.1 定值，變體車架相同），物理世界建好後補靜態碰撞體
+  //   各畫質（含 low）都擺；夜市跑單接單攤 = oyster 那一格（runStallSpot），檯面擺 takeout_bag（開放接單時顯示，缺模型不擺）
+  const stallSlots = stallRow(stallPlacement(NIGHT_MARKET_DELIVERY.pickup, propInfo(STALL_BASE_KEY)?.depth ?? 1.56), heightAt, hasProp);
+  const stalls = [];
+  const stallBoxes = [];
+  for (const s of stallSlots) {
+    if (!s.model) continue;
+    const obj = createPropModel(s.model);
+    placeProp(obj, { x: s.pl.x, z: s.pl.z, y: s.pl.y, yaw: s.pl.yaw });
+    scene.add(obj);
+    s.obj = obj;
+    stalls.push(obj);
+    stallBoxes.push(s.box);
+    for (const m of propEmissiveMaterials(s.model)) registerNightOnce(m);
   }
+  const stall = stalls[0] || null; // 原攤車那一格（__game 除錯用）
+  const runStall = runStallSpot(stallSlots);
+  const runStallObj = runStall.entry.obj || null;
+  const takeoutBags = [];
+  if (runStallObj && hasProp(TAKEOUT_BAG_KEY)) {
+    for (const p of TAKEOUT_BAG_LOCAL) {
+      const bag = createPropModel(TAKEOUT_BAG_KEY);
+      bag.position.set(p[0], p[1], p[2]);
+      bag.visible = false;
+      runStallObj.add(bag);
+      takeoutBags.push(bag);
+    }
+  }
+  // 代客泊車亭（job-props.js VALET_SITES；座標見 §24.2）：valet_stand 缺模型 → 程式幾何；碰撞只取亭身（valetStandBoxes，不擋亭與立牌間空隙）
+  const valetSites = valetSpots(VALET_SITES, heightAt, propInfo(VALET_STAND_KEY)?.counter);
+  const valetBoxes = [];
+  for (const s of valetSites) {
+    const obj = hasProp(VALET_STAND_KEY) ? createPropModel(VALET_STAND_KEY) : buildValetStandFallback(THREE);
+    placeProp(obj, { x: s.pl.x, z: s.pl.z, y: s.pl.y, yaw: s.pl.yaw });
+    scene.add(obj);
+    valetBoxes.push(...valetStandBoxes(s.pl));
+  }
+  if (hasProp(VALET_STAND_KEY)) for (const m of propEmissiveMaterials(VALET_STAND_KEY)) registerNightOnce(m);
 
   await progress('依 OSM 輪廓擠出七期建築…');
   const buildings = buildBuildings(scene, { anisotropy, landmarks });
@@ -475,7 +515,7 @@ async function init() {
   const pw = new PhysicsWorld(RAPIER);
   // 必須在 buildQiuhonggu / buildBuildings 之後：木平台等 addWalkable 追加的可行走面才會一併建成碰撞體
   const colliderStats = buildWorldColliders(RAPIER, pw.world, { osm: osmWithBuildings(osm, buildings.colliders), terrain });
-  if (stallBox) addStaticBox(RAPIER, pw.world, stallBox); // 夜市攤車：WORLD 組靜態方塊（各畫質皆有）
+  for (const b of [...stallBoxes, ...valetBoxes]) addStaticBox(RAPIER, pw.world, b); // 夜市攤位 / 泊車亭：WORLD 組靜態方塊（各畫質皆有）
   const router = createContactRouter(RAPIER, pw);
   pw.onAfterStep((dt) => router.drain(dt));
   const physics = { RAPIER, pw, router, groups: GROUPS };
@@ -744,6 +784,38 @@ async function init() {
   const radio = createRadio({ getAudio: () => audio.getOutput(), getMusicVolume: () => settings.get('volumeMusic') });
   const radioCtx = { inVehicle: false, paused: true };
 
+  // ---------- 打工委託（§23.4，jobs.js 由 createMissions 建立）：代客泊車的車輛轉接 ----------
+  // spawnValetCar：vehicles.adopt（dynamic、靜止後 VehicleManager._park 自動轉 kinematic 停放）+ dmg.attach（損壞比 = healthOf）；
+  //   同一亭先清掉上一趟留在客人車位 / 車格附近、玩家沒在開的泊車車（避免疊車擋車格）
+  // releaseValetCar：打工結束（成功 / 失敗 / 讀檔作廢）→ 沒人開就拉手煞（停妥後轉路邊停放），之後比照搶來的車（adopted）遠離 ADOPTED_FAR 回收
+  const valetCars = new Set();
+  const removeValetCar = (v) => {
+    dmg.detach(v);
+    adopted.delete(v);
+    valetCars.delete(v);
+    vehicles.remove(v);
+  };
+  const spawnValetCar = (p) => {
+    const site = valetSites.find((s) => Math.hypot(s.carX - p.x, s.carZ - p.z) < 1) || null;
+    for (const v of [...valetCars]) {
+      if (v.driven || v === state.vehicle) continue;
+      const near = (x, z) => Math.hypot(v.pos.x - x, v.pos.z - z) < VALET_CLEAR_M;
+      if (near(p.x, p.z) || (site && near(site.slotX, site.slotZ))) removeValetCar(v);
+    }
+    const look = VALET_CAR_LOOKS[Math.floor(Math.random() * VALET_CAR_LOOKS.length)];
+    const v = vehicles.adopt({ type: look.type, color: look.color, x: p.x, z: p.z, yaw: p.yaw });
+    dmg.attach(v);
+    valetCars.add(v);
+    return v;
+  };
+  const releaseValetCar = (v) => {
+    if (!v || !vehicles.vehicles.includes(v)) return;
+    if (!v.driven && v !== state.vehicle) v.setControls(driveControls({ x: 0, y: 0 }, true));
+    adopted.add(v);
+  };
+  // 夜市跑單的客人點：路緣外人行道（job-props.js createSidewalkNear，沿用攤車擺位的 nearestRoadPoint）
+  const sidewalkNear = createSidewalkNear({ nearestRoadPoint, onRoadSurface, buildingAt, inBounds });
+
   // ---------- 委託 / 導航 / 大地圖 / 打卡 / 小吃圖鑑（W4–W6）----------
   const missions = createMissions({
     bus,
@@ -761,6 +833,11 @@ async function init() {
     // 垃圾車事件（garbage-truck.js）：路線 = 玩家附近道路點 → 更遠道路點的 findRoute 折線（graph 同樣閉包取用）；玩家位置未知時用 focus
     routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng),
     isTouch: touch, // 目標列 / 字幕操作詞：觸控「點「互動」鈕」、桌機「按 E」
+    // 打工（§23.4）：夜市跑單 = oyster 攤（stall = placeProp 擺位、stallBack = 攤主側）、代客泊車 = VALET_SITES；車輛轉接見上
+    jobSpots: { stall: runStall.stall, stallBack: runStall.stallBack, sidewalkNear, valet: valetSites },
+    spawnValetCar,
+    releaseValetCar,
+    healthOf: (v) => dmg.healthOf(v),
   });
   const graph = buildRoadGraph(surfaceRoads);
   // 垃圾車車體：manifest garbage_truck 經 createVehicleModel 建立的純視覺模型（不建剛體、不進 VehicleManager / traffic → 不可上車 / 劫車、不進車流）；
@@ -791,6 +868,12 @@ async function init() {
     applyBeacon(truckMaterials, tk.beaconLevel);
     const roll = ((tk.speed || 0) * simDt) / truckWheelR;
     if (roll) for (const w of truckMesh.userData.wheels) w.rotation.x += roll;
+  };
+  // 接單攤檯面的外帶袋：夜市跑單開放接單時顯示（接單後 = 已帶走、收單 / 時段外隱藏）；takeout_bag 缺模型 → 無袋
+  const syncTakeoutBags = () => {
+    if (!takeoutBags.length) return;
+    const on = !!(missions.jobs && missions.jobs.isOpen('night-market-run'));
+    if (takeoutBags[0].visible !== on) for (const b of takeoutBags) b.visible = on;
   };
   const nav = createNavigator({ bus, graph, scene, heightAt });
   const checkins = createCheckins({ bus, landmarks: landmarkPts, addMoney: (n, reason) => economy.add(n, reason), root: document.body });
@@ -1149,6 +1232,7 @@ async function init() {
       if ((adopted.has(v) && d > ADOPTED_FAR) || (wreck && d > WRECK_FAR)) {
         dmg.detach(v);
         adopted.delete(v);
+        valetCars.delete(v);
         vehicles.remove(v);
       }
     }
@@ -1338,7 +1422,8 @@ async function init() {
   };
 
   // ---------- Phase 4 每幀輔助 ----------
-  const missionCtx = { x: 0, z: 0, driving: false, night: 0 }; // night：dayNight.night（0–1），垃圾車警示燈亮度
+  // night：dayNight.night（0–1），垃圾車警示燈亮度；vehicle：駕駛中的 Vehicle 或 null（代客泊車以物件參照辨識指定車，§23.4）
+  const missionCtx = { x: 0, z: 0, driving: false, vehicle: null, night: 0 };
   // V 鍵 / 觸控「視角」鈕切段（rig.update onViewChange，同幀最多一次）→ 寫回設定、HUD 顯示「鏡頭：近 / 中 / 遠」1.2 s
   const onCamViewChange = (kind, index) => {
     settings.set(camViewSettingKey(kind), index);
@@ -1548,10 +1633,12 @@ async function init() {
     missionCtx.x = focus.x;
     missionCtx.z = focus.z;
     missionCtx.driving = driving;
+    missionCtx.vehicle = v;
     missionCtx.night = dayNight.night;
     // 委託 / 外送 / 垃圾車屬模擬時間（§20）：吃本幀實際推進的 simDt（stepWorld 之後才讀得到；暫停 / 面板開啟時 updateGame 不跑）
     missions.update(worldStep.simDt, missionCtx);
     syncGarbageTruck(worldStep.simDt);
+    syncTakeoutBags();
     nav.update(dt, focus);
     // 手機：開著才每幀注入時刻 / 天氣 / 金錢 / missions.listings（同一陣列重用）；update 吃渲染 dt（§20）
     phoneLink.frame(dt);
@@ -1941,7 +2028,7 @@ async function init() {
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
-      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, phone, phoneLink,
+      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, stalls, valetSites, valetCars, phone, phoneLink,
       // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
       weather, env, radio,
       // 補手槍備彈（回實際加入數，上限 120）

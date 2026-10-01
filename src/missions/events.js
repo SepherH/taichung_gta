@@ -234,6 +234,8 @@ export function createTimedEvents({
       }
     }
     hourNow = readHour(ctx);
+    // 本幀無子步（simDt = 0，§20）：只刷新玩家位置 / 時刻，不判定開放 / 抵達 / 逾時（同 garbage-truck.js）
+    if (step <= 0) return;
     if (run) {
       run.elapsed += step;
       if (run.elapsed >= run.limit) fail('timeout');

@@ -26,10 +26,12 @@ const near = (a, b, tol = 1e-9) => Math.abs(a - b) <= tol;
 // ======================= 1. 攤車碰撞盒 =======================
 {
   const { propColliderBox } = await import('../../src/prop-model.js');
-  check('main.js：stallBox = propColliderBox(\'night_market_stall\', pl)（不再用 manifest 外接盒）',
-    mainSrc.includes("stallBox = propColliderBox('night_market_stall', pl);") && !mainSrc.includes('width: info.width, depth: info.depth')
-    && /import \{[^}]*\bpropColliderBox\b[^}]*\} from '\.\/prop-model\.js';/.test(mainSrc));
-  check('main.js：stallBox 仍在物理世界建好後交給 addStaticBox', mainSrc.indexOf('if (stallBox) addStaticBox(RAPIER, pw.world, stallBox);') > mainSrc.indexOf('const pw = new PhysicsWorld(RAPIER);'));
+  // I6c：攤位改為 job-props.js stallRow 逐格（原攤車 + 變體），每格 box = propColliderBox('night_market_stall', pl)（p6-i6c.mjs 驗行為）
+  const jpSrc = read('src/job-props.js');
+  check('main.js / job-props.js：攤位碰撞盒 = propColliderBox(\'night_market_stall\', pl)（不再用 manifest 外接盒）',
+    jpSrc.includes('box: model ? propColliderBox(STALL_BASE_KEY, pl) : null') && mainSrc.includes('stallBoxes.push(s.box);') && !mainSrc.includes('width: info.width, depth: info.depth')
+    && /import \{[^}]*\bpropColliderBox\b[^}]*\} from '\.\/prop-model\.js';/.test(jpSrc));
+  check('main.js：攤位碰撞盒仍在物理世界建好後交給 addStaticBox', mainSrc.indexOf('for (const b of [...stallBoxes, ...valetBoxes]) addStaticBox(RAPIER, pw.world, b);') > mainSrc.indexOf('const pw = new PhysicsWorld(RAPIER);'));
   const pl = { x: 557.2, y: 12.5, z: -125.1, yaw: 0.7 };
   const b = propColliderBox('night_market_stall', pl);
   check('攤車盒：寬 2.22 / 深 1.56 / 高 3.04、底面 = placement.y、中心水平無偏移、yaw 沿用',

@@ -540,7 +540,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - 整合（main.js）：
   - `routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng)`：隨機方向取玩家 150–300 m 外的點以 `projectToGraph` 投影為起點（投影後須在 75–450 m），同方向 ±45° 再往外 250–450 m 投影為終點，`findRoute(graph, 起點, 終點).points`（≥ 100 m）；最多試 4 個方向，失敗回 null（garbage-truck.js 2 s 後再問）。graph 在 missions 之後建立，閉包呼叫時已存在
   - 車體：`createVehicleModel('garbage_truck')`（public/models/vehicles/manifest.json 的 garbage_truck）**純視覺**——不建物理剛體、不進 `VehicleManager`（不可上車 / 搶車）、不進 traffic 車流（traffic.js `CAR_TYPES` 不含）；每幀 `missions.update` 之後依 `truckState()` 擺 `position.set(x, heightAt(x, z), z)`、`rotation.y = heading`、輪子滾動角 += speed × simDt / 輪徑；null → `visible = false`；讀檔 / 新局後立即同步一次。glb 缺檔 → 無車體（事件與標記照常）
-  - 夜間發光：`vehicleTemplateMaterials('garbage_truck')` 中名稱在 `EMISSIVE_MATERIALS`（含 `beacon`）者 `registerNight(m, m.emissiveIntensity || 1)`，同一材質只登記一次（與 vehicle.js registerModelNight 相同機制）
+  - 夜間發光（**勘誤 I6c**：警示燈不登記 daynight）：`vehicleTemplateMaterials('garbage_truck')` 中名稱在 `EMISSIVE_MATERIALS` 者經 main.js `registerNightOnce` → `registerNight(m, m.emissiveIntensity || 1)`（同一材質只登記一次），但**名稱含 `beacon` 者跳過**；警示燈亮度改由 `syncGarbageTruck` 每幀 `applyBeacon(模板材質, truckState().beaconLevel)`（garbage-truck.js 匯出，脈衝 × 日夜 `missionCtx.night`，§23.5 / I6a）——登記了會被 daynight 每幀覆寫
   - 時間步（§20）：`missions.update(worldStep.simDt, ctx)`（委託 / 外送 / 垃圾車同屬模擬時間：暫停 / 全螢幕面板開啟時 updateGame 不跑、本幀無子步時 simDt = 0 不推進）；車體同步同吃 simDt
 - 事件（bus，與夜市外送共用 `event:*`，id `'garbage-truck'`）：
 
@@ -561,7 +561,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 ### 22.2 夜市攤車（`src/prop-model.js`；格式與 glb 契約見該檔頭與 public/models/props/manifest.json）
 - API：`loadPropModels(manifestUrl?, { fetch? })` → `Promise<Map<id, entry>>`（只含 glb 載入成功者；缺 manifest → 空 Map，不報錯）、`createPropModel(id)` → Object3D | null、`propInfo(id)` → manifest 條目（`width / depth / height / counter?`）| null、`propEmissiveMaterials(id)` → 需登記夜間發光的共用材質、`placeProp(obj, { x, z, y, faceX, faceZ | yaw, anchor? })` → `{ x, y, z, yaw }`（本地 +Z 朝向 face 點；`propPlacement` / `propWorldPoint` 為純數學，node 可測）
 - 整合（main.js）：啟動 `await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()])`；`createPropModel('night_market_stall')` 非 null 時以 `stallPlacement(NIGHT_MARKET_DELIVERY.pickup, depth)` 擺位——取餐點（events.js pickup ≈ (557.2, −125.1)，新光三越北側、惠來路二段西側路緣外；19 時月光不被新光三越遮住，原道路中心點 (556.3, −107.9) 落在商場陰影裡已移出）最近的地面車道中心線點 → 垂直方向「半寬 + 1.2 m + 半個攤車深」的兩側候選（合格 = 不在車道上、不在步道上、離建築外牆 ≥ 3 m；合格者取離牆較遠的一側，都不合格退回第一側；目前選到惠來路西側 ≈ (557.2, −125.1)，與取餐點重合（距離 < 0.1 m，攤車＝取餐點）、19 時無月影、離最近建築外牆約 22 m），`faceX / faceZ` = 該道路點（+Z 顧客面朝道路）、`y = heightAt(x, z)`；`scene.add`；`propEmissiveMaterials` 逐一 `registerNight(m, m.emissiveIntensity || 1)`（同材質只登記一次）；物理世界建好後 `addStaticBox(RAPIER, pw.world, { ...placeProp 回傳, width, depth, height })`（`physics/colliders.js`：底面中心 + 半高、繞 Y 轉 yaw 的 cuboid，無父剛體、WORLD 組；各畫質皆有）
-- 各畫質（含 low）都擺；無碰撞體（純裝飾，玩家可穿過）；glb 缺檔 → 不擺（外送照常）
+- 各畫質（含 low）都擺；**有碰撞體**（勘誤 I6c，原「無碰撞體」作廢）：WORLD 組靜態方塊，尺寸 `propColliderBox('night_market_stall', pl)`（半尺寸 1.11 / 1.52 / 0.78，見 §23.1）；glb 缺檔 → 不擺（外送照常）。Phase 6 起改為原攤車 + 兩款變體混擺，見 §24.1
 
 ### 22.3 互動提示與 tb-interact
 - 車輛提示與互動提示互不覆蓋：見 §3.2 `setPrompts`；觸控 `tb-interact` 步行 / 駕駛有互動提示都顯示（§4.5 表）；直向駕駛位置在右半下車鈕下方（不落在左半轉向區 `#touch-pad`），見 §4.5 表
@@ -646,7 +646,7 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
   weatherIcon：weather.getState().icon（'sun'|'rain'|'fog'）
   jobs：[{ id, title, category: 'nearby'|'mission'|'job', reward, distanceM, navigable, x, z, active }]
 ```
-- 生命週期：`open()` 冪等；開啟時 `bus.emit('ui:sound', { kind: 'open' })`、`bus.emit('phone:open', {})`；`close()` 冪等、emit `phone:close`；`update(dt)` 用**渲染 dt**（只做 UI 動畫 / 時鐘刷新，§20 屬渲染時間）；`destroy()` 移除 DOM 與 listener
+- 生命週期：`open()` 冪等；**無指定 App 時先顯示鎖屏**（時鐘 / 天氣，`LOCK_SEC` 0.8 s 渲染時間後自動解鎖，點一下或任何非返回操作立即解鎖；`open(app)` 指定 App 則不鎖屏直接進該 App；勘誤 I6c）；開啟時 `bus.emit('ui:sound', { kind: 'open' })`、`bus.emit('phone:open', {})`；`close()` 冪等、emit `phone:close`；`update(dt)` 用**渲染 dt**（只做 UI 動畫 / 時鐘刷新，§20 屬渲染時間）；`destroy()` 移除 DOM 與 listener
 - **不暫停模擬**：手機**不得**列入 `panelOpen()`（否則 `updateGame` return、世界停）。I6 另寫 `syncPhone()`：`phone.isOpen()` 轉真 → `input.enabled = false`（沿用既有 `enabled` 清空機制，等同鎖住移動 / 射擊 / 上下車 / 互動 / 視角）、`releaseLock()`、駕駛中 `setControls(driveControls({x:0,y:0}, true))`；轉假 → `input.enabled = true`。世界 / 車流 / 任務計時照常吃 simDt（委託倒數不因開手機停止——預期行為）
 - 關閉：Esc、KeyT、手機內「返回」鈕（app 頁先回 home，home 再按 = 關閉）；phone.js 自己在 `keyTarget` 註冊 keydown **capture**，處理後 `preventDefault` + `stopPropagation`（同 `onPanelKey` 作法），因此 Esc 不會同時開暫停選單
 - 互斥：I6 只在 `state.started && !state.paused && !panelOpen() && !menu.isOpen()` 時開手機；手機開啟中按 M / 選單鍵由手機吞掉；開大地圖 / 設定前先 `phone.close()`
@@ -678,11 +678,11 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 結算：`addMoney(n, 'job')`；I6 在 `src/hud.js:56` 加 `job: '打工 '`
 - 標記 kind：`'job-start'`、`'job-dest'`、`'job-car'`（E6 改 `src/map/marker-colors.js` 與 `src/map/big-map.js MARKER_LABELS`；`job-dest` 加入 `PIN_KINDS`；hud.js `EDGE_KINDS` 加 `job-car` 由 I6）
 - 存檔：不升版。打工狀態併入 `missions.events`（`{ completed: { 'night-market-run': n, 'valet-parking': n }, cooldowns: { … } }`，id 不與既有事件重複）；`index.js restore` 依 id 分流給 events / truck / jobs；進行中打工不存檔（讀檔作廢、不發 fail）
-- 注入（I6，`createMissions({ …, jobSpots, spawnValetCar, releaseValetCar })`；缺任一 → 該打工不作用）：
+- 注入（I6，`createMissions({ …, jobSpots, spawnValetCar, releaseValetCar, healthOf })`；夜市跑單缺 `stall` / `stallBack` / `sidewalkNear` → 跑單不作用；泊車缺 `valet` / `spawnValetCar` / `releaseValetCar` → 泊車不作用；`healthOf` 選填（缺 → 損壞比 0）；實際接線見 §24）：
   - `jobSpots = { stall: { x, z, yaw }, stallBack: { x, z }, sidewalkNear(x, z, rng, minM, maxM) → { x, z } | null, valet: [{ id, standX, standZ, carX, carZ, carYaw, slotX, slotZ, slotYaw }] }`；`stall` = §23.1 placeProp 回傳、`stallBack` = `propWorldPoint([0, 0, -(0.78 + 0.6)], pl)`（攤主側）
-  - `spawnValetCar({ x, z, yaw }) → vehicle`（I6 以 `vehicles.adopt` 實作）、`releaseValetCar(vehicle)`（結束後轉為路邊停放）
+  - `spawnValetCar({ x, z, yaw }) → vehicle`（I6 以 `vehicles.adopt` 實作）、`releaseValetCar(vehicle)`（結束後轉為路邊停放）、`healthOf(vehicle) → number`（I6 包 `dmg.healthOf`；車毀判定 = `vehicle:disabled` 或 `healthOf === 0`）
   - update ctx 擴充：`{ x, z, driving, vehicle: 駕駛中的 Vehicle | null }`
-- **夜市跑單** `NIGHT_MARKET_RUN`：window 18–24；起點 = `stallBack` 2.5 m 內按 E（與外送取餐點 radius 12 重疊時，`nearest()` 在 2.5 m 內優先打工）；隨機 2–3 位客人（`sidewalkNear(stall, rng, 40, 160)`，彼此 ≥ 20 m）；**只限步行**：`ctx.driving` 連續 > 3 s → fail `'vehicle'`；每位客人 3 m 內按 E 送達；時限 = Σ 路段直線 × 1.3 / 3.5 m/s + 20 s；報酬 = 每位 80 + 0.25 × 路段 m，全送完加剩餘秒 × 1；失敗 `'timeout'|'vehicle'|'ko'|'abandon'`；冷卻 150 s、失敗 60 s
+- **夜市跑單** `NIGHT_MARKET_RUN`：window 18–24；起點 = `stallBack` 2.5 m 內按 E（與外送取餐點 radius 12 重疊時，`nearest()` 在 2.5 m 內優先打工）；隨機 2–3 位客人（`sidewalkNear(stall.x, stall.z, rng, 40, 160)`——簽名 `(x, z, rng, minM, maxM)`，勘誤 I6c；每位最多要 8 次點、彼此 ≥ 20 m，湊不到 2 位不接單）；**只限步行**：`ctx.driving` 連續 > 3 s → fail `'vehicle'`；每位客人 3 m 內按 E 送達；時限 = Σ 路段直線 × 1.3 / 3.5 m/s + 20 s；報酬 = 每位 80 + 0.25 × 路段 m，全送完加剩餘秒 × 1；失敗 `'timeout'|'vehicle'|'ko'|'abandon'`；冷卻 150 s、失敗 60 s
 - **代客泊車** `VALET_PARKING`：不限時段；起點 = valet stand 按 E → `spawnValetCar` 於 car 位姿（**指定車辨識 = 回傳的 vehicle 物件參照**，`ctx.vehicle === job.car`；標記 `job-car`）→ 上車後顯示 `job-dest`（slot）
   - 停妥條件（同時成立且維持 1.0 s 模擬時間）：車中心到 slot 中心 ≤ 1.2 m；`|angleDelta(car.yaw, slotYaw)|` ≤ 15°；`|car.speed|` ≤ 0.5 m/s；玩家正駕駛該車
   - 失敗：車毀（訂閱 `vehicle:disabled` 且 `vehicle === job.car`）→ `'destroyed'`；逾時（時限 = 路線長 / 8 m/s + 45 s）→ `'timeout'`；玩家不在車上且與車距離 > 40 m 持續 5 s → `'lost'`；`'ko'` / `'abandon'` 同委託
@@ -717,6 +717,35 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 序列：B6 與 E6 檔案集無交集（攤車擺放 `stallPlacement` 在 main.js 屬 I6、取餐點常數在 events.js 屬 E6 唯讀給 B6），**目前無需序列**；唯一可能交集 `src/missions/events.js` / `index.js` 若 B6 需要 → 序列：B6 先
 - 測試命名：`tools/test/p6-b6.mjs`、`p6-cs6.mjs`、`p6-e6.mjs`、`p6-p6.mjs`、整合 `p6-i6.mjs`；各單元只新增自己的測試檔、可修改自己擁有的模組對應的既有測試
 - **run-all 自動掃描**：`tools/test/run-all.mjs:14-17` `readdirSync(testDir).filter(f.endsWith('.mjs') && f !== 'run-all.mjs').sort()` → 新增的 `p6-*.mjs` 放進 `tools/test/` 即自動被 `npm run test:all` 執行，**不需登錄**；`package.json` 個別 `test:*` script 為選用，由經理 / I6 統一加（各單元不改 package.json）
+
+
+## 24. Phase 6 整合接線摘要（I6a / I6b / I6c；接線點在 `src/main.js`，細節以各檔頭為準）
+
+- **I6a 鏡頭 / 攤車碰撞 / 警示燈**：建 rig 後 `rig.setViews({ walk: settings.get('camWalkView'), drive: settings.get('camDriveView') })`、`rig.update` opts `onViewChange` 寫回 settings、`settings.subscribe` 兩鍵 → `rig.setViews`；觸控 `tb-view`（KeyV、slot `view`）；HUD 段位提示 `src/ui/cam-view-hint.js`（「鏡頭：近 / 中 / 遠」1.2 s 渲染時間）；攤車碰撞 = `propColliderBox`（§23.1）；垃圾車 beacon 走 `applyBeacon`（§22.1 勘誤）、`missionCtx.night = dayNight.night`
+- **I6b 手機**：`src/ui/phone-link.js`（`canOpenPhone` 互斥、`createPhoneLink` 開關 / 鎖輸入 / 每幀 `fillData`）；T = `input.actions.pressed('phone')`、觸控 `tb-phone`（slot `tl4`）；手機不列入 `panelOpen()`；`setData.jobs = missions.listings(focus, 重用陣列)`
+- **I6c 打工委託**（本節下列各條）；回歸 `tools/test/p6-i6a.mjs`、`p6-i6b.mjs`、`p6-i6c.mjs`
+
+### 24.1 夜市攤位（`src/job-props.js` `stallRow`，main.js 逐格擺）
+- 道具一律以 manifest 鍵名指定：`STALL_ROW` = `night_market_stall`（slot 0，即 §22.2 `stallPlacement` 原位，夜市外送取餐點旁）、`night_market_stall_oyster`（slot +1）、`night_market_stall_tea`（slot −1）；沿攤車本地 X（平行路緣）每格 `STALL_ROW_PITCH` 2.72 m（碰撞盒寬 2.22 + 走道 0.5）、同一 yaw（+Z 朝道路）；目前三格 ≈ (557.17, −125.12) / (558.61, −127.42) / (555.73, −122.81)，皆不在車道 / 步道上、離建築 ≥ 3 m
+- 退回：`resolvePropKey(key, has, 'night_market_stall')`——變體缺 glb → 該格擺原攤車；原攤車也缺 → 該格不擺、無碰撞體（座標照算，外送 / 打工照常）；`has` = `loadPropModels()` 回傳 Map（只含載入成功者）
+- 碰撞：每個擺出的格 `propColliderBox('night_market_stall', pl)`（變體車架同原攤車），物理世界建好後與泊車亭盒一起 `addStaticBox`；夜間發光逐鍵 `propEmissiveMaterials(key)` → `registerNightOnce`
+- 夜市跑單接單攤 = oyster 那一格（`runStallSpot`；缺該格 → slot 0）：`jobSpots.stall` = 該格 pl、`stallBack` = `propWorldPoint([0, 0, −1.38], pl)` ≈ (557.44, −128.16)（離外送取餐點 3.1 m，取餐 radius 12 內；2.5 m 內打工優先）
+- `takeout_bag`：接單攤有擺且 bag glb 有載入時，掛 2 個在攤車本地 `TAKEOUT_BAG_LOCAL`（檯面 y 0.88）；`missions.jobs.isOpen('night-market-run')` 時顯示（開放接單）、其餘隱藏（`syncTakeoutBags` 每幀，在 `missions.update` 之後）；**未做手持**（右手插槽給武器用，見 FINDINGS）；bag 缺 glb → 無袋
+
+### 24.2 代客泊車亭與車輛轉接
+- 位置 `VALET_SITES`（job-props.js，地圖選點）：`tiger-city`——亭 (37.24, 64.27)，正面朝河南路三段西側車道（老虎城側、單行北上）道路點 (44.11, 68.31)，離出生點約 40 m；接單點 = counter 世界座標 ≈ (37.94, 65.18)；客人車 (37.50, 70.22, yaw −0.53)（亭前方 5 m 路邊、順向貼路緣，離路邊停放車 ≥ 26 m）；車格 (−111.57, −95.97, yaw 2.61)（朝富路東側南向車道路邊，林酒店側，直線約 218 m，離路口 ≥ 50 m）
+- `valetSpots(VALET_SITES, heightAt, propInfo('valet_stand')?.counter)` → `jobSpots.valet`（§23.4 欄位 + `pl`）
+- 模型：`valet_stand` 有 glb → `createPropModel`；缺 → `buildValetStandFallback(THREE)`（亭身 / 屋頂 / 立牌桿 / 立牌面）。發光材質同攤車登記
+- 碰撞（**只取亭身**）：`valetStandBoxes(pl)` 一個盒，`VALET_BOOTH` 本地中心 (−0.61, 1.25, −0.22)、半尺寸 0.65 / 1.25 / 0.55（亭 1.3 × 1.1、牆 2.25 + 屋頂）；本地 X 右緣 +0.04，立牌（+X 端）與兩者間空隙不擋；不用 2.52 × 1.54 外接盒
+- `spawnValetCar(p)`：先移除同亭客人車位 / 車格 4 m 內（`VALET_CLEAR_M`）、無人駕駛的上一趟泊車車 → `vehicles.adopt({ type, color, x, z, yaw })`（`VALET_CAR_LOOKS`：轎車 / 休旅，不含機車與大車）→ `dmg.attach`；`releaseValetCar(v)`：無人駕駛 → 拉手煞（靜止後 `VehicleManager._park` 轉 kinematic 停放）、加入 `adopted`（玩家離開 `ADOPTED_FAR` 200 m 後回收）；`healthOf: (v) => dmg.healthOf(v)`
+- `missionCtx = { x, z, driving, vehicle, night }`：`vehicle` = 駕駛中的 `state.vehicle`（步行 null），`missions.update(worldStep.simDt, missionCtx)` 前每幀寫入
+
+### 24.3 客人點 / HUD / 手機 / 時間步
+- `jobSpots.sidewalkNear = createSidewalkNear({ nearestRoadPoint, onRoadSurface, buildingAt, inBounds })`：隨機方向 / 距離 → 最近地面車道中心線點 → 往取樣側推到路緣外 1.5 m；合格 = 距離在 [minM, maxM]、不在車道、不在建築、在範圍內；6 次不合格 → null
+- hud.js：`MONEY_REASON_LABEL.job = '打工 '`、`EDGE_KINDS` 加 `'job-car'`
+- 手機任務 App「打工」分頁：注入 jobSpots 後 `missions.listings` 帶 `category: 'job'` 項（開放中的夜市跑單 / 代客泊車，或進行中那一筆），經 I6b `fillData` → `phone.setData({ jobs })`
+- events.js（夜市外送）`update` 在 `step <= 0`（本幀無子步）時只刷新位置 / 時刻後早退，不做開放 / 抵達 / 逾時判定（同 garbage-truck.js）
+- 垃圾車仍只走純視覺車體，traffic `CAR_TYPES` 不含 garbage_truck；泊車車輛是一般 `VehicleManager` 車（不進車流）
 
 ---
 
