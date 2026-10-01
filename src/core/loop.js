@@ -4,6 +4,8 @@
 //   （pw.simTimeFor(dt) = 子步數 × 1/60；60Hz 每幀 1 子步時 simDt = dt）。模擬計時（對抗時鐘、回收計時）吃 simDt，
 //   插值 / 動畫 / 相機 / UI 吃 dt；號誌相位時間與耐久去重時鐘在固定子步內推進（main.js：pw.onBeforeStep → lights.step、
 //   pw.onAfterStep → dmg.step），這裡每幀只刷新燈色 / 倒數與煙霧粒子
+// Phase 5：worldStep.simDt = 本幀 step 的 simDt（每幀 resetPerf 歸零；本幀未 step = 0），給 step 之後才更新的
+//   遊戲時鐘消費者（main.js：weather.update(dt, worldStep.simDt)）——暫停 / 面板開啟時世界不 step → 天氣不推進
 // 介面：依賴一律以物件傳入，本檔不持有遊戲狀態；main.js 的 updateGame / updateAttract 仍在 main.js，只在這裡排順序
 import { setActiveByDistance } from '../physics/npc-bodies.js';
 
@@ -16,8 +18,10 @@ export function createWorldStep(d) {
   const { pw, lights, camera, combat, player, vehicles, traffic, dmg } = d;
   const entities = [];
   let physMs = 0;
+  let lastSimDt = 0;
   const step = (dt, center) => {
     const simDt = pw.simTimeFor(dt);
+    lastSimDt = simDt;
     d.prepareTraffic(); // setBlockers / setContext / setView
     const t0 = performance.now();
     pw.step(dt);
@@ -39,8 +43,13 @@ export function createWorldStep(d) {
     get physMs() {
       return physMs;
     },
+    // 本幀物理實際推進的模擬秒數（§20）；本幀尚未 step 時為 0
+    get simDt() {
+      return lastSimDt;
+    },
     resetPerf() {
       physMs = 0;
+      lastSimDt = 0;
     },
   };
 }

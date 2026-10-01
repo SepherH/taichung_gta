@@ -237,7 +237,51 @@ export const LOOPS = {
     v.sources.push(lfo);
     return { gain, set() {} };
   },
+  // 雨聲（p5-s1）：粉噪高通（雨幕沙沙）+ 白噪帶通（近處水花嘶聲）；內部 level 增益隨 s.rain（0–1）→ rainLevel，
+  // 雨勢大時高通截止往下、聲音較厚；外層 gain 仍由呼叫端控制（sfx 群組、paused 靜音），s.rain 為 0 時本身就靜音
+  rain(v, nb) {
+    const ctx = v.ctx;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const level = ctx.createGain();
+    level.gain.value = 0;
+    level.connect(gain);
+    const wash = noiseLoop(v, nb.pink, 'highpass', 500, 0.5);
+    wash.filter.connect(level);
+    const hiss = noiseLoop(v, nb.white, 'bandpass', 4200, 0.8);
+    const hg = ctx.createGain();
+    hg.gain.value = 0.25;
+    hiss.filter.connect(hg);
+    hg.connect(level);
+    wash.src.start(0, Math.random());
+    hiss.src.start(0, Math.random());
+    let lastL = -1;
+    let lastF = -1;
+    return {
+      gain,
+      level,
+      set(s, now) {
+        const r = clamp01(s && s.rain);
+        const l = rainLevel(r);
+        if (Math.abs(l - lastL) > 0.003) {
+          lastL = l;
+          level.gain.setTargetAtTime(l, now, 0.4);
+        }
+        const f = 700 - r * 400;
+        if (Math.abs(f - lastF) > 10) {
+          lastF = f;
+          wash.filter.frequency.setTargetAtTime(f, now, 0.4);
+        }
+      },
+    };
+  },
 };
+
+// 雨勢 0–1 → 雨聲音量（0 → 0；單調遞增，小雨即可聽見）
+export function rainLevel(rain01) {
+  const r = clamp01(rain01);
+  return r <= 0.005 ? 0 : 0.5 * Math.pow(r, 0.7);
+}
 
 export function clamp01(x) {
   return Number.isFinite(x) ? (x < 0 ? 0 : x > 1 ? 1 : x) : 0;

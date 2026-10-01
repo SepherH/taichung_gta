@@ -8,10 +8,15 @@
 // 完成後該委託冷卻 120 s（以注入 now() 秒計）；可用委託 < 3 時開放全部可用者
 // 事件：mission:available / start / stage / complete / fail、nav:destination / nav:clear（source 'mission'）、ui:sound
 // 每幀路徑（update / nearest / markers / objective）重用暫存物件，不配置新物件
+// 時段限定事件（events.js，例：夜市外送）：建構時可注入 getGameHour()（或每幀 update ctx 帶 gameHour）、routeLength(from, to)、events（定義陣列；false 關閉）
+//   nearest()：取餐點與委託起點重疊時取較近者；沒有任何遊戲時刻來源時事件完全不作用，既有委託行為不變；委託進行中不開放事件、事件進行中不開放委託（起點光柱 / 標記一併隱藏）
+//   事件取餐點 / 送達點用同一個光柱池（start / dest 色）；markers() 附加 kind 'event-start' / 'event-dest'；
+//   目標列在無委託時顯示事件倒數；eventObjective() / eventActive() / events 供 HUD / 除錯；serialize() 只在事件有狀態時多帶 events 欄位
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
 import { createBeaconPool } from './light-pillar.js';
 import { createMissionUi, formatClock, CONDITION_LABELS } from './ui.js';
+import { createTimedEvents, DEFAULT_EVENTS } from './events.js';
 
 export const OPEN_SLOTS = 3;
 export const COOLDOWN_SEC = 120;
@@ -73,6 +78,9 @@ export function createMissions({
   cargoBase = CARGO_BASE,
   manifestUrl,
   info = console.info,
+  getGameHour = null,
+  routeLength = null,
+  events = DEFAULT_EVENTS,
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -80,6 +88,15 @@ export function createMissions({
   const beacons = createBeaconPool({ scene, heightAt });
   const ui = createMissionUi({ root, doc, keyTarget, cargoBase, onAction });
   const headless = !ui.els; // 無 DOM：act() 直接接單
+  // 事件的 bus 事件照常轉發，另在這裡補字幕
+  const timedBus = { emit: (name, payload) => {
+    onTimedEvent(name, payload);
+    emit(name, payload);
+  } };
+  const timed = events === false ? null : createTimedEvents({ defs: Array.isArray(events) ? events : DEFAULT_EVENTS, getGameHour, destinations: landmarks, routeLength, addMoney, bus: timedBus, now, rng });
+  const evBeacons = new Map(); // 'start:<id>' / 'dest:<id>' → beacon
+  let evWasActive = false;
+  const evActive = () => !!(timed && timed.active());
 
   let catalog = [];
   const bySlug = new Map();
@@ -129,7 +146,7 @@ export function createMissions({
       beacon: beacons.acquire('start', m.from.x, m.from.z, m.slug),
       inter: { id: `mission:${m.slug}`, text: `按 E 接委託：${m.title}`, dist: 0, priority: PRIORITY, act: () => openCard(off) },
     };
-    off.beacon.group.visible = !run;
+    off.beacon.group.visible = !run && !evActive();
     offers.push(off);
     emit('mission:available', { id: m.slug, title: m.title, x: m.from.x, z: m.from.z });
     return off;
@@ -386,6 +403,10 @@ export function createMissions({
     beacons.update(step);
     ui.update(step);
     if (!isReady) return;
+    if (timed) {
+      timed.update(run ? 0 : step, ctx);
+      syncEventBeacons();
+    }
     refreshT += step;
     if (refreshT >= 1) {
       refreshT = 0;
@@ -400,7 +421,8 @@ export function createMissions({
           objDist = `${dk} m`;
         }
         ui.setObjective(pm.retryText || (pm.retryText = `回到${pm.from.name}重接委託`), '', objDist, '');
-      } else ui.setObjective(null);
+      } else if (evActive()) eventObjectiveRow();
+      else ui.setObjective(null);
       return;
     }
     run.elapsed += step;
@@ -438,6 +460,7 @@ export function createMissions({
     const x = pos.x;
     const z = pos.z;
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    if (evActive()) return null;
     let bestOff = null;
     let bestD = Infinity;
     for (let i = 0; i < offers.length; i++) {
@@ -448,7 +471,9 @@ export function createMissions({
         bestOff = offers[i];
       }
     }
-    if (!bestOff) return null;
+    // 事件取餐點與委託起點重疊時取較近者（同為 priority 3）
+    const ev = timed ? timed.nearest(pos) : null;
+    if (!bestOff || (ev && ev.dist < bestD)) return ev;
     bestOff.inter.dist = bestD;
     return bestOff.inter;
   }
@@ -464,6 +489,7 @@ export function createMissions({
       markerList.push(mk);
       return markerList;
     }
+    if (evActive()) return pushEventMarkers();
     for (let i = 0; i < offers.length && i < markerPool.length; i++) {
       const mk = markerPool[i];
       const m = offers[i].m;
@@ -473,6 +499,12 @@ export function createMissions({
       mk.label = m.title;
       markerList.push(mk);
     }
+    return timed ? pushEventMarkers() : markerList;
+  }
+
+  function pushEventMarkers() {
+    const list = timed.markers();
+    for (let i = 0; i < list.length; i++) markerList.push(list[i]);
     return markerList;
   }
 
@@ -510,7 +542,68 @@ export function createMissions({
   }
 
   function abandon() {
-    fail('abandon');
+    if (!run && evActive()) timed.abandon();
+    else fail('abandon');
+  }
+
+  // ---------- 時段限定事件 ----------
+  function onTimedEvent(name, p) {
+    if (name === 'event:start') {
+      objKeyT = -1;
+      objKeyD = -1;
+      ui.subtitle(`取餐完成！${formatClock(p.limitSec)} 內把餐點送到${p.toName}（路程約 ${p.routeM} m）`);
+    } else if (name === 'event:complete') ui.subtitle(`外送送達！入帳 NT$${p.reward}`);
+    else if (name === 'event:fail') ui.subtitle(p.reason === 'timeout' ? '外送逾時，客人取消了訂單（不扣錢）。' : '外送取消了（不扣錢）。');
+  }
+
+  function evBeacon(key, kind, x, z, owner) {
+    let b = evBeacons.get(key);
+    if (!b) {
+      b = beacons.acquire(kind, x, z, owner);
+      evBeacons.set(key, b);
+    }
+    return b;
+  }
+
+  // 事件光柱：開放中的取餐點（委託進行中隱藏）、進行中的送達點；事件進行狀態切換時一併切換委託起點光柱
+  function syncEventBeacons() {
+    const act = timed.active();
+    for (const [key, b] of evBeacons) {
+      const id = key.slice(key.indexOf(':') + 1);
+      const keep = key.startsWith('dest:') ? act && act.id === id : !act && timed.isOpen(id);
+      if (!keep) {
+        beacons.release(b);
+        evBeacons.delete(key);
+      }
+    }
+    if (act) evBeacon(`dest:${act.id}`, 'dest', act.to.x, act.to.z, act.id);
+    else {
+      const defs = timed.defs();
+      for (let i = 0; i < defs.length; i++) {
+        const d = defs[i];
+        if (timed.isOpen(d.id)) evBeacon(`start:${d.id}`, 'start', d.pickup.x, d.pickup.z, d.id).group.visible = !run;
+      }
+    }
+    const on = !!act;
+    if (on !== evWasActive) {
+      evWasActive = on;
+      if (!run) setStartBeaconsVisible(!on);
+    }
+  }
+
+  function eventObjectiveRow() {
+    const o = timed.objective();
+    const tk = Math.ceil(o.timerSec);
+    if (tk !== objKeyT) {
+      objKeyT = tk;
+      objTimer = formatClock(o.timerSec);
+    }
+    const dk = o.distM === null ? -2 : Math.round(o.distM);
+    if (dk !== objKeyD) {
+      objKeyD = dk;
+      objDist = dk >= 0 ? `${dk} m` : '';
+    }
+    ui.setObjective(o.text, objTimer, objDist, '', o.timerSec < 15);
   }
 
   // ---------- 存檔（§18 missions）----------
@@ -521,7 +614,12 @@ export function createMissions({
       const left = cooldownUntil[k] - t;
       if (left > 0) cd[k] = Math.ceil(left);
     }
-    return { completed: { ...completed }, best: { ...best }, cooldowns: cd, active: run ? { slug: run.m.slug, stage: 'deliver' } : null };
+    const out = { completed: { ...completed }, best: { ...best }, cooldowns: cd, active: run ? { slug: run.m.slug, stage: 'deliver' } : null };
+    if (timed) {
+      const ev = timed.serialize();
+      if (Object.keys(ev.completed).length || Object.keys(ev.cooldowns).length) out.events = ev;
+    }
+    return out;
   }
 
   function applyRestore(data) {
@@ -551,6 +649,10 @@ export function createMissions({
     lastFailed = null;
     ui.closePanel();
     if (run) endRun();
+    if (timed) {
+      timed.restore(src.events);
+      syncEventBeacons();
+    }
     refreshOffers();
   }
 
@@ -566,6 +668,8 @@ export function createMissions({
   function dispose() {
     if (disposed) return;
     if (run) endRun();
+    if (timed) timed.dispose();
+    evBeacons.clear();
     disposed = true;
     offers.length = 0;
     beacons.dispose();
@@ -601,6 +705,9 @@ export function createMissions({
     speedScale,
     isModalOpen: () => ui.isOpen(),
     abandon,
+    eventObjective: () => (timed ? timed.objective() : null),
+    eventActive: () => (timed ? timed.active() : null),
+    events: timed,
     // 除錯 / 測試
     catalog: () => catalog,
     source: () => source,

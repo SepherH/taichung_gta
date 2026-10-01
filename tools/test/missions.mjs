@@ -583,7 +583,7 @@ const E = setup();
   check('safe-area 與直向排版', css.includes('env(safe-area-inset-top)') && css.includes('env(safe-area-inset-bottom)') && css.includes('orientation: portrait'));
   const classes = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-z][\w-]*)/g)].map((m) => m[1]).filter((c) => c !== 'touch');
   check('CSS class 全部 ms- 前綴', classes.every((c) => c.startsWith('ms-')), classes.filter((c) => !c.startsWith('ms-')).join());
-  const src = ['index.js', 'ui.js', 'catalog.js', 'light-pillar.js'].map((f) => fs.readFileSync(path.join(ROOT, 'src/missions', f), 'utf8')).join('\n');
+  const src = ['index.js', 'ui.js', 'catalog.js', 'light-pillar.js', 'events.js'].map((f) => fs.readFileSync(path.join(ROOT, 'src/missions', f), 'utf8')).join('\n');
   check('不用 alert / confirm、不讀寫 main.js / hud.js', !/\b(alert|confirm)\s*\(/.test(src) && !/from '\.\.\/(main|hud)\.js'/.test(src));
 }
 

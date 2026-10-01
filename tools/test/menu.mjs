@@ -461,6 +461,7 @@ check(
     get: (k) => vals[k],
     set: (k, v) => {
       setCalls.push([k, v]);
+      if (!(k in DEF)) return false; // 同 core/settings.js：未知鍵（例：schema 尚無 weather）回 false 不存
       if (typeof DEF[k] === 'number') {
         const [lo, hi] = RANGE[k] || (k.startsWith('vol') ? [0, 1] : [0.3, 3]);
         v = Math.round(Math.min(hi, Math.max(lo, v)) * 100) / 100;
@@ -631,6 +632,18 @@ check(
   check('鍵盤 → 調整後座力（0.2 → 0.3）', Math.abs(vals.recoil - 0.3) < 1e-9, String(vals.recoil));
   el.findClass('tg-reset-btn').click();
   check('恢復預設', j(vals) === j(DEF) && out.textContent === '1.0×' && toggle.textContent === '關' && bloodTg.textContent === '開' && rowOf('recoil').findClass('tg-range-val').textContent === '100%');
+  // Phase 5：天氣列（自動 / 晴 / 雨 / 霧）；settings 不認得 weather 鍵 → 選單本地值 + bus weather:setting
+  const wRow = rowOf('weather');
+  const wBtns = wRow ? wRow.findAllClass('tg-seg-btn') : [];
+  check('天氣列存在且排在最後（不改變既有列的鍵盤順序）、四段：自動 / 晴 / 雨 / 霧', !!wRow && order.at(-2) === 'weather' && j(wBtns.map((b) => b.textContent)) === j(['自動', '晴', '雨', '霧']), order.join(','));
+  check('天氣預設「自動」亮起', wBtns.length === 4 && wBtns[0]._cls.has('tg-on') && !wBtns[2]._cls.has('tg-on'));
+  const w0 = events.length;
+  wBtns[2].click();
+  const wEv = events.slice(w0).filter((e) => e[0] === 'weather:setting');
+  check('點「雨」→ settings.set(weather, rain) 嘗試寫入、不支援時本地保存並 emit weather:setting { value: rain }', setCalls.at(-1)[0] === 'weather' && setCalls.at(-1)[1] === 'rain' && j(wEv) === j([['weather:setting', { value: 'rain' }]]) && wBtns[2]._cls.has('tg-on') && !wBtns[0]._cls.has('tg-on'));
+  check('天氣切換音效 click、不污染 settings 值', lastSound() === 'click' && !('weather' in vals));
+  el.findClass('tg-reset-btn').click();
+  check('恢復預設 → 天氣回「自動」並 emit weather:setting { value: auto }', wBtns[0]._cls.has('tg-on') && j(events.at(-1)) === j(['weather:setting', { value: 'auto' }]) && j(vals) === j(DEF));
 
   // 回主選單
   key('Escape');

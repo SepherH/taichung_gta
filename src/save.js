@@ -3,6 +3,8 @@
 // storage 由呼叫端注入（介面同 localStorage：getItem / setItem / removeItem）；未注入時用 globalThis.localStorage，
 // 仍不可用（node、停用儲存）時退回記憶體；所有讀寫都 try/catch，不向外丟例外
 // schema v2（契約 §18）：新增 weapons / missions / collect 與三個統計欄位；v1 存檔讀入時補預設、保留原有全部值
+// Phase 5（§18 增補，不升版）：missions.events（時段事件，missions/events.js serialize）選填——
+//   { completed: { id: 正整數 }, cooldowns: { id: 正秒數 } }；格式錯誤整欄丟棄（不影響其他欄位），清洗後兩表皆空也省略
 
 export const SAVE_VERSION = 2;
 
@@ -82,6 +84,18 @@ function activeMission(src) {
   if (!isObj(src) || typeof src.slug !== 'string' || src.slug === '' || !MISSION_STAGES.includes(src.stage)) return null;
   return { slug: src.slug, stage: src.stage };
 }
+// 時段事件狀態（missions.events）：必須是物件，completed / cooldowns 若存在必須是物件，否則整欄作廢（回 null）；
+// 表內非法值的鍵個別丟棄（同 numMap）；completed 只收 ≥ 1、cooldowns 只收 > 0；兩表都空 → null（同 serialize 不帶）
+function missionEvents(src) {
+  if (!isObj(src)) return null;
+  if ((src.completed !== undefined && !isObj(src.completed)) || (src.cooldowns !== undefined && !isObj(src.cooldowns))) return null;
+  const completed = numMap(src.completed, true);
+  const cooldowns = numMap(src.cooldowns, false);
+  for (const k of Object.keys(completed)) if (completed[k] < 1) delete completed[k];
+  for (const k of Object.keys(cooldowns)) if (!(cooldowns[k] > 0)) delete cooldowns[k];
+  if (!Object.keys(completed).length && !Object.keys(cooldowns).length) return null;
+  return { completed, cooldowns };
+}
 
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
@@ -109,6 +123,7 @@ export function migrate(obj) {
 
 // 清洗：數值 finite 且 ≥ 0、未知鍵丟棄、缺鍵補預設；非物件或版本較新 → null
 // v2 欄位：slot ∈ {0,1,2}、彈藥非負整數且 clamp 到 mag ≤ 12 / reserve ≤ 120、任務表只收字串鍵 → 非負有限數、收集陣列只收字串去重 ≤ 200
+//   missions.events（選填）見 missionEvents
 export function validateSave(obj) {
   const m = migrate(obj);
   if (!m) return null;
@@ -138,6 +153,8 @@ export function validateSave(obj) {
   out.missions.best = numMap(ms.best, false);
   out.missions.cooldowns = numMap(ms.cooldowns, false);
   out.missions.active = activeMission(ms.active);
+  const ev = missionEvents(ms.events);
+  if (ev) out.missions.events = ev;
   const cl = isObj(m.collect) ? m.collect : {};
   out.collect.checkins = strList(cl.checkins);
   out.collect.foods = strList(cl.foods);

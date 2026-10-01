@@ -1,4 +1,10 @@
 // 日夜循環：天空色、霧色、太陽 / 月光方向、夜間自發光（窗戶、路燈、招牌、車燈）
+// 環境參數單一出口（p5-s1）：每幀把日夜「基準值」寫進 this.base（見下），
+// - 未 attach environment（this.env === null，預設）：照舊直接套用到 scene.background / scene.fog.color / hemi / sun
+// - attachEnvironment(env) 後：天空 / 霧 / 光的強度與顏色改由 src/environment.js 合成天氣後套用，本模組只管
+//   太陽方向與陰影相機跟隨、夜間自發光；scene.fog 的 near / far 本模組從不改（建立時 180 / 720，視距由 main 夾）
+// this.base = { hour, elev, day, night, sky, sunColor, sunIntensity, hemiIntensity, hemiSky, hemiGround }
+//   （顏色皆為 THREE.Color，與 scene 使用同一色彩空間；environment 只讀 .r/.g/.b）
 import * as THREE from 'three';
 import { clamp, smoothstep } from './utils.js';
 
@@ -36,6 +42,7 @@ export class DayNight {
     this.hour = startHour;
     this.fast = false;
     this.night = 0;
+    this.env = null; // attachEnvironment 後由 environment 套用天空 / 霧 / 光
 
     this.skyColor = new THREE.Color();
     scene.background = this.skyColor;
@@ -67,6 +74,24 @@ export class DayNight {
     this._hemiNightSky = new THREE.Color(0x6070b0);
     this._hemiDayGround = new THREE.Color(0x5a6a48);
     this._hemiNightGround = new THREE.Color(0x303040);
+
+    this.base = {
+      hour: this.hour,
+      elev: 0,
+      day: 1,
+      night: 0,
+      sky: new THREE.Color(0xa3c9ea),
+      sunColor: new THREE.Color(0xffffff),
+      sunIntensity: 2.6,
+      hemiIntensity: 1.0,
+      hemiSky: new THREE.Color(0xcfe6ff),
+      hemiGround: new THREE.Color(0x5a6a48),
+    };
+  }
+
+  // environment 接手天空 / 霧 / 光的最終套用；傳 null 回到舊路徑
+  attachEnvironment(env) {
+    this.env = env || null;
   }
 
   toggleFast() {
@@ -99,23 +124,38 @@ export class DayNight {
     const night = 1 - smoothstep(-0.12, 0.08, elev);
     this.night = night;
 
-    this._sampleSky(this.hour, this.skyColor);
-    this.scene.fog.color.copy(this.skyColor);
+    const b = this.base;
+    b.hour = this.hour;
+    b.elev = elev;
+    b.day = day;
+    b.night = night;
+    this._sampleSky(this.hour, b.sky);
 
     if (elev > -0.05) {
       this._dir.set(Math.cos(ang), Math.max(elev, 0.05), 0.35).normalize();
-      this.sun.color.lerpColors(this._warm, this._white, smoothstep(0, 0.4, elev));
-      this.sun.intensity = Math.max(2.6 * day, 0.25 * night);
+      b.sunColor.lerpColors(this._warm, this._white, smoothstep(0, 0.4, elev));
+      b.sunIntensity = Math.max(2.6 * day, 0.25 * night);
     } else {
       // 月光（太陽對面）
       this._dir.set(-Math.cos(ang), Math.max(-elev, 0.2), 0.35).normalize();
-      this.sun.color.copy(this._moon);
-      this.sun.intensity = 0.7 * night;
+      b.sunColor.copy(this._moon);
+      b.sunIntensity = 0.7 * night;
     }
 
-    this.hemi.intensity = 0.9 + 0.2 * day; // 夜間保底亮度，避免路面全黑
-    this.hemi.color.lerpColors(this._hemiNightSky, this._hemiDaySky, day);
-    this.hemi.groundColor.lerpColors(this._hemiNightGround, this._hemiDayGround, day);
+    b.hemiIntensity = 0.9 + 0.2 * day; // 夜間保底亮度，避免路面全黑
+    b.hemiSky.lerpColors(this._hemiNightSky, this._hemiDaySky, day);
+    b.hemiGround.lerpColors(this._hemiNightGround, this._hemiDayGround, day);
+
+    if (!this.env) {
+      // 舊路徑：直接套用基準值（行為與 p5-s1 前相同）
+      this.skyColor.copy(b.sky);
+      if (this.scene.fog) this.scene.fog.color.copy(this.skyColor);
+      this.sun.color.copy(b.sunColor);
+      this.sun.intensity = b.sunIntensity;
+      this.hemi.intensity = b.hemiIntensity;
+      this.hemi.color.copy(b.hemiSky);
+      this.hemi.groundColor.copy(b.hemiGround);
+    }
 
     // 陰影相機跟隨玩家（對齊到 2m 格子，減少陰影閃爍）
     const fx = Math.round(focus.x / 2) * 2;

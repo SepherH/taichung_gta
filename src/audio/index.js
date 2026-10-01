@@ -1,10 +1,14 @@
 // 程序合成音效（契約 §15）：WebAudio 噪聲 buffer + 振盪器 + 濾波 + 包絡，不下載任何音檔
-// createAudio({ bus, settings, AudioContextCtor }) → { unlock(), update(dt, state), play(name, opts), stats(), dispose() }
+// createAudio({ bus, settings, AudioContextCtor }) → { unlock(), update(dt, state), play(name, opts), getOutput(), stats(), dispose() }
 // - AudioContext 延到 unlock()（首次使用者手勢）才建立並 resume；未解鎖前 play 靜默略過；無 AudioContext（node）時整個模組 no-op
 // - 音量：master × sfx（一次性音效、引擎、輪胎）、master × music（路口聲景）；settings.subscribe 即時生效
 // - 音源池 ≤ MAX_VOICES（持續音源算在內）；滿了停掉最舊的一次性音源
 // - weapon:impact → ricochet（world 石面「啾」/ vehicle 金屬「鏘」，配方在 voices.js RECIPES）
 // - 一次性音效帶 opts.x / z 時以上一幀 update 的 state.x / z / yaw 為聆聽點：距離衰減（> MAX_DIST 不播）+ 左右聲像
+// - 雨聲（Phase 5）：state.rain（weather.getState().rain，0–1）> RAIN_ON 時開 LOOPS.rain（sfx 群組），≤ RAIN_OFF 關；
+//   每幀 ctrl.set(state, now) 由 voices.js 依雨勢調內部音量，外層增益 paused 時 0
+// - getOutput() → { ctx, out: master } | null：給車上電台（audio/radio.js getAudio）；解鎖前 / 無 AudioContext / 已 dispose 回 null。
+//   電台接 master（已含主音量）、自己乘音樂音量，不可接 music 群組（否則音樂音量乘兩次）
 // - 每幀 update 不配置物件（只有腳步觸發時建立 WebAudio 節點，這是 WebAudio 一次性節點的本質）
 
 import { makeNoiseBuffers } from './synth.js';
@@ -21,6 +25,8 @@ export const LOOP_NAMES = Object.keys(LOOPS);
 const JUNCTION_ON = 60; // m：路口聲景開始
 const JUNCTION_OFF = 70; // m：遲滯，超過才停
 const RUN_SPEED = 3.5; // m/s：以上算跑步（腳步較響）
+export const RAIN_ON = 0.01; // state.rain 超過才開雨聲
+const RAIN_OFF = 0.005; // 遲滯：低於才關
 
 // 距離 → 音量倍率（近處 1，60 m 前 12 m 內淡到 0）
 export function distanceGain(d) {
@@ -51,6 +57,7 @@ function noopAudio() {
     unlock: () => false,
     update() {},
     play: () => false,
+    getOutput: () => null,
     stats: () => ({ voices: 0, maxVoices: MAX_VOICES, unlocked: false }),
     dispose() {},
   };
@@ -72,9 +79,10 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
   let unlocked = false;
   let disposed = false;
   let broken = false; // 建立 AudioContext 失敗 → 之後都當 no-op
+  const outRef = { ctx: null, out: null }; // getOutput() 回傳（重用，每幀呼叫不配置）
 
   const voices = []; // { ctx, out, sources, end, loop, panner }
-  const loops = { engine: null, tire: null, ambience: null }; // { v, ctrl, last }
+  const loops = { engine: null, tire: null, ambience: null, rain: null }; // { v, ctrl, last }
   // 聆聽點（上一幀 state）
   let hasListener = false;
   let lx = 0;
@@ -304,6 +312,15 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
       loopGain(loops.ambience, paused ? 0 : 0.2 * k, now);
     }
 
+    // 雨聲（sfx 群組；音量由 LOOPS.rain 依 state.rain 調整，暫停時外層增益 0）
+    const rain = clamp01(state.rain);
+    if (rain > RAIN_ON && !loops.rain) loops.rain = startLoop('rain', sfx);
+    else if (loops.rain && rain <= RAIN_OFF) stopLoop('rain');
+    if (loops.rain) {
+      loops.rain.ctrl.set(state, now);
+      loopGain(loops.rain, paused ? 0 : 1, now);
+    }
+
     // 腳步：依 walkSpeed 累積步距（跑步步距較長、較響）
     const ws = Number.isFinite(state.walkSpeed) ? state.walkSpeed : 0;
     if (!paused && !driving && state.grounded !== false && ws > 0.4 && dt > 0) {
@@ -331,6 +348,8 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
         sfx.connect(master);
         music.connect(master);
         master.connect(ctx.destination);
+        outRef.ctx = ctx;
+        outRef.out = master;
         applyVolumes();
         nb = makeNoiseBuffers(ctx);
         // iOS：在手勢內播一個無聲 buffer 才會真正解鎖
@@ -402,7 +421,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
         disconnect(v);
       }
       voices.length = 0;
-      loops.engine = loops.tire = loops.ambience = null;
+      loops.engine = loops.tire = loops.ambience = loops.rain = null;
       try {
         const p = ctx.close && ctx.close();
         if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -417,12 +436,13 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
     unlock,
     update,
     play,
+    getOutput: () => (running() && !broken ? outRef : null),
     // 契約欄位 voices / maxVoices / unlocked；另附除錯用 loops（持續音源數）、plays（累計一次性）、last（最後一個音效名）
     stats: () => ({
       voices: voices.length,
       maxVoices: MAX_VOICES,
       unlocked: running(),
-      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0),
+      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0) + (loops.rain ? 1 : 0),
       plays: playCount,
       last: lastPlayed,
     }),

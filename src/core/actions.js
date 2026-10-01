@@ -3,6 +3,8 @@
 // reserved：預留動作（尚無功能，說明表不列）；hold：按住有意義（否則只看「本幀剛按下」）
 // 三個與舊版衝突的鍵：H 說明 → 喇叭（說明移到暫停選單）、R 翻車 → 裝填（翻車改 F 扶起）、E 揮拳 → 互動（攻擊改左鍵）
 // Phase 4（§12）：aim / interact / reload 取消預留；Q 由電台改為武器循環（radio 移除）；1 / 2 / 3 直選武器
+// Phase 5：情境動作 CONTEXT_ACTIONS——與 ACTIONS 共用按鍵、只在特定模式有效（Q：步行 = weaponCycle、駕駛 = radioNext）
+//   不放進 ACTIONS（ACTIONS 維持「同一 code 只綁一個 action」）；以 reader.pressedIn(action, mode) / actionForKey(code, mode) 分流
 
 export const ACTIONS = {
   move: { keys: ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'], label: '移動 / 轉向油門', hold: true },
@@ -25,6 +27,41 @@ export const ACTIONS = {
   timeSkip: { keys: ['KeyN'], label: '時間快轉', hold: false },
   reload: { keys: ['KeyR'], label: '裝填', hold: false },
 };
+
+// 動作有效的模式（'walk' | 'vehicle'）；未列 = 兩種模式都有效。整合層 main.js 既有分流：weaponCycle / slot / reload 只在 mode === 'walk' 處理
+export const ACTION_MODES = {
+  weaponCycle: 'walk',
+  slot1: 'walk',
+  slot2: 'walk',
+  slot3: 'walk',
+  reload: 'walk',
+};
+
+// 情境動作：keys 可與 ACTIONS 重疊，但 mode 必須與該鍵在 ACTIONS 的動作互斥
+// radioNext：駕駛中換台（下一台 → … → 關閉 → 第一台）；觸控由整合單元做按鈕，送 action 名 'radioNext'（或虛擬鍵 KeyQ）
+export const CONTEXT_ACTIONS = {
+  radioNext: { keys: ['KeyQ'], label: '電台：下一台 / 關閉', hold: false, mode: 'vehicle' },
+};
+
+const defOf = (action) => ACTIONS[action] || CONTEXT_ACTIONS[action] || null;
+const modeOf = (action) => (CONTEXT_ACTIONS[action] ? CONTEXT_ACTIONS[action].mode : ACTION_MODES[action] || null);
+
+// 動作在該模式是否有效（未知動作 false）
+export function actionActiveIn(action, mode) {
+  if (!defOf(action)) return false;
+  const m = modeOf(action);
+  return m === null || m === mode;
+}
+
+// 某鍵在該模式下對應的動作名（ACTIONS 優先，其次 CONTEXT_ACTIONS）；無 → null
+export function actionForKey(code, mode) {
+  for (const table of [ACTIONS, CONTEXT_ACTIONS]) {
+    for (const name of Object.keys(table)) {
+      if (table[name].keys.includes(code) && actionActiveIn(name, mode)) return name;
+    }
+  }
+  return null;
+}
 
 // 桌機操作說明
 export const KEYMAP_HELP = [
@@ -107,9 +144,10 @@ export const TOUCH_HELP = [
 ];
 
 // 以 input.down(code) / input.wasPressed(code) 讀動作；未知動作回 false
+// down / pressed 不看模式（相容既有用法）；downIn / pressedIn 另檢查 actionActiveIn(action, mode)
 export function createActionReader(input) {
   const any = (action, fn) => {
-    const a = ACTIONS[action];
+    const a = defOf(action);
     if (!a) return false;
     for (const code of a.keys) if (fn(code)) return true;
     return false;
@@ -117,5 +155,7 @@ export function createActionReader(input) {
   return {
     down: (action) => any(action, (c) => input.down(c)),
     pressed: (action) => any(action, (c) => input.wasPressed(c)),
+    downIn: (action, mode) => actionActiveIn(action, mode) && any(action, (c) => input.down(c)),
+    pressedIn: (action, mode) => actionActiveIn(action, mode) && any(action, (c) => input.wasPressed(c)),
   };
 }

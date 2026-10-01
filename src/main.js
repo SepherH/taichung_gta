@@ -17,6 +17,11 @@
 //   程序音效 createAudio（手勢 unlock、每幀 update）；委託 missions / 導航 nav / 大地圖 bigMap（M）/ 打卡 checkins / 小吃圖鑑 food（G 或選單）；
 //   interactable 仲裁（任務 3 > 打卡 2 > 小吃 1 > 彈藥 0，同級取近）→ 互動提示、E 執行；
 //   全螢幕面板（接單 / 結算、大地圖、圖鑑）開啟時世界與輸入暫停，大地圖 / 圖鑑開啟時不渲染 3D；存檔 v2（weapons / missions / collect）
+// Phase 5 接線（docs/dev/interfaces.md §21）：
+//   天氣 createWeather + 環境 createEnvironment（attach dayNight；每幀 dayNight.update → weather.update(dt, worldStep.simDt) → env.update）、
+//   視距改走 env.setViewDist、畫質切換 weather.setQuality、設定 weather（自動 / 晴 / 雨 / 霧）、雨聲 audioState.rain；
+//   車上電台 createRadio（getAudio = audio.getOutput、駕駛中 Q = radioNext → radio.next()、觸控 tb-radio 由 hud.js 註冊）；
+//   時段事件（夜市外送）：missions 注入 getGameHour / routeLength、event:* 提示、HUD / 大地圖 event-start / event-dest 標記、存檔 missions.events
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -43,6 +48,8 @@ import { DAMAGE_EXP, DAMAGE_MIN_SPEED, createVehicleDamage, impactDamage } from 
 import { CameraRig } from './camera.js';
 import { HUD } from './hud.js';
 import { DayNight } from './daynight.js';
+import { createWeather, WEATHER_KINDS } from './weather.js';
+import { createEnvironment } from './environment.js';
 import { nextFrame } from './utils.js';
 import { applyRendererQuality, createAdaptiveResolution, isTouch, pixelRatioFor, qualityTier, setGameActive, setQualitySetting } from './mobile.js';
 import { bus } from './core/events.js';
@@ -66,9 +73,10 @@ import { createWeaponHud } from './weapons/hud.js';
 import { attachWeapon, detachWeapon } from './character-animation.js';
 import { createBloodFx } from './blood-fx.js';
 import { createAudio } from './audio/index.js';
+import { createRadio } from './audio/radio.js';
 import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions } from './missions/index.js';
-import { buildRoadGraph, createNavigator } from './navigation.js';
-import { createBigMap } from './map/big-map.js';
+import { buildRoadGraph, createNavigator, findRoute } from './navigation.js';
+import { createBigMap, MARKER_COLORS as BIG_MAP_COLORS } from './map/big-map.js';
 import { createCheckins } from './collect/checkins.js';
 import { createFoodGuide } from './collect/food-guide.js';
 import { landmarkPoints } from './core/landmark-points.js';
@@ -93,6 +101,9 @@ const AIM_CANDIDATE_RANGE = 40; // 觸控瞄準輔助的候選行人半徑（m�
 const JUNCTION_SCAN_SEC = 0.5; // 音效「最近路口距離」的查詢間隔（s）
 const SKID_REF = 8; // 側滑速度（m/s）達此值時 skid01 = 1（附錄 B 音效）
 const BASE_URL = import.meta.env.BASE_URL ?? './';
+const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值（'auto' = 自動切換）
+// 大地圖（map/big-map.js）沒有時段事件標記色：建立後補色（不加圖例；圖釘造型只給 dest / mission-dest）
+const EVENT_MAP_COLORS = { 'event-start': '#8dff3a', 'event-dest': '#2ee86a' };
 
 // ---------- 純函式（tools/test/integration-p3.mjs 會擷取本區塊在 node 驗證；不可引用模組內其他識別字）----------
 // @integration-p3:pure-begin
@@ -281,16 +292,34 @@ async function init() {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.3, budget.viewDist);
   const dayNight = new DayNight(scene, defaultSave().world.hour);
-  const fogBase = scene.fog ? { near: scene.fog.near, far: scene.fog.far } : null;
-  // 視距：鏡頭 far = budget.viewDist；霧終點不超過視距，遠處不會被 far 平面硬切
+  // 環境（Phase 5）：attach dayNight 後天空 / 霧 / 光由 environment 合成天氣後套用；霧距 = 視距夾過的基準 × 天氣倍率
+  const env = createEnvironment({ scene, dayNight, viewDist: budget.viewDist, fogNearRatio: FOG_NEAR_RATIO });
+  // 天氣：設定 weather（auto / clear / rain / fog）；settings 尚無此鍵時由選單本地值經 bus 'weather:setting' 傳入（見 ui/menu.js）
+  const readWeatherPref = () => {
+    const v = settings.get('weather');
+    return WEATHER_PREFS.includes(v) ? v : 'auto';
+  };
+  let weatherPref = readWeatherPref();
+  const weather = createWeather({ scene, camera, quality: budget, THREE, auto: weatherPref === 'auto', initial: weatherPref === 'auto' ? 'clear' : weatherPref });
+  const applyWeatherPref = (v) => {
+    const pref = WEATHER_PREFS.includes(v) ? v : 'auto';
+    if (pref === weatherPref) return;
+    weatherPref = pref;
+    weather.setAuto(pref === 'auto');
+    if (pref !== 'auto') weather.setWeather(pref, { instant: true }); // 多半在暫停選單內切換：立即到位，回遊戲即看到
+  };
+  // 視距：鏡頭 far = budget.viewDist；霧距交給 environment（霧終點不超過視距，遠處不會被 far 平面硬切）
   const applyViewDist = (dist) => {
     camera.far = dist;
     camera.updateProjectionMatrix();
-    if (!fogBase || !scene.fog) return;
-    scene.fog.far = Math.min(fogBase.far, dist * 0.95);
-    scene.fog.near = Math.min(fogBase.near, scene.fog.far * FOG_NEAR_RATIO);
+    env.setViewDist(dist);
   };
   applyViewDist(budget.viewDist);
+  // 每幀環境：順序固定 dayNight.update（呼叫端先做）→ weather.update（遊戲時鐘吃 simDt，暫停 / 面板開啟時 0）→ env.update
+  const updateEnvironment = (dt, simDt) => {
+    weather.update(dt, simDt);
+    env.update(dt, { dayNight, weather });
+  };
   // 效能分級：需在光源建立後呼叫，低品質時才能調降 / 關閉陰影貼圖
   applyRendererQuality(renderer, 1, scene, tier);
   let adapt = createAdaptiveResolution(renderer, tier);
@@ -587,6 +616,9 @@ async function init() {
   const audio = createAudio({ bus, settings });
   const unlockAudio = () => audio.unlock();
   for (const ev of ['pointerdown', 'keydown', 'touchend']) window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+  // 車上電台（Phase 5）：輸出接 audio 的 master（已含主音量；radio 自己乘音樂音量，不接 music 群組以免乘兩次）；解鎖前 getOutput() = null
+  const radio = createRadio({ getAudio: () => audio.getOutput(), getMusicVolume: () => settings.get('volumeMusic') });
+  const radioCtx = { inVehicle: false, paused: true };
 
   // ---------- 委託 / 導航 / 大地圖 / 打卡 / 小吃圖鑑（W4–W6）----------
   const missions = createMissions({
@@ -599,6 +631,9 @@ async function init() {
     now: () => gameTime,
     rng: Math.random,
     heightAt,
+    // 時段事件（夜市外送）：遊戲時刻取 dayNight.hour；路線長度走路網（graph 在下面才建，閉包取用時已存在）
+    getGameHour: () => dayNight.hour,
+    routeLength: (a, b) => findRoute(graph, a, b)?.lengthM,
   });
   const graph = buildRoadGraph(surfaceRoads);
   const nav = createNavigator({ bus, graph, scene, heightAt });
@@ -638,6 +673,7 @@ async function init() {
       bigMap.draw();
     },
   });
+  for (const k of Object.keys(EVENT_MAP_COLORS)) if (!BIG_MAP_COLORS[k]) BIG_MAP_COLORS[k] = EVENT_MAP_COLORS[k];
   // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
   const interCands = [null, null, null, null];
   const nearestInteractable = (pos, walking) => {
@@ -994,6 +1030,7 @@ async function init() {
     adapt = createAdaptiveResolution(renderer, tier);
     adaptive = tier === 'low';
     applyViewDist(budget.viewDist);
+    weather.setQuality(budget); // 雨絲數依畫質
   };
   const applyUiScale = (k) => {
     const root = document.documentElement.style;
@@ -1017,7 +1054,9 @@ async function init() {
       showFps = !!value;
       if (!showFps) hud.setFps?.(null);
     } else if (key === 'showHints') hud.setHintsEnabled?.(!!value);
+    else if (key === 'weather') applyWeatherPref(value);
   });
+  bus.on('weather:setting', (e) => applyWeatherPref(e && e.value));
 
   const onResize = () => {
     // rig 自行管理 camera.fov，這裡只改 aspect
@@ -1051,7 +1090,18 @@ async function init() {
     lastHp = a.hp;
     hud.setHealth?.(a.hp, a.maxHp);
   };
-  bus.on('player:money', ({ money, delta }) => hud.setMoney?.(money, delta));
+  bus.on('player:money', ({ money, delta, reason }) => hud.setMoney?.(money, delta, reason));
+  // 時段事件（missions/events.js）：開放 / 時段結束提示；取餐 / 送達 / 失敗的字幕由 missions 自己顯示，入帳 reason 'event' 由 hud.setMoney 標示
+  bus.on('event:available', (e) => {
+    if (!state.started || !e || !e.title) return;
+    const def = missions.events ? missions.events.defs().find((d) => d.id === e.id) : null;
+    const where = def && def.pickup && def.pickup.name ? `：到${def.pickup.name}取餐` : '';
+    hud.toast(`🌙 ${e.title}開放中${where}`, 5);
+  });
+  bus.on('event:closed', () => {
+    // 取餐開始也會發 closed（此時事件已進行中）：只在真正關閉（時段結束 / 冷卻）時提示
+    if (state.started && !missions.eventActive()) hud.toast('夜市外送時段結束', 3);
+  });
   bus.on('toast', ({ text, seconds } = {}) => {
     if (text) hud.toast(text, seconds);
   });
@@ -1121,7 +1171,7 @@ async function init() {
   // 音效每幀狀態（重用）：聆聽點 = 鏡頭；rpm01 = |速度| / 最高速、skid01 = 側滑速度 / SKID_REF、nearJunction = 最近號誌路口距離
   const audioState = {
     x: 0, z: 0, yaw: 0, driving: false, speedKmh: 0, rpm01: 0, throttle: 0, skid01: 0, twoWheeler: false,
-    walkSpeed: 0, grounded: true, nearJunction: null, paused: false,
+    walkSpeed: 0, grounded: true, nearJunction: null, paused: false, rain: 0,
   };
   let junctionT = JUNCTION_SCAN_SEC;
   let junctionDist = null;
@@ -1159,7 +1209,12 @@ async function init() {
     st.walkSpeed = state.started && state.mode === 'walk' ? player.speed : 0;
     st.grounded = player.onGround;
     st.nearJunction = state.started ? nearestJunction(dt, focus.x, focus.z) : null;
+    st.rain = weather.getState().rain; // 雨聲（Phase 5）：state.rain > 0.01 時 audio 開 LOOPS.rain
     audio.update(dt, st);
+    // 電台：駕駛中且未暫停才播（暫停 / 面板 / 開始畫面淡出）；暫停中也每幀呼叫
+    radioCtx.inVehicle = driving;
+    radioCtx.paused = st.paused;
+    radio.update(dt, radioCtx);
   };
 
   // ---------- 更新 ----------
@@ -1195,6 +1250,8 @@ async function init() {
       v.setControls(driveControls(snap.move, snap.down.jump));
       lastThrottle = snap.move.y;
       if (input.actions.down('horn')) v.honk(); // 按住連續響（honk 自帶冷卻）
+      // Q（或觸控 tb-radio 送的虛擬 KeyQ）：駕駛中 = 換台（步行時 Q 仍是換武器，見 handleWeaponInput）
+      if (input.actions.pressedIn('radioNext', 'vehicle')) radio.next();
       aim.aiming = false;
     } else {
       // heavy 委託：步行速度 × missions.speedScale()（駕駛為 1）
@@ -1266,6 +1323,7 @@ async function init() {
     state.playTime += dt;
     if (state.playTime >= HINT_PAUSE_SEC) showHint('pause');
     dayNight.update(dt, focus);
+    updateEnvironment(dt, worldStep.simDt);
     missionCtx.x = focus.x;
     missionCtx.z = focus.z;
     missionCtx.driving = driving;
@@ -1316,6 +1374,8 @@ async function init() {
       fast: dayNight.fast,
       markers: collectMarkers(hudMarkers, true),
       route: nav.route(),
+      weatherIcon: weather.getState().icon,
+      radio: radio.getState(),
     });
     whudState.driving = driving;
     whudState.aimBlend = rig.aimBlend;
@@ -1339,6 +1399,7 @@ async function init() {
     camera.lookAt(orbitCenter);
     dayNight.update(dt, orbitCenter);
     stepWorld(dt, orbitCenter);
+    updateEnvironment(dt, worldStep.simDt);
   };
 
   // ---------- 效能統計（FPS、__game.perf）----------
@@ -1651,6 +1712,8 @@ async function init() {
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
       weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud,
+      // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
+      weather, env, radio,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

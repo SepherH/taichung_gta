@@ -457,6 +457,13 @@ stats 增：missionsDone: 0, missionsFailed: 0, shotsFired: 0
 - `migrate(v1)` → v2：補上述預設、保留 v1 所有值；`version > 2` → null（不覆寫）
 - `validateSave`：weapons.slot ∈ {0,1,2}；彈藥非負整數且 mag ≤ 12、reserve ≤ 120；completed / best / cooldowns 只收字串鍵 → 非負有限數；checkins / foods 只收字串、去重、上限 200；`missions.active` 只收 `{ slug, stage }` 或 null（讀檔時整合層可選擇作廢進行中的任務）
 - 經濟：任務報酬 `economy.add(n, 'mission')`、打卡 `economy.add(n, 'checkin')`（reason 字串，§7 無需改碼）
+- **Phase 5 增補（不升版，`SAVE_VERSION` 仍為 2）**：`missions.events`（選填）＝ 時段事件狀態（`missions/events.js` `serialize()`，由 `missions.serialize()` 只在有狀態時帶出）
+```
+missions.events?: { completed: { <事件 id>: 正整數次數 }, cooldowns: { <事件 id>: 剩餘冷卻秒 > 0 } }
+```
+  - `validateSave`：`events` 非物件、或 `completed` / `cooldowns` 存在但非物件 → **整欄丟棄**（其他 missions 欄位照常保留）；表內鍵規則同 completed / cooldowns（字串鍵、非負有限數、≤ 200 鍵），另 completed 只收 ≥ 1（取整數）、cooldowns 只收 > 0；清洗後兩表皆空 → 省略此欄（與 serialize 一致）
+  - 讀檔：`missions.restore(save.missions)` 轉交 `events.restore(src.events)`（未知 id 由 events.js 再過濾；冷卻夾到該事件 cooldownSec）；進行中的外送不存檔（讀檔一律作廢）
+  - 經濟：外送入帳 `economy.add(n, 'event')`；不計入 missionsDone / missionsFailed
 
 ## 19. 效能預算（手機 low 檔）
 
@@ -480,6 +487,35 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - **60 Hz 等價**：`dt` 恰為 1/60 時每幀恰 1 子步，`simDt === dt`；本契約不改 60 Hz 下的結果
 - **更新順序**（`core/loop.js`）：tick = 自適應解析度 → 世界更新（暫停時略過；遊戲中 `updateGame`、開始畫面 `updateAttract`）→ 音效 → 渲染 → 效能統計 → FPS → `input.endFrame()`；物理一幀 `createWorldStep().step(dt, center)` = 車流外部狀態（blockers / context / view）→ `lights.update(simDt)` / `updateVisuals` → `pw.step(dt)` → `gameTime += simDt` → `combat.update(simDt)` → `player.syncPhysics(dt)`（非駕駛）→ `vehicles.sync()` → `traffic.sync(dt, center)` → `dmg.update(dt)` → 車輛 `setActiveByDistance(ACTIVE_RADIUS)` → 回收（`simDt`）
 - 回歸：`node tools/test/framerate-invariance.mjs`（60 / 120 / 144 Hz 推進相同模擬時間，行人位置、動畫速度、walk ↔ idle 切換次數一致）
+
+## 21. Phase 5 整合（i5：天氣 / 環境、車上電台、時段事件；接線點在 `src/main.js`）
+
+### 21.1 天氣 / 環境（`src/weather.js`、`src/environment.js`；介面以各檔頭為準）
+- 建立：`env = createEnvironment({ scene, dayNight, viewDist: budget.viewDist, fogNearRatio: 0.25 })`（傳 dayNight 即 attach：DayNight 只算基準值，天空 / 霧色 / 霧距 / hemi / sun 由 env 套用）；`weather = createWeather({ scene, camera, quality: budget, THREE, auto, initial })`（THREE 注入才有雨絲）
+- 每幀順序（遊戲中與開始畫面相同）：`dayNight.update(dt, focus)` → `weather.update(dt, worldStep.simDt)` → `env.update(dt, { dayNight, weather })`
+  - `worldStep.simDt`（`core/loop.js` createWorldStep 新增 getter）= 本幀物理實際推進的模擬秒數；每幀 `resetPerf()` 歸零 → 暫停 / 全螢幕面板開啟時世界不 step、天氣狀態機不推進（§20：天氣屬遊戲時鐘，吃 simDt；雨絲粒子屬特效吃 dt）
+- 視距：`applyViewDist(d)` = 鏡頭 far + `env.setViewDist(d)`（attach 後不再直接寫 `scene.fog`，否則每幀被 env 覆蓋）；畫質切換另呼叫 `weather.setQuality(budget)`（雨絲數）
+- 設定 `weather` ∈ `auto | clear | rain | fog`（選單「天氣」列）：`auto` → `weather.setAuto(true)`；其他 → `setAuto(false)` + `setWeather(kind, { instant: true })`
+  - **待補**：`src/core/settings.js` SETTINGS_SCHEMA 尚無 `weather` 鍵（`settings.set` 回 false）——選單退回本地值（不持久化）並 `bus.emit('weather:setting', { value })`；整合層同時訂閱 settings 的 `weather` 與此事件。補上 `weather: { type: 'enum', values: ['auto','clear','rain','fog'], default: 'auto', label: '天氣' }` 後即自動持久化，不需改其他檔
+- 雨聲：音效每幀 state 加 `rain`（= `weather.getState().rain`）；`audio/index.js` 在 `rain > 0.01` 開 `LOOPS.rain`（sfx 群組，≤ 0.005 關），每幀 `ctrl.set(state, now)`，暫停時外層增益 0
+- HUD：`hud.update` state 加 `weatherIcon`（`getState().icon`：sun / rain / fog），顯示在右上狀態列最前面（桌機 / 觸控相同，位於觸控右上小鈕下方）
+
+### 21.2 車上電台（`src/audio/radio.js`）
+- `audio.getOutput()` → `{ ctx, out: master } | null`（解鎖前 / 無 AudioContext / dispose 後 null；回傳物件重用）
+- `radio = createRadio({ getAudio: () => audio.getOutput(), getMusicVolume: () => settings.get('volumeMusic') })`；out 接 **master**（radio 自己乘音樂音量，不可接 music 群組）
+- 每幀（`updateAudio`，暫停中也呼叫）：`radio.update(dt, { inVehicle: 駕駛中, paused: 開始畫面 / 暫停 / 全螢幕面板 })`
+- 鍵位：駕駛分支 `input.actions.pressedIn('radioNext', 'vehicle')` → `radio.next()`；步行時 Q 仍是 weaponCycle（只在步行分支讀）
+- 觸控：`hud.js` 以 `registerTouchButton({ id: 'tb-radio', label: '電台', code: 'KeyQ', slot: 'top2', showWhen: 'drive' })` 註冊（沿用 touch.js 按鈕樣式與 pointer 處理，送虛擬 KeyQ）
+- HUD：state 加 `radio`（`radio.getState()`）；駕駛中 playing 時於駕駛面板車名上方顯示「📻 台名」，換台（含關閉）時強調顯示 2.5 s；步行不顯示。電台無選單項（音量沿用「音樂」）
+
+### 21.3 時段事件（夜市外送，`src/missions/events.js`）
+- `createMissions({ …, getGameHour: () => dayNight.hour, routeLength: (a, b) => findRoute(graph, a, b)?.lengthM })`（graph 在 missions 之後建立，閉包呼叫時已存在；查無路線 → events.js 以直線 × 1.3 估算）
+- 標記：`missions.markers()` 附 `event-start`（取餐點）/ `event-dest`（送達點）；小地圖 `hud.js MARKER_COLORS` 加兩色且超出半徑時貼邊；大地圖（`map/big-map.js` 未含此 kind）由 main.js 在建立後補色（**待補**：big-map.js 圖例與 event-dest 圖釘造型）
+- 事件提示：`event:available` → toast「🌙 <title>開放中：到<取餐點>取餐」；`event:closed` 且無進行中外送 → toast「夜市外送時段結束」；`event:start / complete / fail` 字幕由 missions 自己顯示；`player:money` reason `'event'` → `hud.setMoney(money, delta, reason)` 跳動文字前加「外送」
+- 存檔：§18 Phase 5 增補 `missions.events`
+
+### 21.4 回歸
+- `node tools/test/integration-p5.mjs`：main.js + loop.js 靜態接線檢查、save.js missions.events 清洗、audio getOutput 解鎖前 null / 解鎖後 master、雨聲 loop 開關、選單天氣列
 
 ---
 

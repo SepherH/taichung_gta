@@ -3,6 +3,8 @@
 // 依賴全部注入（settings / bus / keymapHelp / touchHelp / getStats / getMoney / hasSave / mapView / onOpenGuide），不 import src/core/**
 // 「圖鑑」只在有給 onOpenGuide 時列出：點下後選單關閉（不 emit game:pause）並呼叫 onOpenGuide()，圖鑑關閉後由整合層決定回暫停選單或繼續
 // 音效：選單操作一律 bus.emit('ui:sound', { kind })（開頁 / 開選單 open、繼續 close、開始 / 確定 confirm、返回 / 取消 cancel、其餘 click）
+// 天氣（Phase 5）：設定列 key 'weather'（auto / clear / rain / fog）寫進既有 settings；settings 的 schema 尚無此鍵
+//   （settings.set 回 false）時退回選單內的本地值（不持久化），兩種情況都 bus.emit('weather:setting', { value }) 讓整合層即時套用
 // 背景半透明，場景由整合層持續渲染；overlay 上的指標 / 觸控事件一律 stopPropagation，不傳到遊戲 canvas 與觸控層
 import './menu.css';
 import { createMenuModel, ITEM_LABELS, PAGE_TITLES, formatDuration, formatKm, formatMoney } from './menu-model.js';
@@ -40,7 +42,22 @@ const SETTING_ROWS = [
   { key: 'showFps', type: 'toggle', label: '顯示 FPS' },
   { key: 'showHints', type: 'toggle', label: '新手提示' },
   { key: 'uiScale', type: 'range', label: '介面大小', min: 0.8, max: 1.3, step: 0.05, fmt: pct },
+  {
+    key: 'weather',
+    type: 'segment',
+    label: '天氣',
+    options: [
+      ['auto', '自動'],
+      ['clear', '晴'],
+      ['rain', '雨'],
+      ['fog', '霧'],
+    ],
+    note: '自動 = 晴 / 雨 / 霧隨時間變化',
+    fallback: 'auto', // settings 不認得此鍵時的預設值
+  },
 ];
+// 設定不支援時改存本地的鍵（值改變時另 emit 的 bus 事件）
+const LOCAL_FALLBACK_EVENTS = { weather: 'weather:setting' };
 
 // 統計頁欄位（getStats() 的鍵 → 標題與格式）
 const STAT_ROWS = [
@@ -85,6 +102,26 @@ export function createMenu({
     } catch (err) {
       // 忽略
     }
+  };
+  // 設定讀寫：settings 不認得的鍵（set 回 false / get 回 undefined）且列有 fallback 時存本地值
+  const localVals = {};
+  const getSetting = (key) => {
+    const v = settings.get(key);
+    if (v !== undefined) return v;
+    const def = SETTING_ROWS.find((d) => d.key === key);
+    return def && def.fallback !== undefined ? (key in localVals ? localVals[key] : def.fallback) : v;
+  };
+  const setSetting = (key, value) => {
+    const ok = settings.set(key, value);
+    const evName = LOCAL_FALLBACK_EVENTS[key];
+    if (!evName) return ok;
+    if (ok === false) localVals[key] = value;
+    try {
+      if (bus && bus.emit) bus.emit(evName, { value: getSetting(key) });
+    } catch (err) {
+      // 忽略
+    }
+    return ok;
   };
   const cleanups = [];
   const listen = (target, type, fn, opts) => {
@@ -207,7 +244,7 @@ export function createMenu({
         const b = button('tg-seg-btn', text, () => {
           kbNav = false;
           model.focusItem(def.key);
-          settings.set(def.key, v);
+          setSetting(def.key, v);
           refreshSetting(def.key);
           sound('click');
           render();
@@ -279,13 +316,17 @@ export function createMenu({
 
   function refreshSetting(key) {
     const r = rowEls.get(key);
-    if (r) r.update(settings.get(key));
+    if (r) r.update(getSetting(key));
   }
   function refreshSettings() {
     for (const key of rowEls.keys()) refreshSetting(key);
   }
   function resetSettings() {
     settings.reset();
+    for (const key of Object.keys(LOCAL_FALLBACK_EVENTS)) {
+      const def = SETTING_ROWS.find((d) => d.key === key);
+      if (settings.get(key) === undefined && def && getSetting(key) !== def.fallback) setSetting(key, def.fallback);
+    }
     refreshSettings();
   }
   if (settings.subscribe) {
@@ -305,14 +346,14 @@ export function createMenu({
     const r = rowEls.get(key);
     if (!r) return;
     const { def } = r;
-    const cur = settings.get(key);
+    const cur = getSetting(key);
     if (def.type === 'toggle') {
       settings.set(key, enter ? !cur : dir > 0);
     } else if (def.type === 'segment') {
       const vals = def.options.map((o) => o[0]);
       let i = vals.indexOf(cur);
       i = enter ? (i + 1) % vals.length : Math.min(vals.length - 1, Math.max(0, i + dir));
-      settings.set(key, vals[i]);
+      setSetting(key, vals[i]);
     } else {
       const v = Math.min(def.max, Math.max(def.min, Number(cur) + dir * def.step));
       settings.set(key, Math.round(v / def.step) * def.step);

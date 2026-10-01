@@ -19,11 +19,18 @@
 //   hud.setUiScale(k)                               // 寫 CSS 變數 --ui-scale / --tg-ui-scale；HUD 用 --hud-scale（觸控或小螢幕 ≤ 1）
 // 觸控裝置（body.touch）：本檔依 state.driving 切換觸控按鈕配置；提示文字「按 F …」改指向「上車 / 下車」鈕；
 //   觸控駕駛中版面沒有提示卡的位置，新手提示延到下車後才顯示
+// Phase 5：
+//   state.weatherIcon（weather.getState().icon：'sun'|'rain'|'fog'）→ 右上狀態列最前面的天氣圖示（桌機 / 觸控同一處，位於觸控右上小鈕下方，不擋按鈕）
+//   state.radio（radio.getState()：{ on, playing, index, name }）→ 駕駛面板車名上方的台名：駕駛中且 playing 時常駐；
+//     駕駛中換台（index / on 改變）時以強調樣式顯示 RADIO_FLASH_SEC 秒（含「關閉」）；步行不顯示
+//   觸控換台鈕 tb-radio（top2，駕駛專屬；沿用 touch.js 按鈕樣式 / pointer 處理，送虛擬鍵 KeyQ = core/actions radioNext）
+//   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）著色且超出半徑時貼邊
+//   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
-import { setTouchMode, setTouchButtonVisible } from './touch.js';
+import { setTouchMode, setTouchButtonVisible, registerTouchButton } from './touch.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
@@ -39,6 +46,11 @@ const SMALL_SCREEN = 700; // 視窗短邊小於此值（px；手機、小視窗�
 const TOUCH_BTN_LABEL = { walk: '上車', drive: '下車' }; // 對應 touch.js 的 tb-enter / tb-exit 文字
 const TOUCH_INTERACT_LABEL = '互動'; // 對應 touch.js 的 tb-interact 文字
 const INTERACT_BTN_ID = 'tb-interact';
+export const RADIO_BTN_ID = 'tb-radio';
+const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
+// 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
+export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
+const MONEY_REASON_LABEL = { event: '外送 ' };
 // 小地圖標記顏色（契約 §17 kind）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = {
   car: '#4fc3ff',
@@ -48,9 +60,11 @@ export const MARKER_COLORS = {
   checkin: '#b36bff',
   food: '#ff7eb9',
   ammo: '#a8a8a8',
+  'event-start': '#8dff3a',
+  'event-dest': '#2ee86a',
 };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
@@ -152,9 +166,94 @@ export class HUD {
         this._closeHint();
       });
     }
+    this._buildPhase5();
     this.mapCanvas = this._buildMap();
     if (typeof window !== 'undefined' && window.addEventListener) {
       window.addEventListener('resize', () => this._applyScale());
+    }
+  }
+
+  // 天氣圖示（狀態列最前面）、台名列（駕駛面板內車名上方）、觸控換台鈕；index.html / style.css 不動，樣式以 inline 補
+  _buildPhase5() {
+    this._weatherIcon = null;
+    this._radioText = null;
+    this._radioKey = null;
+    this._radioFlash = 0;
+    this._radioShown = null;
+    const status = this.clockEl && this.clockEl.parentNode ? this.clockEl.parentNode : document.getElementById('status');
+    const w = document.createElement('span');
+    w.id = 'weather-icon';
+    w.classList.add('hidden');
+    w.setAttribute('role', 'img');
+    const sep = document.createElement('span');
+    sep.className = 'status-sep';
+    sep.textContent = '·';
+    if (status) {
+      if (status.style) status.style.maxWidth = '260px'; // 多一個圖示，放寬原本 220px 上限
+      if (typeof status.insertBefore === 'function' && status.firstChild) {
+        status.insertBefore(sep, status.firstChild);
+        status.insertBefore(w, sep);
+      } else {
+        status.appendChild(w);
+        status.appendChild(sep);
+      }
+    }
+    this.weatherEl = w;
+    this.weatherSepEl = sep;
+    const r = document.createElement('div');
+    r.id = 'radio-label';
+    r.classList.add('hidden');
+    r.setAttribute('aria-live', 'polite');
+    if (r.style) {
+      r.style.fontSize = '13px';
+      r.style.textAlign = 'right';
+      r.style.whiteSpace = 'nowrap';
+      r.style.opacity = '0.9';
+      r.style.textShadow = '0 1px 2px rgba(0,0,0,0.8)';
+    }
+    if (this.driveEl) {
+      if (typeof this.driveEl.insertBefore === 'function' && this.vehicleLabelEl && this.vehicleLabelEl.parentNode === this.driveEl) this.driveEl.insertBefore(r, this.vehicleLabelEl);
+      else this.driveEl.appendChild(r);
+    }
+    this.radioEl = r;
+    registerTouchButton({ id: RADIO_BTN_ID, label: '電台', code: 'KeyQ', mode: 'tap', slot: 'top2', showWhen: 'drive' });
+  }
+
+  // icon：'sun'|'rain'|'fog'；其他 / 省略 = 隱藏
+  _updateWeather(icon) {
+    const key = WEATHER_ICONS[icon] ? icon : null;
+    if (key === this._weatherIcon) return;
+    this._weatherIcon = key;
+    this.weatherEl.classList.toggle('hidden', !key);
+    this.weatherSepEl.classList.toggle('hidden', !key);
+    if (!key) return;
+    this.weatherEl.textContent = WEATHER_ICONS[key][0];
+    this.weatherEl.setAttribute('aria-label', `天氣：${WEATHER_ICONS[key][1]}`);
+    this.weatherEl.setAttribute('title', WEATHER_ICONS[key][1]);
+  }
+
+  // radio：{ on, playing, index, name } 或 null；駕駛中 playing 時常駐，換台時強調顯示 RADIO_FLASH_SEC 秒
+  _updateRadio(dt, radio, driving) {
+    const key = radio ? (radio.on ? radio.index : -1) : null;
+    if (key !== this._radioKey) {
+      if (driving && this._radioKey !== null && key !== null) this._radioFlash = RADIO_FLASH_SEC;
+      this._radioKey = key;
+    }
+    if (!driving) this._radioFlash = 0;
+    else if (this._radioFlash > 0) this._radioFlash -= dt;
+    const flash = this._radioFlash > 0;
+    const show = driving && !!radio && (flash || !!radio.playing);
+    const text = show ? `📻 ${radio.name}` : null;
+    const shown = show ? (flash ? 2 : 1) : 0;
+    if (text === this._radioText && shown === this._radioShown) return;
+    this._radioText = text;
+    this._radioShown = shown;
+    this.radioEl.classList.toggle('hidden', !show);
+    if (!show) return;
+    this.radioEl.textContent = text;
+    if (this.radioEl.style) {
+      this.radioEl.style.fontWeight = flash ? 'bold' : 'normal';
+      this.radioEl.style.color = flash ? '#ffe28a' : '';
     }
   }
 
@@ -301,8 +400,8 @@ export class HUD {
   }
 
   // ---------- 金錢 / 血量 ----------
-  // delta 省略時以上次金額推算；delta 為 0 不跳動
-  setMoney(money, delta) {
+  // delta 省略時以上次金額推算；delta 為 0 不跳動；reason（economy 的入帳原因）'event' 時跳動文字加「外送」
+  setMoney(money, delta, reason) {
     const m = Math.round(Number(money));
     if (!Number.isFinite(m)) return;
     const d = delta === undefined || delta === null ? (this._money === null ? 0 : m - this._money) : Math.round(Number(delta) || 0);
@@ -312,7 +411,7 @@ export class HUD {
     }
     if (!d) return;
     const el = this.moneyDeltaEl;
-    el.textContent = `${d > 0 ? '+' : '−'}${formatMoney(Math.abs(d))}`;
+    el.textContent = `${(d > 0 && MONEY_REASON_LABEL[reason]) || ''}${d > 0 ? '+' : '−'}${formatMoney(Math.abs(d))}`;
     el.classList.toggle('gain', d > 0);
     el.classList.toggle('loss', d < 0);
     el.classList.remove('hidden');
@@ -461,7 +560,7 @@ export class HUD {
   }
 
   // ---------- 每幀 ----------
-  // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers, money, hp, hpMax, vehicleLabel, roadName }
+  // state：{ x, z, yaw, driving, speedKmh, location, time, fast, markers, money, hp, hpMax, vehicleLabel, roadName, weatherIcon, radio }
   update(dt, state) {
     const driving = !!state.driving;
     if (this.touch) setTouchMode(driving ? 'drive' : 'walk');
@@ -484,6 +583,8 @@ export class HUD {
       if (!this._pillShows(p.name)) this._showToast(p.text, p.seconds);
     }
     if (driving) this._updateDrive(state);
+    this._updateWeather(state.weatherIcon);
+    this._updateRadio(dt, state.radio || null, driving);
     if (state.time !== undefined) {
       const clock = state.fast ? `${state.time} ⏩` : String(state.time);
       if (clock !== this._clock) {
