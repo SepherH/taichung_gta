@@ -405,7 +405,10 @@ function fakeStorage(init = {}) {
   check('actions：KEYMAP_HELP 不列預留 action', leak.length === 0, leak.join(','));
   const helpText = JSON.stringify(KEYMAP_HELP);
   const items = KEYMAP_HELP.flatMap((g) => g.items);
-  check('actions：說明不再列 O 靈敏度 / 電台，H 只當喇叭、E 只當互動、R 只當裝填', !items.some((i) => i.keys === 'O' || /電台/.test(i.desc)) && items.filter((i) => i.keys === 'H').every((i) => i.action === 'horn') && items.filter((i) => i.keys === 'E').every((i) => i.action === 'interact') && items.filter((i) => i.keys === 'R').every((i) => i.action === 'reload'));
+  const driveItems = (KEYMAP_HELP.find((g) => g.group === '駕駛') || { items: [] }).items;
+  const radioRows = items.filter((i) => /電台/.test(i.desc));
+  const touchRadio = TOUCH_HELP.some((g) => g.group === '駕駛' && g.items.some((i) => /電台/.test(i.keys + i.desc)));
+  check('actions：說明不列 O 靈敏度、含電台列且桌機列標明只在車上，H 只當喇叭、E 只當互動、R 只當裝填', !items.some((i) => i.keys === 'O') && radioRows.length > 0 && radioRows.every((i) => driveItems.includes(i) && i.desc.includes('只在車上')) && touchRadio && items.filter((i) => i.keys === 'H').every((i) => i.action === 'horn') && items.filter((i) => i.keys === 'E').every((i) => i.action === 'interact') && items.filter((i) => i.keys === 'R').every((i) => i.action === 'reload'));
   check('actions：攻擊說明為「依武器」（不再寫揮拳）', !/揮拳/.test(helpText) && !/揮拳/.test(JSON.stringify(TOUCH_HELP)) && items.some((i) => i.action === 'attack' && i.desc.includes('依武器')));
   // 觸控說明：武器鈕（點擊循環 / 長按輪盤）、裝填、瞄準、互動鈕、地圖鈕開大地圖
   const touchItems = TOUCH_HELP.flatMap((g) => g.items);

@@ -12,6 +12,9 @@
 //   nearest()：取餐點與委託起點重疊時取較近者；沒有任何遊戲時刻來源時事件完全不作用，既有委託行為不變；委託進行中不開放事件、事件進行中不開放委託（起點光柱 / 標記一併隱藏）
 //   事件取餐點 / 送達點用同一個光柱池（start / dest 色）；markers() 附加 kind 'event-start' / 'event-dest'；
 //   目標列在無委託時顯示事件倒數；eventObjective() / eventActive() / events 供 HUD / 除錯；serialize() 只在事件有狀態時多帶 events 欄位
+// 委託統計（存檔 stats.missionsDone / missionsFailed）：trackMissionStats(bus, stats) 依 MISSION_STAT_EVENTS 累加——
+//   委託 mission:complete / mission:fail 與事件 event:complete / event:fail 各計一次（兩邊互不轉發，不重複計數）；
+//   放棄比照委託：abandon 走 fail（reason 'abandon'）→ 計入 missionsFailed；讀檔作廢進行中的委託 / 事件不發 fail、不計
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
 import { createBeaconPool } from './light-pillar.js';
@@ -31,6 +34,29 @@ export const KO_DAMAGE_PCT = 50;
 export const DAMAGE_REWARD_CUT = 0.7;
 export const EARLY_BONUS = 0.3;
 export const IMPACT_MERGE_SEC = 0.3; // 同一次碰撞的連續接觸回報：視窗內只計超出先前最大值的部分
+// bus 事件 → 委託統計欄位（時段事件與委託同列計數）
+export const MISSION_STAT_EVENTS = {
+  'mission:complete': 'missionsDone',
+  'mission:fail': 'missionsFailed',
+  'event:complete': 'missionsDone',
+  'event:fail': 'missionsFailed',
+};
+
+// 訂閱 MISSION_STAT_EVENTS，每次 +1 寫進 stats（整合層的 extraStats）；回傳取消訂閱函式
+export function trackMissionStats(bus, stats) {
+  const offs = [];
+  if (!bus || typeof bus.on !== 'function' || !stats) return () => {};
+  for (const name of Object.keys(MISSION_STAT_EVENTS)) {
+    const key = MISSION_STAT_EVENTS[name];
+    const off = bus.on(name, () => {
+      stats[key] = (Number(stats[key]) || 0) + 1;
+    });
+    if (typeof off === 'function') offs.push(off);
+  }
+  return () => {
+    for (const off of offs.splice(0)) off();
+  };
+}
 
 const FAIL_TEXT = {
   timeout: '時間到了……委託人已經放棄等待。',

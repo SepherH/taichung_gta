@@ -38,7 +38,10 @@
 // 1. 建構：const lights = createTrafficLights(); lights.buildMeshes(scene)；
 //    new Traffic(scene, { center: spawn, terrain, physics, combat, budget: qualityBudget(tier), lights, bus })（crowd 參數可刪）
 // 2. 畫質設定變更：traffic.setBudget(qualityBudget(newTier))（逐步生效，不必重建）
-// 3. 每幀（物理 step 前）：lights.update(dt)、lights.updateVisuals(焦點 x, z)；traffic.setView(...)、setBlockers(...) 照舊；
+// 3. 號誌相位在固定子步推進：pw.onBeforeStep((h) => lights.step(h)) 須在 new Traffic 之前登記（同一子步車流讀到本子步時刻）；
+//    車損去重時鐘同理 pw.onAfterStep((h) => dmg.step(h))。每幀只刷新：物理 step 後 lights.update()（燈色 / 倒數）、
+//    lights.updateVisuals(焦點 x, z)、dmg.update(dt, …)（煙霧粒子）——見 core/loop.js createWorldStep；
+//    物理 step 前 traffic.setView(...)、setBlockers(...) 照舊；
 //    setContext({ playerInVehicle, vehicles, player: player.actor, lockTarget: 玩家鎖定中的行人 Actor 或 null })
 // 4. 物理 step 後：traffic.sync(dt, center) 照舊（行人剛體已在 sync 內依 traffic.physicsRadius 啟用 / 休眠）；
 //    setActiveByDistance(traffic.bodies(vehicles.bodies(entities)), …, ACTIVE_RADIUS) 照舊——bodies() 現在只列車流車
@@ -1130,7 +1133,10 @@ export class Traffic {
     v.settle(this.terrain, dt, snap);
   }
 
-  // ---------- 行人移動（實作在 traffic-peds.js；保留方法名供既有呼叫端 / 測試 wrap）----------
+  // ---------- 行人移動（實作在 traffic-peds.js；以下方法只是外部 / 本類別零星呼叫用的薄包裝）----------
+  // 子步路徑不經過這些方法：_step → stepPeds → updatePed → walkPed → syncActor、_afterStep → afterStepPeds → syncActor、
+  //   sync → thinkPeds（降頻走路 walkPed / syncActor）皆在 traffic-peds.js 模組內直接呼叫，wrap _updatePed / _walkPed / _syncActor 攔不到
+  // 測試要攔子步行為：wrap Traffic 實例的 _step / _afterStep / _thinkPeds，或 mock traffic-peds.js 的匯出函式
 
   _pathPoint(p, out) {
     return pathPoint(this, p, out);

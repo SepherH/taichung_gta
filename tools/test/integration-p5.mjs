@@ -61,14 +61,19 @@ const GROUPS = [
   ['電台鍵位：駕駛分支 pressedIn(\'radioNext\', \'vehicle\') → radio.next()', ["input.actions.pressedIn('radioNext', 'vehicle')", 'radio.next()']],
   ['時段事件：createMissions 注入 getGameHour / routeLength（findRoute(graph, a, b)?.lengthM）', [
     'getGameHour: () => dayNight.hour', 'routeLength: (a, b) => findRoute(graph, a, b)?.lengthM']],
-  ['事件提示 / 入帳 reason / 大地圖標記色', [
-    "bus.on('event:available'", "bus.on('event:closed'", 'hud.setMoney?.(money, delta, reason)', 'BIG_MAP_COLORS[k] = EVENT_MAP_COLORS[k]', "'event-start'", "'event-dest'"]],
+  ['事件提示 / 入帳 reason / 委託統計（含事件）', [
+    "bus.on('event:available'", "bus.on('event:closed'", 'hud.setMoney?.(money, delta, reason)', 'trackMissionStats(bus, extraStats)']],
   ['HUD 新欄位：weatherIcon / radio', ['weatherIcon: weather.getState().icon', 'radio: radio.getState()']],
   ['存檔：missions.serialize（含 events）、restore', ['missions: missions.serialize()', 'missions.restore(save.missions)']],
 ];
 for (const [name, list] of GROUPS) {
   const miss = missing(list);
   check(`main/loop 接線：${name}`, !miss.length, miss.map(String).join(' | '));
+}
+// 大地圖事件標記色：big-map.js 正式定義（顏色 / 圖例 / 圖釘），main.js 不再建立後補色
+{
+  const bigSrc = read('src/map/big-map.js');
+  check('大地圖標記色：big-map.js 定義 event-start / event-dest（色 / 圖例 / 圖釘）、main.js 無權宜補色', ["'event-start':", "'event-dest':", "'event-dest']"].every((s) => bigSrc.includes(s)) && !/BIG_MAP_COLORS|EVENT_MAP_COLORS/.test(mainSrc));
 }
 // 順序：遊戲中 dayNight.update → updateEnvironment（weather → env）；步行分支不讀 radioNext
 {

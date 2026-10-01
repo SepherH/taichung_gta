@@ -19,7 +19,8 @@
 // 事件（bus）：event:available { id, title, x, z } / event:closed { id } / event:start { id, title, to, routeM, limitSec }
 //   / event:complete { id, reward, timeSec, leftSec, routeM } / event:fail { id, reason }
 //   / nav:destination、nav:clear（source 'event'）/ ui:sound
-//   刻意不發 mission:*（避免整合層把事件算進 missionsDone / missionsFailed）
+//   不發 mission:*：委託統計由 missions/index.js trackMissionStats 另訂閱 event:complete / event:fail 計入 missionsDone / missionsFailed
+//   （abandon 亦為 event:fail，比照委託放棄計入 missionsFailed；restore / dispose 作廢進行中外送不發 fail、不計）
 
 export const EVENT_PRIORITY = 3; // 與委託同級（interactable 仲裁 §17）
 export const EVENT_ARRIVE_PAD = 8;

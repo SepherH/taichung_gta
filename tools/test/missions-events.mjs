@@ -5,7 +5,8 @@
 //   因此不需要 node_modules 也能跑；路網用 citymodel surfaceRoads + navigation buildRoadGraph / findRoute（皆不需要真 three）
 // 項目：時段判斷（含跨午夜）；時段內出現 / 時段外不出現；取餐 → 送達 → 獎勵（沿路網距離算時限）；逾時失敗不扣錢；
 //   冷卻後可重複觸發、冷卻結束但已出時段不出現；repeatable false；獎勵對距離 / 剩餘秒數單調；取餐點座標落在真實道路上；
-//   createMissions 整合：無時刻來源 / 時段外 / events:false 三者與原行為逐事件一致；委託與事件互斥；存檔往返
+//   createMissions 整合：無時刻來源 / 時段外 / events:false 三者與原行為逐事件一致；委託與事件互斥；存檔往返；
+//   委託統計 trackMissionStats：事件完成 missionsDone +1、逾時 / 放棄 missionsFailed +1、委託 + 事件各一次不重複計數
 import { register } from 'node:module';
 
 const THREE_STUB = `
@@ -42,7 +43,7 @@ const fs = await import('node:fs');
 const path = await import('node:path');
 const { fileURLToPath } = await import('node:url');
 const EV = await import('../../src/missions/events.js');
-const { createMissions } = await import('../../src/missions/index.js');
+const { createMissions, trackMissionStats, MISSION_STAT_EVENTS } = await import('../../src/missions/index.js');
 const { createBus } = await import('../../src/core/events.js');
 const { buildRoadGraph, findRoute } = await import('../../src/navigation.js');
 const { surfaceRoads } = await import('../../src/citymodel.js');
@@ -312,7 +313,7 @@ function setupMs(extra = {}, ctxHour) {
       ms.update(0.1, ctxHour === undefined ? { x: pos.x, z: pos.z } : { x: pos.x, z: pos.z, gameHour: ctxHour });
     }
   };
-  return { ms, log, money, clock, step, of: (n) => log.filter((e) => e.n === n) };
+  return { ms, bus, log, money, clock, step, of: (n) => log.filter((e) => e.n === n) };
 }
 // 固定劇本：接第一個開放委託 → 送達 → 再接一個 → 逾時 / 放棄 → 存檔
 async function scenario(env) {
@@ -390,6 +391,71 @@ async function scenario(env) {
   R.ms.dispose();
   M.ms.dispose();
   check('dispose 後光柱全部釋放', E.ms.beacons.live.length === 0 && M.ms.beacons.live.length === 0);
+}
+
+// ======================= 6b. 委託統計（missionsDone / missionsFailed）計入時段事件 =======================
+{
+  check('MISSION_STAT_EVENTS：委託與事件的完成 / 失敗對應 missionsDone / missionsFailed', MISSION_STAT_EVENTS['mission:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['event:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['mission:fail'] === 'missionsFailed' && MISSION_STAT_EVENTS['event:fail'] === 'missionsFailed' && Object.keys(MISSION_STAT_EVENTS).length === 4);
+  const withStats = async (extra) => {
+    const E = setupMs(extra);
+    const stats = { missionsDone: 0, missionsFailed: 0, shotsFired: 7 };
+    E.off = trackMissionStats(E.bus, stats);
+    E.stats = stats;
+    await E.ms.ready;
+    E.step(0.2, FAR);
+    return E;
+  };
+  const night = { getGameHour: () => 20, routeLength };
+  // 事件完成 → missionsDone +1
+  const A = await withStats(night);
+  A.ms.nearest(PICK).act();
+  A.step(0.1, PICK);
+  A.step(0.1, A.ms.eventActive().to);
+  check('事件完成：missionsDone +1、missionsFailed 不變、不發 mission:complete', A.stats.missionsDone === 1 && A.stats.missionsFailed === 0 && A.of('event:complete').length === 1 && A.of('mission:complete').length === 0, JSON.stringify(A.stats));
+  check('trackMissionStats 不動其他統計欄位', A.stats.shotsFired === 7);
+  // 事件逾時 → missionsFailed +1
+  const T = await withStats(night);
+  T.ms.nearest(PICK).act();
+  T.step(0.1, PICK);
+  T.step(T.ms.eventActive().limitSec + 1, FAR);
+  check('事件逾時：missionsFailed +1、missionsDone 不變', T.of('event:fail').at(-1)?.p.reason === 'timeout' && T.stats.missionsFailed === 1 && T.stats.missionsDone === 0, JSON.stringify(T.stats));
+  // 事件放棄 → 比照委託放棄（mission:fail abandon 計 missionsFailed）
+  const B = await withStats(night);
+  B.ms.nearest(PICK).act();
+  B.step(0.1, PICK);
+  B.ms.abandon();
+  check('事件放棄：比照委託放棄計入 missionsFailed +1', B.of('event:fail').at(-1)?.p.reason === 'abandon' && B.stats.missionsFailed === 1 && B.stats.missionsDone === 0, JSON.stringify(B.stats));
+  // 委託 + 事件各完成一次 → 各 +1（合計 2），不重複
+  const C = await withStats(night);
+  const slug = C.ms.offers()[0];
+  const m = C.ms.catalog().find((c) => c.slug === slug);
+  C.step(0.1, m.from);
+  C.ms.nearest(m.from).act();
+  C.step(0.1, m.from);
+  C.step(0.1, m.to);
+  check('委託完成一次：missionsDone = 1', C.stats.missionsDone === 1 && C.of('mission:complete').length === 1, JSON.stringify(C.stats));
+  C.step(0.2, FAR);
+  C.ms.nearest(PICK).act();
+  C.step(0.1, PICK);
+  C.step(0.1, C.ms.eventActive().to);
+  check('委託 + 事件各完成一次：missionsDone = 2（各 +1，不重複計數）、missionsFailed = 0', C.stats.missionsDone === 2 && C.stats.missionsFailed === 0 && C.of('mission:complete').length === 1 && C.of('event:complete').length === 1, JSON.stringify(C.stats));
+  // 既有委託計數行為不變：events:false 劇本（完成 1、放棄 1）
+  const D = await withStats({ events: false });
+  await scenario(D);
+  check('既有委託計數不變（events:false 劇本：完成 1 → done 1、放棄 1 → failed 1）', D.stats.missionsDone === 1 && D.stats.missionsFailed === 1, JSON.stringify(D.stats));
+  // 讀檔作廢進行中的事件：不發 event:fail、不計
+  const R = await withStats(night);
+  R.ms.nearest(PICK).act();
+  R.step(0.1, PICK);
+  R.ms.restore({});
+  check('讀檔作廢進行中事件：不計 missionsFailed', R.stats.missionsFailed === 0 && R.of('event:fail').length === 0);
+  // 取消訂閱後不再計數
+  A.off();
+  A.bus.emit('event:complete', { id: NM.id });
+  A.bus.emit('mission:fail', { id: 'x', reason: 'abandon' });
+  check('trackMissionStats 回傳的取消函式生效', A.stats.missionsDone === 1 && A.stats.missionsFailed === 0);
+  check('trackMissionStats 無 bus / stats 不丟例外', typeof trackMissionStats(null, {}) === 'function' && typeof trackMissionStats(createBus(), null) === 'function');
+  for (const e of [A, T, B, C, D, R]) e.ms.dispose();
 }
 
 // ======================= 7. 靜態檢查 =======================

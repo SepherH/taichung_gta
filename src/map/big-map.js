@@ -13,7 +13,7 @@ export const TAP_PX = 6; // 移動小於此值視為點擊
 const BTN_ZOOM = 1.5;
 const WHEEL_K = 0.0015;
 
-// 標記顏色（與圖例一致；小地圖 hud.js 可沿用）
+// 標記顏色 / 圖例文字（MARKER_LABELS）/ 圖釘樣式（PIN_KINDS）：三者同一份 kind 清單，含時段事件 event-start / event-dest（小地圖 hud.js 可沿用）
 export const MARKER_COLORS = {
   'mission-start': '#ffd23f',
   'mission-dest': '#ff8c1a',
@@ -21,15 +21,21 @@ export const MARKER_COLORS = {
   checkin: '#b36bff',
   food: '#ff7ab8',
   ammo: '#9aa0a6',
+  'event-start': '#8dff3a',
+  'event-dest': '#2ee86a',
 };
-const MARKER_LABELS = {
+export const MARKER_LABELS = {
   'mission-start': '委託起點',
   'mission-dest': '委託目的地',
   dest: '目的地',
   checkin: '打卡地標',
   food: '小吃',
   ammo: '彈藥',
+  'event-start': '外送取餐點',
+  'event-dest': '外送送達點',
 };
+// 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
+export const PIN_KINDS = new Set(['dest', 'mission-dest', 'event-dest']);
 const ROUTE_COLOR = '#35f2ff';
 const PLAYER_COLOR = '#ffd23f';
 
@@ -195,7 +201,7 @@ export function drawBigMap(ctx, view, data = {}) {
       ctx.strokeStyle = '#000000';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      if (m.kind === 'dest' || m.kind === 'mission-dest') {
+      if (PIN_KINDS.has(m.kind)) {
         ctx.moveTo(sx, sy);
         ctx.lineTo(sx - 8, sy - 14);
         ctx.arc(sx, sy - 16, 8, Math.PI * 0.8, Math.PI * 0.2, false);

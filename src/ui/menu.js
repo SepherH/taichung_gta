@@ -3,8 +3,8 @@
 // 依賴全部注入（settings / bus / keymapHelp / touchHelp / getStats / getMoney / hasSave / mapView / onOpenGuide），不 import src/core/**
 // 「圖鑑」只在有給 onOpenGuide 時列出：點下後選單關閉（不 emit game:pause）並呼叫 onOpenGuide()，圖鑑關閉後由整合層決定回暫停選單或繼續
 // 音效：選單操作一律 bus.emit('ui:sound', { kind })（開頁 / 開選單 open、繼續 close、開始 / 確定 confirm、返回 / 取消 cancel、其餘 click）
-// 天氣（Phase 5）：設定列 key 'weather'（auto / clear / rain / fog）寫進既有 settings；settings 的 schema 尚無此鍵
-//   （settings.set 回 false）時退回選單內的本地值（不持久化），兩種情況都 bus.emit('weather:setting', { value }) 讓整合層即時套用
+// 天氣（Phase 5）：設定列 key 'weather'（enum auto / clear / rain / fog，預設 auto）寫進 settings（core/settings.js schema 已有此鍵、會持久化）；
+//   注入的 settings 不認此鍵（settings.set 回 false，例如舊 schema / 測試替身）時退回選單內的本地值（不持久化），兩種情況都 bus.emit('weather:setting', { value }) 讓整合層即時套用
 // 背景半透明，場景由整合層持續渲染；overlay 上的指標 / 觸控事件一律 stopPropagation，不傳到遊戲 canvas 與觸控層
 import './menu.css';
 import { createMenuModel, ITEM_LABELS, PAGE_TITLES, formatDuration, formatKm, formatMoney } from './menu-model.js';

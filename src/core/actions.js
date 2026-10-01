@@ -78,7 +78,7 @@ export const KEYMAP_HELP = [
       { keys: '2', action: 'slot2', desc: '切換：球棒' },
       { keys: '3', action: 'slot3', desc: '切換：手槍' },
       { keys: 'R', action: 'reload', desc: '裝填' },
-      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 收集小吃 / 撿彈藥）' },
+      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 收集小吃 / 撿彈藥）' },
       { keys: 'F', action: 'enterExit', desc: '上車 / 搶車' },
       { keys: '滑鼠移動', action: null, desc: '轉動視角（點畫面鎖定滑鼠，Esc 解除）' },
       { keys: '滾輪', action: null, desc: '拉近 / 拉遠鏡頭（瞄準中不縮放）' },
@@ -92,6 +92,8 @@ export const KEYMAP_HELP = [
       { keys: '空白鍵', action: 'jump', desc: '手煞車' },
       { keys: 'H', action: 'horn', desc: '喇叭' },
       { keys: 'C', action: 'lookBack', desc: '回頭看（按住）' },
+      { keys: 'Q', action: null, desc: '換電台（只在車上；循環含關閉）' }, // radioNext 屬 CONTEXT_ACTIONS（說明列 action 只收 ACTIONS 鍵）
+      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐）' },
       { keys: 'F', action: 'enterExit', desc: '下車 / 扶起翻覆車' },
     ],
   },
@@ -130,6 +132,7 @@ export const TOUCH_HELP = [
       { keys: '右側踏板', action: 'move', desc: '左煞車 / 右油門（手指越往下越深）' },
       { keys: '「手煞」鈕', action: 'jump', desc: '手煞車' },
       { keys: '「喇叭」鈕', action: 'horn', desc: '喇叭' },
+      { keys: '「電台」鈕', action: null, desc: '換台（車上顯示）' }, // hud.js tb-radio（送虛擬 KeyQ = radioNext）
       { keys: '「下車」鈕', action: 'enterExit', desc: '下車 / 扶起翻覆車' },
     ],
   },

@@ -21,7 +21,8 @@
 //   天氣 createWeather + 環境 createEnvironment（attach dayNight；每幀 dayNight.update → weather.update(dt, worldStep.simDt) → env.update）、
 //   視距改走 env.setViewDist、畫質切換 weather.setQuality、設定 weather（自動 / 晴 / 雨 / 霧）、雨聲 audioState.rain；
 //   車上電台 createRadio（getAudio = audio.getOutput、駕駛中 Q = radioNext → radio.next()、觸控 tb-radio 由 hud.js 註冊）；
-//   時段事件（夜市外送）：missions 注入 getGameHour / routeLength、event:* 提示、HUD / 大地圖 event-start / event-dest 標記、存檔 missions.events
+//   時段事件（夜市外送）：missions 注入 getGameHour / routeLength、event:* 提示、HUD / 大地圖 event-start / event-dest 標記（顏色 / 圖例由 hud.js / big-map.js 定義）、
+//   存檔 missions.events、完成 / 失敗計入 missionsDone / missionsFailed（trackMissionStats）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -74,9 +75,9 @@ import { attachWeapon, detachWeapon } from './character-animation.js';
 import { createBloodFx } from './blood-fx.js';
 import { createAudio } from './audio/index.js';
 import { createRadio } from './audio/radio.js';
-import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions } from './missions/index.js';
+import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions, trackMissionStats } from './missions/index.js';
 import { buildRoadGraph, createNavigator, findRoute } from './navigation.js';
-import { createBigMap, MARKER_COLORS as BIG_MAP_COLORS } from './map/big-map.js';
+import { createBigMap } from './map/big-map.js';
 import { createCheckins } from './collect/checkins.js';
 import { createFoodGuide } from './collect/food-guide.js';
 import { landmarkPoints } from './core/landmark-points.js';
@@ -102,8 +103,6 @@ const JUNCTION_SCAN_SEC = 0.5; // 音效「最近路口距離」的查詢間隔�
 const SKID_REF = 8; // 側滑速度（m/s）達此值時 skid01 = 1（附錄 B 音效）
 const BASE_URL = import.meta.env.BASE_URL ?? './';
 const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值（'auto' = 自動切換）
-// 大地圖（map/big-map.js）沒有時段事件標記色：建立後補色（不加圖例；圖釘造型只給 dest / mission-dest）
-const EVENT_MAP_COLORS = { 'event-start': '#8dff3a', 'event-dest': '#2ee86a' };
 
 // ---------- 純函式（tools/test/integration-p3.mjs 會擷取本區塊在 node 驗證；不可引用模組內其他識別字）----------
 // @integration-p3:pure-begin
@@ -294,7 +293,7 @@ async function init() {
   const dayNight = new DayNight(scene, defaultSave().world.hour);
   // 環境（Phase 5）：attach dayNight 後天空 / 霧 / 光由 environment 合成天氣後套用；霧距 = 視距夾過的基準 × 天氣倍率
   const env = createEnvironment({ scene, dayNight, viewDist: budget.viewDist, fogNearRatio: FOG_NEAR_RATIO });
-  // 天氣：設定 weather（auto / clear / rain / fog）；settings 尚無此鍵時由選單本地值經 bus 'weather:setting' 傳入（見 ui/menu.js）
+  // 天氣：設定 weather（auto / clear / rain / fog，core/settings schema 已有此鍵）；選單另經 bus 'weather:setting' 傳入時同樣套用（見 ui/menu.js）
   const readWeatherPref = () => {
     const v = settings.get('weather');
     return WEATHER_PREFS.includes(v) ? v : 'auto';
@@ -673,7 +672,6 @@ async function init() {
       bigMap.draw();
     },
   });
-  for (const k of Object.keys(EVENT_MAP_COLORS)) if (!BIG_MAP_COLORS[k]) BIG_MAP_COLORS[k] = EVENT_MAP_COLORS[k];
   // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
   const interCands = [null, null, null, null];
   const nearestInteractable = (pos, walking) => {
@@ -722,12 +720,8 @@ async function init() {
     extraStats.pedsKnockedOut = 0; // 只記本局 bat / bullet 擊倒（存檔值已在 economy 的 pedsKnockedOut 內）
   };
   resetExtraStats(initialLoad.data && initialLoad.data.stats);
-  bus.on('mission:complete', () => {
-    extraStats.missionsDone++;
-  });
-  bus.on('mission:fail', () => {
-    extraStats.missionsFailed++;
-  });
+  // 委託與時段事件（夜市外送）的完成 / 失敗（含放棄）各計一次 missionsDone / missionsFailed
+  trackMissionStats(bus, extraStats);
   bus.on('weapon:fire', (e) => {
     if (e && e.byPlayer) extraStats.shotsFired++;
   });

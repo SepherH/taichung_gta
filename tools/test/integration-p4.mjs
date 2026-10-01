@@ -130,6 +130,7 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
 
 // ======================= 2. 附錄 B 接線靜態檢查 =======================
 {
+  const missionsIdxSrc = read('src/missions/index.js');
   const has = (list) => list.filter((s) => !(s instanceof RegExp ? s.test(code) : code.includes(s)));
   const groups = [
     ['武器：createWeapons（raycast / sweep / playAnim / getBatSegment / now = gameTime / manifest）', [
@@ -167,7 +168,9 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
     ['存檔 v2：version SAVE_VERSION、weapons / missions / collect、restore、統計 missionsDone / missionsFailed / shotsFired', [
       'version: SAVE_VERSION', 'weapons: weapons.serialize()', 'missions: missions.serialize()', 'collect: { checkins: checkins.serialize(), foods: food.serialize() }',
       'weapons.restore(save.weapons)', 'missions.restore(save.missions)', 'checkins.restore(save.collect)', 'food.restore(save.collect)',
-      "bus.on('mission:complete'", "bus.on('mission:fail'", 'extraStats.shotsFired++', 'getStats: () => currentStats()']],
+      'trackMissionStats(', 'extraStats.shotsFired++', 'getStats: () => currentStats()',
+      // 完成 / 失敗計數由 missions/index.js 的 MISSION_STAT_EVENTS 訂閱（缺少時塞入必不命中的標籤，讓 lack 列出）
+      ...["'mission:complete'", "'mission:fail'"].filter((s) => !missionsIdxSrc.includes(s)).map((s) => `missions/index.js 缺 ${s}`)]],
     ['__game 新欄位（weapons / audio / blood / missions / nav / bigMap / checkins / food / giveAmmo / nearestPed / teleport / startMission）', [
       'weapons, audio, blood, missions, nav, bigMap, checkins, food', 'giveAmmo(', 'nearestPed()', 'teleport(x, z)', 'startMission(slug)', '{ id: best.id, dist: bestD, hp: best.hp, state: combat.stateOf(best) }']],
   ];

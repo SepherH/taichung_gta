@@ -127,7 +127,7 @@
 | horn | KeyH | 喇叭（駕駛時） | ✓ | |
 | camera | KeyV | 鏡頭距離三段循環 | | |
 | lookBack | KeyC | 回頭看（按住，駕駛時） | ✓ | |
-| ~~radio~~ | — | 已移除（Q 改 weaponCycle，見 §12） | | |
+| ~~radio~~ | — | 已移除（Q 改 weaponCycle，見 §12）；Phase 5 起駕駛中 Q = 情境動作 `radioNext`（`CONTEXT_ACTIONS`，見 §12、§21.2） | | |
 | phone | KeyT | 手機 | | ✓ |
 | map | KeyM | 開暫停選單的「地圖」頁 | | |
 | pause | Escape, KeyP | 暫停選單（P 在暫停中 = 繼續） | | |
@@ -149,7 +149,8 @@
 
 ### 4.3 說明表
 
-- `KEYMAP_HELP`：`[{ group: '步行'|'駕駛'|'通用', items: [{ keys: '顯示文字', action, desc }] }]`，桌機說明單一來源；涵蓋所有非預留 action，不列預留 action；`action: null` 為非動作的說明列（滑鼠轉視角、滾輪）
+- `KEYMAP_HELP`：`[{ group: '步行'|'駕駛'|'通用', items: [{ keys: '顯示文字', action, desc }] }]`，桌機說明單一來源；涵蓋所有非預留 action，不列預留 action；`action: null` 為非動作的說明列（滑鼠轉視角、滾輪），以及 `CONTEXT_ACTIONS` 的情境動作列（`action` 只收 `ACTIONS` 鍵）
+- 電台列：桌機「駕駛」組 `Q`「換電台（只在車上；循環含關閉）」、觸控「駕駛」組「「電台」鈕」（tb-radio）「換台（車上顯示）」，兩者 `action: null`（實際動作 = `radioNext`）；駕駛組另列 `E` 互動（接委託 / 打卡 / 外送取餐，駕駛中也有效）
 - `TOUCH_HELP`：同格式，觸控版；選單操作說明頁與 HUD 提示都由此產生
 - `createActionReader(input)` → `{ down(action), pressed(action) }`：`input.down(code)` / `input.wasPressed(code)` 對該 action 的 keys 任一為真；未知 action 回 false
 
@@ -379,12 +380,13 @@ body.touch-drive #touch-look { display: none; }
 |---|---|---|---|
 | attack | Mouse0 | 攻擊（依目前武器：揮拳 / 揮棒 / 開槍） | 手槍可按住連發（半自動，最短間隔由武器定） |
 | aim | Mouse2 | 肩後瞄準（持手槍時；**取消預留**） | ✓ |
-| interact | KeyE | 互動：接委託 / 打卡 / 收集小吃 / 撿彈藥（**取消預留**） | |
+| interact | KeyE | 互動：接委託 / 打卡 / 外送取餐 / 收集小吃 / 撿彈藥（**取消預留**；駕駛中只有接委託 / 打卡 / 外送取餐） | |
 | weaponCycle | KeyQ | 循環切換武器（取代 radio；radio 移除） | |
 | slot1 / slot2 / slot3 | Digit1 / Digit2 / Digit3 | 直選 空手 / 球棒 / 手槍 | |
 | reload | KeyR | 裝填（**取消預留**） | |
 | map | KeyM | 開 / 關大地圖（不再開暫停選單地圖頁；暫停選單地圖頁保留） | |
 
+- 情境動作（Phase 5，`CONTEXT_ACTIONS`，與 `ACTIONS` 共用按鍵、`mode` 互斥）：`radioNext` = KeyQ、`mode: 'vehicle'`（駕駛中換台：下一台 → … → 關閉 → 第一台）；步行時 Q 仍為 weaponCycle。以 `reader.pressedIn(action, mode)` / `actionForKey(code, mode)` 分流；說明表電台列見 §4.3
 - `input.snapshot()`：`down` 增 `aim`、`attack`；`pressed` 增 `slot1`、`slot2`、`slot3`、`weaponCycle`、`reload`（`interact` 已有）
 - 滾輪：持手槍瞄準中不縮放（整合層判斷）；其餘照舊
 - 觸控新增（touch.js `registerTouchButton` 或武器模組自建）：`tb-weapon`（武器鈕：點擊 = weaponCycle；長按 ≥ 350 ms 開三格輪盤，滑到格子放開 = 直選）、`tb-reload`（持手槍才顯示）、`tb-aim`（持手槍才顯示，hold = 肩後瞄準）、`tb-interact`（有互動提示才顯示，送 KeyE）；步行模式顯示，駕駛隱藏；按鈕 ≥ 44 px
@@ -433,13 +435,14 @@ body.touch-drive #touch-look { display: none; }
   - 條件：`timed` 超時失敗；`fragile` 以 `onVehicleImpact` 與玩家被擊倒累積損壞度，100% 失敗，報酬依損壞度遞減；`heavy` 步行速度上限 × 0.6（回傳於 `ctx` 回饋：`speedScale()`）
   - 失敗可重試（回起點重接）；輪替：同時開放 3 個起點、完成後該委託冷卻 120 s 遊戲時間
   - 自帶 UI（前綴 `ms-`）：目標列（上中）、字幕、接單卡、結算面板
+- 委託統計：另匯出 `MISSION_STAT_EVENTS`（bus 事件 → stats 欄位：`mission:complete` / `event:complete` → `missionsDone`、`mission:fail` / `event:fail` → `missionsFailed`）與 `trackMissionStats(bus, stats)` → 取消訂閱函式（依該表每次 +1 寫進 stats；整合層傳 extraStats）
 - 存檔（§18）`missions`
 
 ## 17. 大地圖與導航（W5）/ 打卡圖鑑（W6）/ 地標點
 
 - 地標點 `src/core/landmark-points.js`（D4-0）：`landmarkPoints(manifestList, project = projectLatLon)` → `[{ id, slug, name, x, z, radius }]`（slug = file 去 .glb；radius = 25 m 預設，footprint false 者 15 m）；純函式
 - 導航 `src/navigation.js`：`buildRoadGraph(roads)`（citymodel surfaceRoads → 節點 / 邊，端點吸附 1 m、交叉點合併）→ graph；`findRoute(graph, from, to)` → `{ points:[{x,z}], lengthM } | null`（A*，起訖投影到最近邊）；`createNavigator({ bus, graph, scene })` → `{ setDestination(x, z, label, source), clear(source), update(dt, playerPos), route() → points|null, destination() }`：偏離路線 > 25 m 或每 3 s 重算一次、抵達 20 m 內清除並 emit `nav:clear`；世界內導航圖釘（目的地上方浮動錐體）
-- 大地圖 `src/map/**`（前綴 `mp-`）：`createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus })` → `{ open(), close(), toggle(), isOpen(), draw(), destroy() }`：canvas 全螢幕、OSM 路網 / 公園 / 水域 / 地標、圖例、滾輪 / 雙指縮放、拖曳、點擊空白處設目的地（`onPick(x,z)` → 整合層呼叫 navigator）、路線與任務 / 打卡 / 小吃標記；可 import `src/ui/map-view.js` 的匯出函式
+- 大地圖 `src/map/**`（前綴 `mp-`）：`createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus })` → `{ open(), close(), toggle(), isOpen(), draw(), destroy() }`：canvas 全螢幕、OSM 路網 / 公園 / 水域 / 地標、圖例、滾輪 / 雙指縮放、拖曳、點擊空白處設目的地（`onPick(x,z)` → 整合層呼叫 navigator）、路線與任務 / 打卡 / 小吃標記（kind 同小地圖，另含時段事件 `event-start` / `event-dest`，顏色 / 圖例 / 圖釘見 §21.3）；可 import `src/ui/map-view.js` 的匯出函式
 - 小地圖：hud.update 的 `state.route`（`[{x,z}]` 或 null）與 `state.markers` 增 `kind`（`'mission-start'|'mission-dest'|'dest'|'checkin'|'food'|'ammo'`）；hud.js 依 kind 著色、route 畫線（I4）
 - 打卡 `src/collect/**`（前綴 `cl-`）：`createCheckins({ bus, landmarks, addMoney, reward = 200, badgeBase = 'art/badges/' })` → `{ nearest(pos) → interactable|null, markers(), progress() → { done, total }, serialize(), restore(data) }`；進入地標 radius 內可按 E 打卡（每地標一次、徽章彈窗 + 金錢）；徽章 `art/badges/<slug>.png` 缺 → 純色圓徽
 - 小吃圖鑑：`createFoodGuide({ bus, scene, root, manifestUrl = 'art/food/manifest.json', spots, fetchJson, addMoney })` → `{ ready, nearest(pos), markers(), open(), close(), isOpen(), progress(), serialize(), restore(data), update(dt, playerPos, camera) }`；food manifest `{ items:[{ id, name, file, desc, area? }] }`（缺 → 內建 10 項名稱與說明、純色卡片）；收集點（`src/collect/food-spots.js`，10–12 點散在七期街區人行道，座標為遊戲世界 x/z）顯示小型浮動圖示，按 E 收集，圖鑑面板列已收集卡 + 未收集剪影
@@ -463,7 +466,7 @@ missions.events?: { completed: { <事件 id>: 正整數次數 }, cooldowns: { <�
 ```
   - `validateSave`：`events` 非物件、或 `completed` / `cooldowns` 存在但非物件 → **整欄丟棄**（其他 missions 欄位照常保留）；表內鍵規則同 completed / cooldowns（字串鍵、非負有限數、≤ 200 鍵），另 completed 只收 ≥ 1（取整數）、cooldowns 只收 > 0；清洗後兩表皆空 → 省略此欄（與 serialize 一致）
   - 讀檔：`missions.restore(save.missions)` 轉交 `events.restore(src.events)`（未知 id 由 events.js 再過濾；冷卻夾到該事件 cooldownSec）；進行中的外送不存檔（讀檔一律作廢）
-  - 經濟：外送入帳 `economy.add(n, 'event')`；不計入 missionsDone / missionsFailed
+  - 經濟：外送入帳 `economy.add(n, 'event')`；統計：`event:complete` / `event:fail` 與委託同列各計入 missionsDone / missionsFailed 一次（`trackMissionStats`，§16；放棄外送走 fail → 計入 missionsFailed；讀檔作廢的進行中外送不發 fail、不計）
 
 ## 19. 效能預算（手機 low 檔）
 
@@ -476,7 +479,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 | 名稱 | 來源 | 用途 |
 |---|---|---|
 | 模擬時間（固定子步 `step` = 1/60 s） | `PhysicsWorld.step(frameDt)` 內 FixedStepper 每個子步呼叫 `onBeforeStep(dt)` / `onAfterStep(dt)`，`dt` 恆為 `step` | 會影響遊戲結果的狀態 |
-| 本幀模擬秒數 `simDt` | `pw.step()` 回傳的 `simDt`（= 子步數 × step）；物理 step **之前**要用時取 `pw.simTimeFor(frameDt)`（純查詢，同一幀內與實際推進值相同；暫停中 0） | 每幀呼叫、但推進的是模擬狀態的地方 |
+| 本幀模擬秒數 `simDt` | 三個來源（皆 = 子步數 × step）：① `pw.step()` 回傳的 `simDt`；② `core/loop.js` 在 step **之前**取 `pw.simTimeFor(frameDt)`（純查詢；`worldStep.simDt` getter 即此值，給 step 之後的消費者如天氣）；③ traffic 由 `_step` 每子步累加 `_simAcc`、`sync` 取走歸零。三者一致的條件：同一幀內 `simTimeFor` 與 `step` 用同一個 `frameDt` 且中間不改 paused / 累加器，traffic 的 `onBeforeStep` 已登記在該 `pw` 上且每幀 `sync` 恰一次；暫停中三者皆 0 | 每幀呼叫、但推進的是模擬狀態的地方 |
 | 渲染時間 `dt` | rAF 幀間隔，`core/loop.js` 夾到 `MAX_FRAME_DT` = 0.1 s | 只做插值、動畫 mixer、相機、UI / HUD、音效、特效粒子 |
 
 - **屬模擬時間**（只在固定子步推進，或每幀以 `simDt` 推進）：剛體 / 角色膠囊 / 車輛控制器（子步內）；車流車道邏輯與行人位置、擊退（traffic `_step` / traffic-peds `stepPeds`、`afterStepPeds`）；mid 級與替身行人的降頻走路、行人大腦 `brain.update` 的累積秒數（`thinkPeds(simDt)`，`simDt` 由 traffic `_step` 在子步內累加、`sync` 取走）；自建 combat 時鐘與密度管理計時（traffic.sync）；遊戲對抗時鐘 `gameTime` 與 `combat.update`、號誌相位 `lights.update`、玩家 KO 倒數、搶來 / 報廢車回收計時（main.js / loop.js）
@@ -485,6 +488,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - **速度一律 = 推進距離 ÷ 實際推進的模擬秒數**：例 行人動畫速度 = `moveD / moveT`（`moveT` 只在子步或降頻走路時累加）；某幀沒有推進（`moveT` = 0）就沿用上次速度。禁止「當幀位移 ÷ 渲染幀時間」——高於 60 Hz 時約半數幀沒有子步，會得到 0 / 加倍的速度
 - **上限**：渲染 `dt` ≤ `MAX_FRAME_DT` 0.1 s；單幀子步 ≤ `DEFAULT_MAX_SUBSTEPS` 5（= 0.083 s 模擬時間），超過即丟棄累加器餘量（`stepper.dropped` 累計）——卡頓時模擬時間會少於渲染時間，所以模擬計時必須吃 `simDt` 而不是 `dt`
 - **60 Hz 等價**：`dt` 恰為 1/60 時每幀恰 1 子步，`simDt === dt`；本契約不改 60 Hz 下的結果
+- **實機 rAF 抖動**：幀間隔在 1/60 上下浮動時每幀子步數為 0 / 1 / 2，模擬時間量化推進（每幀 `simDt` ∈ {0, 1/60, 2/60}），但累加器保留餘量，總量不變（不觸發子步上限時）
 - **更新順序**（`core/loop.js`）：tick = 自適應解析度 → 世界更新（暫停時略過；遊戲中 `updateGame`、開始畫面 `updateAttract`）→ 音效 → 渲染 → 效能統計 → FPS → `input.endFrame()`；物理一幀 `createWorldStep().step(dt, center)` = 車流外部狀態（blockers / context / view）→ `lights.update(simDt)` / `updateVisuals` → `pw.step(dt)` → `gameTime += simDt` → `combat.update(simDt)` → `player.syncPhysics(dt)`（非駕駛）→ `vehicles.sync()` → `traffic.sync(dt, center)` → `dmg.update(dt)` → 車輛 `setActiveByDistance(ACTIVE_RADIUS)` → 回收（`simDt`）
 - 回歸：`node tools/test/framerate-invariance.mjs`（60 / 120 / 144 Hz 推進相同模擬時間，行人位置、動畫速度、walk ↔ idle 切換次數一致）
 
@@ -496,7 +500,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
   - `worldStep.simDt`（`core/loop.js` createWorldStep 新增 getter）= 本幀物理實際推進的模擬秒數；每幀 `resetPerf()` 歸零 → 暫停 / 全螢幕面板開啟時世界不 step、天氣狀態機不推進（§20：天氣屬遊戲時鐘，吃 simDt；雨絲粒子屬特效吃 dt）
 - 視距：`applyViewDist(d)` = 鏡頭 far + `env.setViewDist(d)`（attach 後不再直接寫 `scene.fog`，否則每幀被 env 覆蓋）；畫質切換另呼叫 `weather.setQuality(budget)`（雨絲數）
 - 設定 `weather` ∈ `auto | clear | rain | fog`（選單「天氣」列）：`auto` → `weather.setAuto(true)`；其他 → `setAuto(false)` + `setWeather(kind, { instant: true })`
-  - **待補**：`src/core/settings.js` SETTINGS_SCHEMA 尚無 `weather` 鍵（`settings.set` 回 false）——選單退回本地值（不持久化）並 `bus.emit('weather:setting', { value })`；整合層同時訂閱 settings 的 `weather` 與此事件。補上 `weather: { type: 'enum', values: ['auto','clear','rain','fog'], default: 'auto', label: '天氣' }` 後即自動持久化，不需改其他檔
+  - `src/core/settings.js` SETTINGS_SCHEMA 已有 `weather: { type: 'enum', values: ['auto','clear','rain','fog'], default: 'auto', label: '天氣' }`，選單寫入即持久化；注入的 settings 不認此鍵（`settings.set` 回 false）時選單仍退回本地值（不持久化）。兩種情況選單都 `bus.emit('weather:setting', { value })`，整合層同時訂閱 settings 的 `weather` 與此事件
 - 雨聲：音效每幀 state 加 `rain`（= `weather.getState().rain`）；`audio/index.js` 在 `rain > 0.01` 開 `LOOPS.rain`（sfx 群組，≤ 0.005 關），每幀 `ctrl.set(state, now)`，暫停時外層增益 0
 - HUD：`hud.update` state 加 `weatherIcon`（`getState().icon`：sun / rain / fog），顯示在右上狀態列最前面（桌機 / 觸控相同，位於觸控右上小鈕下方）
 
@@ -510,7 +514,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 
 ### 21.3 時段事件（夜市外送，`src/missions/events.js`）
 - `createMissions({ …, getGameHour: () => dayNight.hour, routeLength: (a, b) => findRoute(graph, a, b)?.lengthM })`（graph 在 missions 之後建立，閉包呼叫時已存在；查無路線 → events.js 以直線 × 1.3 估算）
-- 標記：`missions.markers()` 附 `event-start`（取餐點）/ `event-dest`（送達點）；小地圖 `hud.js MARKER_COLORS` 加兩色且超出半徑時貼邊；大地圖（`map/big-map.js` 未含此 kind）由 main.js 在建立後補色（**待補**：big-map.js 圖例與 event-dest 圖釘造型）
+- 標記：`missions.markers()` 附 `event-start`（取餐點）/ `event-dest`（送達點）；小地圖 `hud.js MARKER_COLORS` 加兩色且超出半徑時貼邊；大地圖由 `map/big-map.js` 正式定義：`MARKER_COLORS`（`event-start` #8dff3a、`event-dest` #2ee86a）、`MARKER_LABELS` 圖例（外送取餐點 / 外送送達點）、`PIN_KINDS`（`event-dest` 與 dest / mission-dest 同畫圖釘，其餘畫圓點）；main.js 不再改寫 MARKER_COLORS
 - 事件提示：`event:available` → toast「🌙 <title>開放中：到<取餐點>取餐」；`event:closed` 且無進行中外送 → toast「夜市外送時段結束」；`event:start / complete / fail` 字幕由 missions 自己顯示；`player:money` reason `'event'` → `hud.setMoney(money, delta, reason)` 跳動文字前加「外送」
 - 存檔：§18 Phase 5 增補 `missions.events`
 
@@ -525,7 +529,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - 地標點：`landmarks = landmarkPoints(manifest ?? [], projectLatLon)`（manifest = public/models/manifest.json；缺檔回 []），傳給 missions / checkins / 大地圖
 - interactable 仲裁（§17）：missions（3）> checkins（2）> food（1）；ammo pickups 自動拾取不需按 E；`hud.setPrompt(text)`；`snap.pressed.interact` → `act()`
 - 全螢幕面板（任務接單 / 結算、大地圖、圖鑑）開啟時 `input.enabled = false`、遊戲暫停輸入；關閉時恢復；E / Esc 在面板開啟中由面板處理，遊戲不再處理
-- 存檔 getState：`version: SAVE_VERSION`，帶 `weapons.serialize()`、`missions.serialize()`、`collect: { checkins: checkins.serialize(), foods: food.serialize() }`（兩者回傳陣列時直接放入）；讀檔後各自 `restore(save.xxx)`；stats 的 missionsDone / missionsFailed / shotsFired 由整合層依 `mission:complete` / `mission:fail` / `weapon:fire`（byPlayer）累加（economy.snapshot 已保留新統計欄位）
+- 存檔 getState：`version: SAVE_VERSION`，帶 `weapons.serialize()`、`missions.serialize()`、`collect: { checkins: checkins.serialize(), foods: food.serialize() }`（兩者回傳陣列時直接放入）；讀檔後各自 `restore(save.xxx)`；stats 的 missionsDone / missionsFailed 由 `trackMissionStats(bus, extraStats)`（missions/index.js，依 `MISSION_STAT_EVENTS`：`mission:*` 與 `event:*` 的 complete / fail）累加，shotsFired 由整合層依 `weapon:fire`（byPlayer）累加（economy.snapshot 已保留新統計欄位）
 
 ### 武器（W1，細節見 src/weapons/WIRING.md）
 - `weapons.attack(aim)` 取代 `player.punch()`（fist 內部仍走 combat 拳擊）；持手槍時 `snap.down.attack` 可連發（半自動間隔由武器定）

@@ -3,7 +3,8 @@
 // 用法：node tools/test/big-map.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // 項目：開關 / toggle / aria、root 掛載、dirty 旗標（靜止不重繪）、點擊 → onPick 座標轉換、拖曳不觸發 onPick、
 //   雙指捏合（以中點為錨、不觸發 onPick）、滾輪縮放以指標為錨、縮放範圍 clamp、地圖外點擊忽略、
-//   清除目的地（bus nav:clear / onClear）、關閉鈕與 onClose、授權標示、圖例、標記 kind 顏色、路線、地標缺省退回、按鈕 ≥ 44 px
+//   清除目的地（bus nav:clear / onClear）、關閉鈕與 onClose、授權標示、圖例、標記 kind 顏色、路線、地標缺省退回、按鈕 ≥ 44 px、
+//   時段事件標記（event-start / event-dest 顏色 / 圖例 / 圖釘）、main.js 不改寫 MARKER_COLORS（靜態）
 import { register } from 'node:module';
 
 const HOOK = `
@@ -125,7 +126,7 @@ const path = await import('node:path');
 const { fileURLToPath } = await import('node:url');
 const { BOUNDS, ATTRIBUTION } = await import('../../src/citymodel.js');
 const { screenToWorld, fitScale } = await import('../../src/ui/map-view.js');
-const { createBigMap, drawBigMap, MARKER_COLORS, TAP_PX } = await import('../../src/map/big-map.js');
+const { createBigMap, drawBigMap, MARKER_COLORS, MARKER_LABELS, PIN_KINDS, TAP_PX } = await import('../../src/map/big-map.js');
 const { createBus } = await import('../../src/core/events.js');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -193,6 +194,24 @@ const r0 = map.stats().renders;
 check('靜止不重繪（dirty 旗標）', map.stats().renders === r0 && map.stats().dirty === false);
 map.draw();
 check('draw() 標記後重繪一次', map.stats().renders === r0 + 1);
+
+// ---------- 時段事件標記（正式定義於 big-map.js）----------
+check('事件標記 event-start / event-dest 有正式顏色（色碼字串、與其他 kind 不重複）', ['event-start', 'event-dest'].every((k) => /^#[0-9a-f]{6}$/i.test(MARKER_COLORS[k] || '')) && new Set(Object.values(MARKER_COLORS)).size === Object.keys(MARKER_COLORS).length);
+check('MARKER_COLORS / MARKER_LABELS 同一份 kind 清單（每個 kind 都有圖例文字）', Object.keys(MARKER_COLORS).join() === Object.keys(MARKER_LABELS).join() && Object.values(MARKER_LABELS).every((t) => typeof t === 'string' && t.length > 0));
+check('圖釘樣式：event-dest 與 dest / mission-dest 同為圖釘、event-start 為圓點', PIN_KINDS.has('event-dest') && PIN_KINDS.has('dest') && PIN_KINDS.has('mission-dest') && !PIN_KINDS.has('event-start'));
+{
+  const shape = (kind) => {
+    const calls = [];
+    const rec = new Proxy({}, { get: (_, k) => (k === 'measureText' ? () => ({ width: 0 }) : (...a) => calls.push(k)), set: () => true });
+    drawBigMap(rec, { cx: 0, cz: 0, scale: 1, w: W, h: H }, { markers: [{ x: 0, z: 0, kind }], landmarks: [] });
+    return calls.filter((c) => c === 'lineTo').length;
+  };
+  check('繪製：event-dest 畫圖釘（同 mission-dest 筆畫）、event-start 畫圓點（同 mission-start）', shape('event-dest') === shape('mission-dest') && shape('event-dest') > 0 && shape('event-start') === shape('mission-start'), `${shape('event-dest')}/${shape('event-start')}`);
+}
+{
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'src/main.js'), 'utf8').replace(/\/\/.*$/gm, '');
+  check('靜態：main.js 不再改寫 big-map MARKER_COLORS（無別名 import、無補色）', !/MARKER_COLORS\s+as\b/.test(mainSrc) && !/BIG_MAP_COLORS|EVENT_MAP_COLORS/.test(mainSrc) && !/MARKER_COLORS\s*\[[^\]]+\]\s*=(?!=)/.test(mainSrc));
+}
 
 // ---------- 繪製內容 ----------
 const log = canvas.getContext().__log;
@@ -316,6 +335,7 @@ check('圖例可收合', !legend.classList.contains('mp-legend-open'));
 const legendText = [];
 walk(legend, (e) => e.className === 'mp-legend-text' && legendText.push(e.textContent));
 check('圖例含全部標記種類', ['委託起點', '委託目的地', '目的地', '打卡地標', '小吃', '彈藥'].every((t) => legendText.includes(t)), legendText.join('、'));
+check('圖例含時段事件兩類標記（外送取餐點 / 外送送達點）', ['外送取餐點', '外送送達點'].every((t) => legendText.includes(t)), legendText.join('、'));
 const attr = find(el, (e) => e.className === 'mp-attr');
 check('授權標示在面板內（OpenStreetMap / ODbL）', !!attr && attr.textContent === ATTRIBUTION && /OpenStreetMap/.test(attr.textContent) && /ODbL/.test(attr.textContent));
 
