@@ -574,6 +574,150 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - 前一批新增 / 修改：`src/missions/garbage-truck.js`（新）、`src/missions/index.js`、`src/audio/voices.js`（`LOOPS.garbage_truck`、`garbageTruckLevel`）、`public/models/vehicles/manifest.json`（garbage_truck）、`src/vehicle.js`（`VEHICLE_TYPES.garbage_truck`）、`src/vehicle-model.js`（`EMISSIVE_MATERIALS` 含 beacon）、`src/touch.js` / `src/hud.js` / `src/style.css`（tb-interact 駕駛也顯示）、`src/map/marker-colors.js`（新，共用色表）、`src/prop-model.js`（新）、`public/models/props/manifest.json`（新）
 - 本批（整合）：`src/main.js`、`src/audio/index.js`、`src/hud.js`（`setPrompts`、`EDGE_KINDS` 加 event-truck）、`src/map/marker-colors.js`（event-truck）、`src/map/big-map.js`（圖例）、`src/core/actions.js`（說明列）、`docs/dev/interfaces.md`；測試 `tools/test/integration-gt.mjs`（新）、`tools/test/hud.mjs`、`tools/test/integration-p5.mjs`、`tools/test/combat-integration.mjs`
 
+## 23. Phase 6 契約（K6 定稿，2026-10-01；單元 B6 / CS6 / E6 / P6，整合 I6）
+
+原則沿用上文（參數注入、功能模組自帶 UI、共用樞紐只有整合單元改）。各小節格式：**現況（檔名:行號）→ Phase 6 定值 / 介面**。行號以 K6 撰寫當下的程式碼為準（改碼後會漂移，以符號名為主）。
+
+### 23.1 夜市攤車碰撞盒（B6）
+
+**現況**
+- 擺放：`src/main.js:446-456`（`createPropModel('night_market_stall')` → `stallPlacement(NIGHT_MARKET_DELIVERY.pickup, info.depth)` → `placeProp`）；擺位函式 `src/main.js:332-356`、常數 `STALL_CURB_GAP` 1.2 / `STALL_WALL_GAP` 3 / `STALL_CLEAR_SCAN` 20（`src/main.js:119-121`）；取餐點 `src/missions/events.js:41`（557.2, −125.1，radius 12）
+- 碰撞盒：`src/main.js:453` `stallBox = { ...pl, width: info.width, depth: info.depth, height: info.height }`（直接拿 manifest 外接盒尺寸）→ `src/main.js:469` `addStaticBox(RAPIER, pw.world, stallBox)`；`src/physics/colliders.js:248-255` 建 `cuboid(width/2, height/2, depth/2)`、平移 `(x, y + height/2, z)`、繞 Y 轉 yaw、WORLD 組，**無水平中心偏移參數**
+- 尺寸來源：`public/models/props/manifest.json`（本工作目錄未附 public/；值取自測試）：depth 1.56（`tools/test/integration-gt.mjs:191`）、width 2.1 / depth 1.56 / height 3.04 → 半尺寸 [1.05, 1.52, 0.78]（`tools/test/integration-gt.mjs:243-247`）；counter（取餐檯）本地 [0, 0.95, 0.7]（`tools/test/props.mjs:35`）；glb 原點 = 外接盒中心正下方（`src/prop-model.js:5`）
+- **文件矛盾**：§22.2 第一條（本檔 `docs/dev/interfaces.md:563`）寫物理世界建好後 `addStaticBox` 補靜態方塊，下一條（`docs/dev/interfaces.md:564`）卻寫「無碰撞體（純裝飾，玩家可穿過）」。程式碼（`src/main.js:469`）**有**碰撞體 → 以程式碼為準，564 行「無碰撞體」為過期敘述，Phase 6 起作廢。另一差異：遮雨棚實際比碰撞盒寬約 0.12 m（manifest width 2.1 未含遮雨棚外伸），車輛 / 玩家側面可穿進棚緣
+
+**Phase 6 定值**（攤車本地座標，+Z = 顧客面，單位 m）
+| 項目 | 值 | 說明 |
+|---|---|---|
+| 半寬 halfW（本地 X） | **1.11** | = 2.1 / 2 + 0.06（遮雨棚每側外伸 0.06，總寬 2.22 與棚同寬） |
+| 半深 halfD（本地 Z） | **0.78** | = 1.56 / 2（維持；counter z 0.7 < 0.78，取餐檯仍在盒內緣，取餐判定用 radius 12 不受影響） |
+| 半高 halfH | **1.52** | = 3.04 / 2（維持） |
+| 中心偏移 | **(0, +1.52, 0)** | 相對 glb 原點（底面中心）：水平 0、垂直 = halfH；即現行 `y + height/2` |
+
+- 實作：B6 在 `src/prop-model.js`（`propInfo` 旁，`src/prop-model.js:93-96`）新增匯出 `PROP_COLLIDERS = { night_market_stall: { halfW: 1.11, halfD: 0.78, halfH: 1.52, offX: 0, offY: 1.52, offZ: 0 } }` 與 `propColliderBox(id, placement)` → `{ x, y, z, yaw, width, depth, height }`（offX / offZ 依 yaw 轉到世界、y = placement.y + offY − halfH，交給既有 `addStaticBox`；未知 id → 退回 manifest 外接盒；node 可測）。`src/physics/colliders.js:248` **不改**
+- 接線：`src/main.js:453` 改為 `stallBox = propColliderBox('night_market_stall', pl)`（一行；main.js 屬 I6 → B6 交接線說明，I6 改；`stallPlacement(…, depth)` 的 depth 維持 manifest depth 1.56，不改擺位）
+- 文件：B6 交付時把本檔 §22.2 第 564 行改為「有碰撞體（WORLD 組靜態方塊，尺寸見 §23.1）；各畫質（含 low）都擺；glb 缺檔 → 不擺（外送照常）」
+- 測試：`tools/test/p6-b6.mjs` 檢查 `propColliderBox` 半尺寸 [1.11, 1.52, 0.78]、yaw 0.7 時中心 = placement + 旋轉後偏移；`integration-gt.mjs:243` 原 addStaticBox 案例不動
+
+### 23.2 鏡頭與設定（CS6）
+
+**現況**
+- 鏡頭距離：`src/camera.js:44-51` `WALK_DISTS = [2.7, 4.1, 6.0]`、`CAR_DISTS = [5.2, 6.4, 8.9]`、`BIKE_DISTS = [4.3, 5.0, 6.0]`、`DEFAULT_VIEW = 1`、滾輪範圍 `WALK_DIST_MIN 2.5` / `WALK_DIST_MAX 12`、`CAR_REF_SCALE 1.35`；段位狀態 `rig.walkView` / `rig.driveView` / `rig.dist`（`src/camera.js:91-93`）；駕駛距離 = 段位 × distScale / ref + 速度拉遠 ≤ 1 m（`src/camera.js:124-131`）
+- V 鍵：`src/core/actions.js:18` `camera: KeyV`、說明列 `src/core/actions.js:103`；`src/main.js:1499` `cycleView: snap.pressed.camera` → `src/camera.js:145-150` 循環段位（步行同時把 dist 重設為段位值）
+- 滾輪：`src/input.js:132-136` 累加 `wheel`（±300 / 事件）；`src/camera.js:151` 步行 `dist *= 1 + wheel × 0.001` 夾 2.5–12；駕駛不吃滾輪；`src/main.js:1491` 瞄準中 `input.wheel = 0`
+- 鏡頭碰撞：`src/camera.js:32-35` `CAM_GROUND_CLEAR 0.4`、`CAM_RADIUS 0.35`、`MIN_FRAC 0.05`；`src/camera.js:228` `collision.sweep(t, desired, CAM_RADIUS)` + 地形取樣；`src/camera.js:246-248` 拉近立即、拉遠 `DIST_EASE` 4/s
+- **段位不持久化**：`CameraRig` 無 setter，每次載入回 `DEFAULT_VIEW`
+- 設定：`src/core/settings.js:12-29` `SETTINGS_SCHEMA`（已含 `lookSensMouse` / `lookSensTouch` 0.3–3.0 step 0.1 預設 1.0、`invertY` 預設 false）；儲存鍵 `tcgta.settings.v1`（`src/core/settings.js:7`）；載入 `loadInitial`（`src/core/settings.js:106-133`：先取全預設、再逐鍵 `normalizeSetting` 覆蓋 → 缺鍵 = 預設、非法鍵 = 預設）；`createSettings` → `get / set / getAll / reset / subscribe`（`src/core/settings.js:135-191`）
+- 接線：`src/main.js:519-520` 開局 `input.setSensitivity` / `setInvertY`；`src/main.js:1186-1189` `settings.subscribe` 即時套用；`src/input.js:214-221` `setSensitivity` / `setInvertY`
+- 選單：`src/ui/menu.js:19-45` `SETTING_ROWS`（`lookSensMouse` / `lookSensTouch` range、`invertY` toggle 在 33-35）；segment 型以 `options[i][0]` 值循環（`src/ui/menu.js:352-356`，數值 option 可用）；`src/ui/menu-model.js:20-27` 頁籤；存檔 `src/save.js` **不含設定**（§6 末條，`src/save.js:21` defaultSave 無 settings 欄）
+
+**Phase 6 定值**（全部存在 `tcgta.settings.v1` 的 `SETTINGS_SCHEMA`，不新增儲存鍵、不升 `SAVE_VERSION`）
+| 鍵 | 型別 / 範圍 | 預設 | 說明 |
+|---|---|---|---|
+| `lookSensMouse` / `lookSensTouch` | number 0.3–3.0 step 0.1 | 1.0 | **沿用既有鍵**＝「視角靈敏度」，不另開 `lookSens`（避免與現有遷移衝突） |
+| `invertY` | boolean | false | 沿用既有鍵 |
+| `camWalkView`（新） | number 0–2 step 1 | 1 | 步行段位 → `WALK_DISTS` 0/1/2 = 2.7 / 4.1 / 6.0 m |
+| `camDriveView`（新） | number 0–2 step 1 | 1 | 駕駛段位 → 汽車 `CAR_DISTS` 5.2 / 6.4 / 8.9、機車 `BIKE_DISTS` 4.3 / 5.0 / 6.0（再乘 distScale / ref） |
+
+- 型別用 `type: 'number', min: 0, max: 2, step: 1`（`normalizeSetting` 自動四捨五入到整數、clamp；1.4 → 1、5 → 2、'1' → 非法）；label `'步行鏡頭距離'` / `'駕駛鏡頭距離'`
+- 讀寫函式：讀 `settings.get('camWalkView')`、寫 `settings.set('camWalkView', i)`（回 boolean）；舊存檔缺欄位 → `loadInitial` 給預設 1（不需遷移碼）；`settings.reset()` 一併回 1
+- 鏡頭 API（CS6，`src/camera.js`）：新增 `rig.setViews({ walk, drive })`（非 0–2 整數忽略；walk 同時把 `rig.dist` 設為 `WALK_DISTS[walk]`）、`rig.getViews()` → `{ walk, drive }`；`update` 內按 V 後若段位改變呼叫 `opts.onViewChange?.(kind: 'walk'|'drive', index)`（同幀最多一次）。滾輪微調仍只改 `rig.dist`、**不持久化**（下次載入回段位值）；常數表與碰撞參數 Phase 6 不改
+- 整合（I6，`src/main.js`）：建 rig 後 `rig.setViews({ walk: settings.get('camWalkView'), drive: settings.get('camDriveView') })`（`src/main.js:523` 附近）；`rig.update` opts 加 `onViewChange: (k, i) => settings.set(k === 'walk' ? 'camWalkView' : 'camDriveView', i)`；`settings.subscribe` 分支加兩鍵 → `rig.setViews`
+- 選單（CS6，`src/ui/menu.js` SETTING_ROWS，插在 `invertY` 後）：`{ key: 'camWalkView', type: 'segment', label: '步行鏡頭', options: [[0, '近'], [1, '中'], [2, '遠']] }`、`camDriveView` 同格式；V 鍵改段位後選單重開時顯示新值（refreshSetting 已訂閱）
+- 測試：`tools/test/p6-cs6.mjs`（schema 兩鍵、缺鍵預設 1、非整數正規化、`setViews` / `getViews` / onViewChange、選單列存在）；既有 `camera.mjs` / `menu.mjs` / `core.mjs` 須照過
+
+### 23.3 遊戲內手機（P6 做模組、I6 接線）
+
+**現況**
+- 鍵位：`src/core/actions.js:24` `phone: KeyT, reserved: true`（預留、不在說明表）；`input.snapshot().pressed` 無 phone
+- 觸控：`src/touch.js:51` `tb-phone`（KeyT、slot `tl3`、`hidden: true`）與 `src/touch.js:53` `tb-guide`（slot `tl3`）**同格**——`src/touch.js:15-16` 註明「日後啟用須另排位置」；左上小鈕 CSS `src/style.css:1197-1229`（tl1–tl3）
+- 既有面板機制：`src/main.js:840` `panelOpen()`（missions modal / 大地圖 / 圖鑑）→ `src/main.js:1286-1302` `syncPanels`：開啟 → `input.enabled = false`、`releaseLock()`、清提示、駕駛中手煞；`src/main.js:1376` `updateGame` 在面板開啟時 **直接 return（世界暫停）**；Esc / 同鍵關閉由 window keydown capture 處理（`src/main.js:1304-1318` `onPanelKey`、`src/ui/menu.js:497-512` `onKey`）
+- 大地圖：`bigMap.open()` / `close()` / `toggle()` / `isOpen()`（§17；`src/main.js:1385` M 鍵開啟）；設定頁：`menu.openPause('settings')`（`src/ui/menu.js:694-707`，tab ∈ `PAUSE_PAGES` `src/ui/menu-model.js:24`）
+- `src/mobile.js:138` `isInputBlocked()`（直向提示 / 全螢幕遮罩）；`src/input.js:152-160` `enabled = false` 清空所有按住狀態並通知觸控層釋放指標
+
+**介面**（`src/ui/phone.js` + `src/ui/phone.css`；class / id 前綴 `ph-`；z-index 80–89 的 **80**（全螢幕面板層，只在遊戲中開））
+```
+createPhone({ root, bus, doc = globalThis.document, keyTarget = window, isTouch = false,
+              onOpenMap, onOpenSettings, onNavigate, now }) →
+  { open(app?: 'home'|'jobs'|'map'|'settings'), close(), toggle(), isOpen() → boolean,
+    update(dt), setData(data), destroy(), get app() }
+setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；只存參照、不配置
+  hour：dayNight.hour（0–24 浮點，手機顯示 HH:MM）
+  weatherIcon：weather.getState().icon（'sun'|'rain'|'fog'）
+  jobs：[{ id, title, category: 'nearby'|'mission'|'job', reward, distanceM, navigable, x, z, active }]
+```
+- 生命週期：`open()` 冪等；開啟時 `bus.emit('ui:sound', { kind: 'open' })`、`bus.emit('phone:open', {})`；`close()` 冪等、emit `phone:close`；`update(dt)` 用**渲染 dt**（只做 UI 動畫 / 時鐘刷新，§20 屬渲染時間）；`destroy()` 移除 DOM 與 listener
+- **不暫停模擬**：手機**不得**列入 `panelOpen()`（否則 `updateGame` return、世界停）。I6 另寫 `syncPhone()`：`phone.isOpen()` 轉真 → `input.enabled = false`（沿用既有 `enabled` 清空機制，等同鎖住移動 / 射擊 / 上下車 / 互動 / 視角）、`releaseLock()`、駕駛中 `setControls(driveControls({x:0,y:0}, true))`；轉假 → `input.enabled = true`。世界 / 車流 / 任務計時照常吃 simDt（委託倒數不因開手機停止——預期行為）
+- 關閉：Esc、KeyT、手機內「返回」鈕（app 頁先回 home，home 再按 = 關閉）；phone.js 自己在 `keyTarget` 註冊 keydown **capture**，處理後 `preventDefault` + `stopPropagation`（同 `onPanelKey` 作法），因此 Esc 不會同時開暫停選單
+- 互斥：I6 只在 `state.started && !state.paused && !panelOpen() && !menu.isOpen()` 時開手機；手機開啟中按 M / 選單鍵由手機吞掉；開大地圖 / 設定前先 `phone.close()`
+- 開啟入口：桌機 `input.actions.pressed('phone')`（CS6 把 `src/core/actions.js:24` `reserved` 拿掉並補 `KEYMAP_HELP` / `TOUCH_HELP` 列「T 手機」，`core.mjs` 一致性檢查）；觸控 I6 在 `src/touch.js` `SLOTS` 加 `tl4`（`src/style.css` 加 `.tbtn.slot-tl4`，x 接 tl3 右側 +56 px、≥ 44 px），`registerTouchButton({ id: 'tb-phone', label: '手機', slot: 'tl4', showWhen: 'always', onTap: () => openPhone() })` 重新註冊顯示（同 tb-guide 作法 `src/main.js:849`）
+- 三個 App：**任務**（列 `jobs`，依 category 分「附近 / 委託 / 打工」三段，點「導航」→ `onNavigate(item)`；`navigable` 假時按鈕停用）；**地圖** → `onOpenMap()`（I6：`phone.close(); bigMap.open(); syncPanels()`）；**設定** → `onOpenSettings()`（I6：`phone.close(); menu.openPause('settings')`）
+- I6 注入：`onNavigate: (it) => nav.setDestination(it.x, it.z, it.title, 'phone', playerPos)`；`setData` 的 `jobs` = `missions.listings(focus)`（§23.4）；`hour` / `weatherIcon` 同上
+- 新事件（加進 §1 表）：`phone:open` `{}`、`phone:close` `{}`（發出者 phone.js）
+- 測試：`tools/test/p6-p6.mjs`（假 DOM：open / close / isOpen 冪等、Esc 關閉且 stopPropagation、setData 後任務 App 分三類、navigable false 停用、onOpenMap / onOpenSettings 呼叫一次）
+
+### 23.4 打工委託（E6，`src/missions/**`）
+
+**現況**
+- 目錄：`src/missions/catalog.js:16-55` `BUILTIN_MISSIONS`（`{ slug, name, file, title, client, brief, from, to, timeLimitSec, reward, conditions }`，無 category）、`normalizeCatalog` `src/missions/catalog.js:133`、`loadCatalog` `:161`
+- 時段事件：`src/missions/events.js:37-47` `NIGHT_MARKET_DELIVERY`（window 18–24、cooldownSec 180、pickup radius 12）、`createTimedEvents` `:78`
+- 互斥：`src/missions/index.js:138` `evActive`、`:145` 垃圾車 `isBusy: () => !!run || evActive()`、`:147` `truckEngaged`；委託進行中不開放事件、事件進行中不開放委託（檔頭 `src/missions/index.js:12`）→ **同時只能一個進行中**
+- 冷卻：委託 `COOLDOWN_SEC` 120（`src/missions/index.js:33`），`now()` = main.js `gameTime`（`src/main.js:745`，`gameTime += simDt` 於 `src/main.js:1147`）→ 已是模擬時間
+- 統計：`MISSION_STAT_EVENTS` / `trackMissionStats`（`src/missions/index.js:46-75`）；結算 `settleReward`（`:85`）、`addMoney(n, reason)`；HUD 跳字前綴 `src/hud.js:56` `MONEY_REASON_LABEL`
+- 標記：`markers()` → `{ x, z, kind, label }`；色表 `src/map/marker-colors.js:3-13`；互動 `nearest(pos)`（`src/missions/index.js:511`）
+- 每幀：`src/main.js:1483` `missions.update(worldStep.simDt, missionCtx)`（ctx `{ x, z, driving }`）
+- 存檔：`serialize` / `restore`（`src/missions/index.js:701` / `:762`）；`missions.events` 欄（§18 Phase 5 增補）
+
+**Phase 6 介面**
+- 新檔 `src/missions/jobs.js`：`createJobs({ bus, now, rng, addMoney, getGameHour, spots, isTouch, interactLabel })` → `{ update(simDt, ctx), nearest(pos), markers(), objective(), active(), listings(pos, out), isEngaged(), abandon(), serialize(), restore(data), dispose() }`；由 `createMissions` 建立並合併（同垃圾車模式），整合層只碰 `createMissions`
+- **類別欄位**：所有可列表項帶 `category`：catalog 委託正規化時補 `category: 'mission'`（manifest 可省略）；時段事件 / 垃圾車 = `'nearby'`；打工定義 = `'job'`。`JOB_DEFS = [NIGHT_MARKET_RUN, VALET_PARKING]`，每筆 `{ id, category: 'job', title, window?, cooldownSec, failCooldownSec, … }`
+- `missions.listings(pos, out = [])` → `[{ id, title, category, reward, distanceM, navigable, x, z, active }]`（重用 out；reward = 預估值；`navigable` = 有座標且目前沒有其他進行中工作；給 §23.3 手機）
+- 互斥：打工加入同一把鎖——`isBusy = !!run || evActive() || truckEngaged() || jobs.isEngaged()`；打工進行中隱藏委託起點 / 取餐點、垃圾車不出現；他者進行中打工不開放
+- 計時：`jobs.update` 的時限 / 停妥維持 / 離車計時一律累加 **simDt**（§20）；冷卻用 `now()`（= gameTime，同屬模擬時間）
+- 事件（加進 §1 表）：`job:available { id, title, x, z }`、`job:start { id, title, limitSec }`、`job:stage { id, stage, text, x, z }`、`job:complete { id, reward, timeSec, leftSec }`、`job:fail { id, reason }`；`MISSION_STAT_EVENTS` 增 `'job:complete' → missionsDone`、`'job:fail' → missionsFailed`（不新增 stats 欄位，save.js 不改）
+- 結算：`addMoney(n, 'job')`；I6 在 `src/hud.js:56` 加 `job: '打工 '`
+- 標記 kind：`'job-start'`、`'job-dest'`、`'job-car'`（E6 改 `src/map/marker-colors.js` 與 `src/map/big-map.js MARKER_LABELS`；`job-dest` 加入 `PIN_KINDS`；hud.js `EDGE_KINDS` 加 `job-car` 由 I6）
+- 存檔：不升版。打工狀態併入 `missions.events`（`{ completed: { 'night-market-run': n, 'valet-parking': n }, cooldowns: { … } }`，id 不與既有事件重複）；`index.js restore` 依 id 分流給 events / truck / jobs；進行中打工不存檔（讀檔作廢、不發 fail）
+- 注入（I6，`createMissions({ …, jobSpots, spawnValetCar, releaseValetCar })`；缺任一 → 該打工不作用）：
+  - `jobSpots = { stall: { x, z, yaw }, stallBack: { x, z }, sidewalkNear(x, z, rng, minM, maxM) → { x, z } | null, valet: [{ id, standX, standZ, carX, carZ, carYaw, slotX, slotZ, slotYaw }] }`；`stall` = §23.1 placeProp 回傳、`stallBack` = `propWorldPoint([0, 0, -(0.78 + 0.6)], pl)`（攤主側）
+  - `spawnValetCar({ x, z, yaw }) → vehicle`（I6 以 `vehicles.adopt` 實作）、`releaseValetCar(vehicle)`（結束後轉為路邊停放）
+  - update ctx 擴充：`{ x, z, driving, vehicle: 駕駛中的 Vehicle | null }`
+- **夜市跑單** `NIGHT_MARKET_RUN`：window 18–24；起點 = `stallBack` 2.5 m 內按 E（與外送取餐點 radius 12 重疊時，`nearest()` 在 2.5 m 內優先打工）；隨機 2–3 位客人（`sidewalkNear(stall, rng, 40, 160)`，彼此 ≥ 20 m）；**只限步行**：`ctx.driving` 連續 > 3 s → fail `'vehicle'`；每位客人 3 m 內按 E 送達；時限 = Σ 路段直線 × 1.3 / 3.5 m/s + 20 s；報酬 = 每位 80 + 0.25 × 路段 m，全送完加剩餘秒 × 1；失敗 `'timeout'|'vehicle'|'ko'|'abandon'`；冷卻 150 s、失敗 60 s
+- **代客泊車** `VALET_PARKING`：不限時段；起點 = valet stand 按 E → `spawnValetCar` 於 car 位姿（**指定車辨識 = 回傳的 vehicle 物件參照**，`ctx.vehicle === job.car`；標記 `job-car`）→ 上車後顯示 `job-dest`（slot）
+  - 停妥條件（同時成立且維持 1.0 s 模擬時間）：車中心到 slot 中心 ≤ 1.2 m；`|angleDelta(car.yaw, slotYaw)|` ≤ 15°；`|car.speed|` ≤ 0.5 m/s；玩家正駕駛該車
+  - 失敗：車毀（訂閱 `vehicle:disabled` 且 `vehicle === job.car`）→ `'destroyed'`；逾時（時限 = 路線長 / 8 m/s + 45 s）→ `'timeout'`；玩家不在車上且與車距離 > 40 m 持續 5 s → `'lost'`；`'ko'` / `'abandon'` 同委託
+  - 報酬 = 300 × (1 − 損壞比 × 0.7) + 剩餘秒 × 2；損壞比由注入 `healthOf(vehicle)`（I6 包 `dmg.healthOf`）讀；結束 `releaseValetCar`；冷卻 120 s、失敗 60 s
+- 測試：`tools/test/p6-e6.mjs`（互斥、category、listings、跑單 2–3 客、駕駛 3 s 失敗、泊車停妥 / 角度 / 速度門檻、三種失敗、simDt = 0 不推進、120/144 Hz 子步等價、serialize 併入 events）
+
+### 23.5 第 1 批共用檔案責任表
+
+四單元（B6 / CS6 / E6 / P6）檔案集**兩兩不相交**；「其他可改」= 否 表示其他單元只能 import / 讀。I6（整合）在四單元之後。
+
+| 檔案 | 擁有者 | 其他單元可改 | 備註 |
+|---|---|---|---|
+| `src/player.js` | B6 | 否 | 刪無物理模式死碼（約 `:294` 起的 `update` 非物理分支） |
+| `src/vehicle.js` | B6 | 否 | 刪死碼（約 `:397` 起的舊 `update(dt, ctrl, collision, …)`）；`adopt` 介面不變（E6 經 I6 注入使用） |
+| `src/prop-model.js` | B6 | 否 | §23.1 `PROP_COLLIDERS` / `propColliderBox` |
+| `src/missions/garbage-truck.js` | B6 | 否 | 警示燈夜間自發光（如需閃爍，匯出純函式 `beaconLevel(t, night)`，I6 套到材質） |
+| `tools/test/framerate-invariance.mjs` | B6 | 否 | >60 Hz 計時測試擴充（或另開 p6-b6.mjs） |
+| `src/camera.js` | CS6 | 否 | §23.2 setViews / getViews / onViewChange |
+| `src/core/settings.js` | CS6 | 否 | `camWalkView` / `camDriveView` |
+| `src/core/actions.js` | CS6 | 否 | `phone` 取消預留 + 說明列（P6 不改） |
+| `src/input.js` | CS6 | 否 | 如需 snapshot 加 `pressed.phone` |
+| `src/ui/menu.js`、`src/ui/menu-model.js`、`src/ui/menu.css` | CS6 | 否 | SETTING_ROWS 兩列 |
+| `src/missions/index.js`、`catalog.js`、`events.js`、`ui.js`、`missions.css`、`light-pillar.js`、`jobs.js`（新） | E6 | 否 | events.js / index.js B6 **不需要改**；若 B6 實作中發現必須改 → 「序列：B6 先」，E6 在 B6 合併後再動 |
+| `src/map/marker-colors.js`、`src/map/big-map.js` | E6 | 否 | job-* 色表 / 圖例 |
+| `src/ui/phone.js`（新）、`src/ui/phone.css`（新） | P6 | 否 | 不改 main.js / actions.js |
+| `src/main.js`、`src/core/loop.js`、`src/hud.js`、`src/touch.js`、`src/mobile.js`、`src/style.css` | I6 | 否 | 攤車 `main.js:453`、rig setViews、syncPhone、tb-phone `tl4`、createMissions 注入、`MONEY_REASON_LABEL.job`、`EDGE_KINDS` |
+| `src/save.js`、`src/physics/colliders.js`、`src/missions/` 外其他檔 | 無（凍結） | 否 | 本批不改；需要改先回報主控 |
+| `docs/dev/interfaces.md` | I6（各單元只改自己負責的 §22.2 第 564 行 / §23 子節勘誤，於 FINDINGS 註明） | 限本表註記 | |
+| `tools/test/run-all.mjs`、`package.json` | 經理 / I6 | 否 | 見下 |
+
+- 跨單元依賴（介面先行、實作可平行）：P6 只依 §23.3 簽名，不 import missions；E6 的 `listings` 由 I6 餵給 phone；B6 的 `propColliderBox` 由 I6 接到 `main.js:453` 與 `jobSpots.stall`
+- 序列：B6 與 E6 檔案集無交集（攤車擺放 `stallPlacement` 在 main.js 屬 I6、取餐點常數在 events.js 屬 E6 唯讀給 B6），**目前無需序列**；唯一可能交集 `src/missions/events.js` / `index.js` 若 B6 需要 → 序列：B6 先
+- 測試命名：`tools/test/p6-b6.mjs`、`p6-cs6.mjs`、`p6-e6.mjs`、`p6-p6.mjs`、整合 `p6-i6.mjs`；各單元只新增自己的測試檔、可修改自己擁有的模組對應的既有測試
+- **run-all 自動掃描**：`tools/test/run-all.mjs:14-17` `readdirSync(testDir).filter(f.endsWith('.mjs') && f !== 'run-all.mjs').sort()` → 新增的 `p6-*.mjs` 放進 `tools/test/` 即自動被 `npm run test:all` 執行，**不需登錄**；`package.json` 個別 `test:*` script 為選用，由經理 / I6 統一加（各單元不改 package.json）
+
 ---
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
