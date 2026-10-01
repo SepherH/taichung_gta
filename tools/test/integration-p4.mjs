@@ -171,6 +171,10 @@ const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
     check(`main.js 接線：${name}`, lack.length === 0, lack.map(String).join(' | '));
   }
   // 規矩
+  check('main.js：武器模型換裝時機（weapon:equip 先掛起 → layer swap 換手點換；equip 動作沒播 / 播完 / 打斷即換；讀檔 state 非 equipping 立即換）',
+    ["player.weaponLayer.on('swap', finishWeaponSwap)", "player.weaponLayer.on('finished', equipEnded)", "player.weaponLayer.on('cancel', equipEnded)",
+      "if (weapons.state !== 'equipping') applyWeaponModel()", 'if (!(dur > 0)) finishWeaponSwap()', "name === 'weapon_equip' && !equipStarting"].every((x) => code.includes(x))
+    && !code.includes("bus.on('weapon:equip', () => applyWeaponModel())"));
   check('main.js：不用 alert / confirm', !/\balert\(|\bconfirm\(/.test(code));
   // FX3-5：觸控圖鑑鈕（touch.js 預設隱藏佔位，整合層以同 id 帶 onTap 重新註冊）
   check('main.js：觸控圖鑑鈕 registerTouchButton({ id: tb-guide, label 圖鑑, slot tl3, showWhen walk, onTap → openGuide })、自 ./touch.js import、在 Input（initTouch）與 openGuide 之後',

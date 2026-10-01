@@ -3,7 +3,7 @@
 // 用法：node tools/test/audio.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // 項目：無 AudioContext 時 no-op、未解鎖不播、事件 → 對應音效、音源上限 12（持續音源算在內、停最舊一次性）、
 //   音量設定傳到 GainNode（subscribe 即時）、遠距不播 / 衰減 / 聲像、腳步步頻、paused 靜音、持續音源開關、
-//   dispose 後不再響應、建構失敗 no-op；效能：update() 1000 次平均 < 0.05 ms
+//   dispose 後不再響應、建構失敗 no-op、weapon:impact 跳彈聲（world / vehicle、3D、上限）；效能：update() 1000 次平均 < 0.05 ms
 import { register } from 'node:module';
 
 const JSON_HOOK = `
@@ -407,6 +407,54 @@ function groups(ctx) {
   audio.update(1 / 60, walkState({ walkSpeed: 5, driving: true }));
   settings.set('volumeSfx', 0.2);
   check('dispose 後不再響應事件 / update / 設定，context 關閉', ctx.starts === s0 && ctx.log.length === n0 && g.sfx.gain.value === 0.9 && ctx.closed && audio.play('gunshot') === false && audio.unlock() === false);
+}
+
+// ---- 9b. weapon:impact 跳彈 / 擊中聲 ----
+{
+  const { bus, settings, audio } = setup();
+  audio.unlock();
+  audio.update(1 / 60, walkState());
+  const ctx = lastCtx;
+  const g = groups(ctx);
+  const emitImpact = (surface, x = 3, z = 4) => {
+    ctx.currentTime += 2;
+    const i0 = ctx.log.length;
+    const n0 = plays(audio);
+    bus.emit('weapon:impact', { x, y: 1, z, nx: 0, ny: 1, nz: 0, surface });
+    return { nodes: ctx.log.slice(i0), added: plays(audio) - n0 };
+  };
+  const w = emitImpact('world');
+  const v = emitImpact('vehicle');
+  check('weapon:impact（world / vehicle）→ ricochet，plays 各 +1、有 start 音源', w.added === 1 && v.added === 1 && lastName(audio) === 'ricochet'
+    && w.nodes.some((n) => n.started !== undefined && n.started !== null) && v.nodes.some((n) => n.started !== undefined && n.started !== null)
+    && SOUND_NAMES.includes('ricochet'));
+  const wOsc = w.nodes.filter((n) => n.kind === 'osc');
+  const vOsc = v.nodes.filter((n) => n.kind === 'osc');
+  const glides = (n) => n.frequency.events.some((e) => e[0] === 'exp' && e[1] < n.frequency.events[0][1]);
+  check('world = 石面「啾」（下滑音）、vehicle = 金屬「鏘」（兩個非諧和三角波、不滑音）',
+    wOsc.length === 1 && glides(wOsc[0]) && vOsc.length === 2 && vOsc.every((n) => n.type === 'triangle' && !glides(n))
+    && Math.abs(vOsc[1].frequency.events[0][1] / vOsc[0].frequency.events[0][1] - 1.5) > 0.02);
+  const out = v.nodes.find((n) => n.kind === 'gain' && (n.outs.includes(g.sfx) || n.outs.some((o) => o.kind === 'panner' && o.outs.includes(g.sfx))));
+  const pan = v.nodes.find((n) => n.kind === 'panner');
+  check('擊中聲走 sfx 群組、3D 衰減 + 聲像（5 m 外左前方 → pan < 0）', !!out && out.gain.value > 0 && out.gain.value < 1 && !!pan && pan.pan.value < 0,
+    out ? `gain ${out.gain.value.toFixed(2)} pan ${pan ? pan.pan.value.toFixed(2) : '-'}` : '找不到輸出增益');
+  const far = emitImpact('world', 0, MAX_DIST + 5);
+  check(`擊中點 > ${MAX_DIST} m 不播`, far.added === 0 && far.nodes.length === 0);
+  const odd = emitImpact(undefined);
+  check('surface 缺漏 → 當 world 播、不丟例外', odd.added === 1 && odd.nodes.filter((n) => n.kind === 'osc').length === 1);
+  // 爆量：同一瞬間 40 發擊中（加上持續音源）不超過音源上限
+  audio.update(1 / 60, walkState({ driving: true, rpm01: 0.3, nearJunction: 20 }));
+  ctx.currentTime += 2;
+  let maxSeen = 0;
+  const n0 = plays(audio);
+  for (let i = 0; i < 40; i++) {
+    bus.emit('weapon:impact', { x: i % 5, y: 0, z: 2, nx: 0, ny: 1, nz: 0, surface: i % 2 ? 'vehicle' : 'world' });
+    maxSeen = Math.max(maxSeen, audio.stats().voices);
+  }
+  check(`連續 40 發擊中：音源 ≤ ${MAX_VOICES}（最大 ${maxSeen}）、持續音源保留`, maxSeen === MAX_VOICES && audio.stats().loops === 2 && plays(audio) - n0 === 40);
+  settings.set('volumeSfx', 0);
+  check('sfx 音量 0 → 擊中聲經 sfx 群組靜音', g.sfx.gain.value === 0);
+  audio.dispose();
 }
 
 // ---- 10. 效能：update() 每幀耗時 ----

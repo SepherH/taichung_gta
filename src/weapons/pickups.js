@@ -2,7 +2,8 @@
 //   → { update(dt, playerPos), nearest(pos) → interactable|null, markers() → [{ x, z, kind: 'ammo', label }], dispose() }
 // 玩家進入 PICKUP_RADIUS（1.5 m）自動拾取（不必按 E）→ emit pickup:ammo { amount, x, z }，該點隱藏 respawnSec 秒後重生
 // 由整合層訂閱 pickup:ammo 呼叫 weapons.addAmmo(amount)；canPickup() 回 false（例：備彈已滿）時不拾取、彈藥盒留著
-// nearest(pos)：INTERACT_RADIUS 內最近的可拾取點 → interactable { id, text, dist, priority: 0, act() }（按 E 也可撿；自動拾取為主）
+// nearest(pos)：INTERACT_RADIUS 內最近的可拾取點 → interactable { id, text, dist, priority: 0, act() }（按 E 也可撿；自動拾取為主）；
+//   canPickup() 回 false 時回 null（備彈已滿不提示）
 // 外觀：共用幾何 / 材質的小彈藥盒（綠色盒 + 黃色標），緩慢旋轉上下浮動；scene 省略時只跑邏輯（測試）
 // 每幀不配置新物件（markers 陣列與 interactable 物件重用）
 import * as THREE from 'three';
@@ -105,6 +106,7 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
 
   function nearest(pos) {
     if (disposed || !pos) return null;
+    if (canPickup && !canPickup()) return null; // 備彈已滿：不顯示「撿彈藥」提示（take 也不會消耗彈藥盒）
     let best = null;
     let bestD = INTERACT_RADIUS;
     for (const p of list) {

@@ -297,8 +297,12 @@ const flat = (help) => help.flatMap((g) => g.items);
   const attrIds = html.match(/id="attribution"/g) || [];
   check('index.html：#attribution 恰好一處且含 OpenStreetMap / ODbL', attrIds.length === 1 && /OpenStreetMap/.test(html) && /ODbL/.test(html));
   const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
-  const gone = ['tb-flip', 'tb-punch', 'toggleHelp', 'mousePunchListener', "'KeyE'", "'KeyR'", "'KeyO'", 'registerTouchButton', 'overturnedTime'].filter((s) => code.includes(s));
-  check('main.js：已移除 tb-flip / tb-punch / toggleHelp / mousePunchListener / E / R / O 鍵', gone.length === 0, gone.join(','));
+  const gone = ['tb-flip', 'tb-punch', 'toggleHelp', 'mousePunchListener', "'KeyE'", "'KeyR'", "'KeyO'", 'overturnedTime'].filter((s) => code.includes(s));
+  check('main.js：已移除 tb-flip / tb-punch / toggleHelp / mousePunchListener / E / R / O 鍵 / overturnedTime', gone.length === 0, gone.join(','));
+  // Phase 4（FX3 / I4b）：registerTouchButton 只用來以 onTap 重新註冊 tb-guide（圖鑑鈕），不得再註冊已移除的鈕
+  const tbIds = [...code.matchAll(/registerTouchButton\(\s*\{\s*id:\s*'([^']+)'/g)].map((m) => m[1]);
+  const tbCalls = (code.match(/registerTouchButton\(/g) || []).length;
+  check('main.js：registerTouchButton 只註冊 tb-guide（不得註冊 tb-flip / tb-punch）', tbIds.length === tbCalls && tbIds.every((id) => id === 'tb-guide'), tbIds.join(',') + ' calls=' + tbCalls);
   check('main.js：每幀讀 input.snapshot()，攻擊 / 上下車 / 暫停 / 地圖 / 鏡頭段 / 回頭看 / 快轉走 action', /input\.snapshot\(\)/.test(code) && ['pressed.attack', 'pressed.enterExit', 'pressed.pause', 'pressed.map', 'pressed.camera', 'down.lookBack', 'pressed.timeSkip'].every((s) => code.includes(s)));
   check('main.js：不覆寫 camera.fov（rig 自行管理）', !/camera\.fov\s*=[^=]/.test(code));
   const need = ["bus.on('game:start'", "bus.on('game:pause'", "bus.on('game:quitToMenu'", 'createSaveStore', 'createAutosave', 'createEconomy', 'createMenu', 'createMapView', 'createTrafficLights', 'createCarjack', 'createVehicleDamage', 'traffic.setBudget', 'pedKnockdownPayload', "'player:ko'", 'setGameActive', 'requestPointerLock', 'pointerlockchange', 'visibilitychange', 'pagehide', '--tg-ui-scale', '--ui-scale', 'onVehicleHitWorld', 'onVehicleHitVehicle', 'onVehicleHitPedestrian', 'rig.shake', 'honk()', 'upright()', 'findOverturned', 'carjackCandidates', 'lights.update(', 'lights.updateVisuals(', 'dmg.update('];

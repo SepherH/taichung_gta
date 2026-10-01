@@ -1070,12 +1070,28 @@ function sharedRay(inner) {
   allow = false;
   pk.update(FRAME, { x: -10, y: 2, z: 0 });
   ok(of('pickup:ammo').length === 1 && pk.points[1].active, 'canPickup false（備彈滿）→ 不拾取、盒子留著');
+  ok(pk.nearest({ x: -10, z: 1 }) === null && pk.nearest({ x: 10, z: 1 }) === null, 'canPickup false（備彈滿）→ nearest 回 null、不顯示撿彈藥提示');
+  ok(of('pickup:ammo').length === 1 && pk.points[1].active && scene.children[1].visible, '備彈滿時提示不出現、彈藥盒不被消耗');
   allow = true;
   ok(pk.nearest({ x: -10, z: 1 }).act() === true && of('pickup:ammo').length === 2, 'interactable.act() 也能撿');
   const mk = pk.markers();
   ok(pk.markers() === mk, 'markers 陣列重用');
   pk.dispose();
   ok(scene.children.length === 0, 'dispose 移除網格');
+  // 同 main.js 接線：canPickup = 備彈 < 上限（120）；封頂時不提示、補到上限以下立即恢復
+  {
+    const PM = WEAPONS.pistol.reserveMax;
+    let reserve = PM;
+    const pk3 = createAmmoPickups({ bus, points: [{ x: 50, z: 0 }], canPickup: () => reserve < PM });
+    const n0 = of('pickup:ammo').length;
+    const full = pk3.nearest({ x: 50, z: 2 });
+    pk3.update(FRAME, { x: 50, z: 0.5 });
+    ok(PM === 120 && full === null && of('pickup:ammo').length === n0 && pk3.points[0].active, `備彈 ${PM}（上限）：不提示、走進 1.5 m 也不消耗`);
+    reserve = PM - 1;
+    const again = pk3.nearest({ x: 50, z: 2 });
+    ok(again && again.text === '撿彈藥', '備彈低於上限 → 提示恢復');
+    pk3.dispose();
+  }
   // 無 scene（純邏輯）
   const pk2 = createAmmoPickups({ bus, points: [{ x: 0, z: 0 }], amount: 6, respawnSec: 5 });
   pk2.update(FRAME, { x: 0.5, z: 0.5 });

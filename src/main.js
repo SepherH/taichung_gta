@@ -466,12 +466,20 @@ async function init() {
     // 動畫注入：player.weaponLayer.play；開槍另疊 settings.recoil 強度的加法後座
     playAnim: (name) => {
       if (name === 'pistol_fire') player.weaponLayer.addRecoil(recoilSetting());
-      return player.weaponLayer.play(name);
+      if (name !== 'weapon_equip') return player.weaponLayer.play(name);
+      equipStarting = true; // 重播 weapon_equip 會先 cancel 上一段：這個 cancel 不算換手
+      const dur = player.weaponLayer.play(name);
+      equipStarting = false;
+      if (!(dur > 0)) finishWeaponSwap(); // 換裝動作沒播（缺 clip / 全身狀態擋下）→ 立即換模型
+      return dur;
     },
     getBatSegment: (grip, tip) => (batSegment ? batSegment(grip, tip) : false),
   });
   // 武器模型掛到主角 weapon_socket（缺則右手骨）；空手拿下；駕駛中隱藏
+  let swapPending = false; // weapon:equip 已發、模型還沒換（等 weapon_equip 的換手點）
+  let equipStarting = false;
   const applyWeaponModel = () => {
+    swapPending = false;
     if (!weaponModels) return;
     const id = weapons.current;
     const m = id === 'bat' ? weaponModels.bat : id === 'pistol' ? weaponModels.pistol : null;
@@ -491,7 +499,22 @@ async function init() {
       applyWeaponModel();
     })
     .catch(() => {});
-  bus.on('weapon:equip', () => applyWeaponModel());
+  // 換裝時機：select 發 weapon:equip（state 'equipping'）後播 weapon_equip，到換手點（layer 'swap'）才換模型；
+  // 讀檔 restore 發 weapon:equip 時 state 已是 'idle' → 立即換。模型一律依 weapons.current，快速連按最後必停在目前武器
+  const finishWeaponSwap = () => {
+    if (swapPending) applyWeaponModel();
+  };
+  bus.on('weapon:equip', () => {
+    swapPending = true;
+    if (weapons.state !== 'equipping') applyWeaponModel();
+  });
+  player.weaponLayer.on('swap', finishWeaponSwap);
+  // 保底：換手點前動作播完或被打斷（受擊 / 上車 / 開槍）→ 立即換
+  const equipEnded = (name) => {
+    if (name === 'weapon_equip' && !equipStarting) finishWeaponSwap();
+  };
+  player.weaponLayer.on('finished', equipEnded);
+  player.weaponLayer.on('cancel', equipEnded);
   // 持武器姿勢：球棒 bat_hold、手槍 pistol_hold / 瞄準 pistol_aim（clip 缺 → 退回 hold / 不疊加）
   let weaponPose = null;
   const updateWeaponPose = (aiming) => {
