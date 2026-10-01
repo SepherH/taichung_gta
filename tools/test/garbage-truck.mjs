@@ -397,6 +397,50 @@ function setupMs(extra = {}, hour = 17) {
   await env5.ms.ready;
   check('garbageTruck: false → 關閉', env5.ms.truck === null);
 }
+// 5b. eventActive() / eventObjective() 也回垃圾車；目標列 / 字幕操作詞依注入的 isTouch / interactLabel
+{
+  const route = findRoute(graph, { x: 330, z: 380 }, { x: 820, z: 470 });
+  const routeFor = () => route.points;
+  const run = async (extra) => {
+    const env = setupMs({ routeFor, ...extra });
+    await env.ms.ready;
+    const subs = [];
+    env.ms.ui.subtitle = (text) => subs.push(text); // 無 DOM 時 ui 為 noop 物件：換掉 subtitle 收字幕
+    env.step(0.2, FAR);
+    const before = { act: env.ms.eventActive(), obj: env.ms.eventObjective() };
+    const t = env.ms.truckState();
+    env.step(0.1, { x: t.x + 10, z: t.z });
+    return { env, subs, before };
+  };
+  const D = await run({});
+  check('追車前 eventActive() / eventObjective() 為 null', D.before.act === null && D.before.obj === null);
+  const ea = D.env.ms.eventActive();
+  const eo = D.env.ms.eventObjective();
+  check('追車中 eventActive() → 垃圾車（id garbage-truck、kind truck、stage chase、limitSec / elapsedSec / timerSec、to = 車尾座標，欄位比照外送）',
+    ea && ea.id === 'garbage-truck' && ea.kind === 'truck' && ea.stage === 'chase' && ea.limitSec === DEF.limitSec && ea.timerSec > 0 && ea.elapsedSec >= 0
+      && ea.to && near(ea.to.x, D.env.ms.truckState().rearX) && near(ea.to.z, D.env.ms.truckState().rearZ) && 'from' in ea && 'routeM' in ea && ea === D.env.ms.truck.active(), JSON.stringify(ea));
+  check('追車中 eventObjective() → 垃圾車目標 { text, timerSec, distM, rewardNow }（= truck.objective()）', eo && eo === D.env.ms.truck.objective() && typeof eo.text === 'string' && eo.timerSec > 0 && Number.isFinite(eo.distM) && eo.rewardNow > 0);
+  check('追車中 active() / objective() 仍只描述委託（null，HUD 行為不變）', D.env.ms.active() === null && D.env.ms.objective() === null);
+  check('桌機（預設）：目標列 / 字幕「到車尾按 E 倒垃圾」', /車尾按 E 倒垃圾/.test(eo.text) && D.subs.length >= 2 && D.subs.slice(0, 2).every((x) => /按 E 倒垃圾/.test(x)), D.subs.join(' | '));
+  const tt = D.env.ms.truckState();
+  D.env.ms.nearest({ x: tt.rearX, z: tt.rearZ }).act();
+  check('倒完垃圾後 eventActive() / eventObjective() 回 null', D.env.ms.eventActive() === null && D.env.ms.eventObjective() === null);
+  const T = await run({ isTouch: true });
+  const to = T.env.ms.eventObjective();
+  check('觸控（isTouch: true）：目標列改「點「互動」鈕」、不含「按 E」', to && /車尾點「互動」鈕 倒垃圾/.test(to.text) && !/按\s*E/.test(to.text), to && to.text);
+  check('觸控：垃圾車出現 / 開始追車字幕改「點「互動」鈕」、不含「按 E」', T.subs.length >= 2 && T.subs.every((x) => !/按\s*E/.test(x)) && T.subs.slice(0, 2).every((x) => /點「互動」鈕 倒垃圾/.test(x)), T.subs.join(' | '));
+  const tt2 = T.env.ms.truckState();
+  check('觸控：互動提示原文仍為「按 E 倒垃圾」（由 hud.js touchPromptText 轉換，不重複改）', T.env.ms.nearest({ x: tt2.rearX, z: tt2.rearZ }).text === '按 E 倒垃圾');
+  const L = await run({ isTouch: true, interactLabel: '按互動' });
+  check('interactLabel 可直接覆寫', /車尾按互動 倒垃圾/.test(L.env.ms.eventObjective().text));
+  check('createGarbageTruck 未給 interactLabel → 預設「按 E」', (() => {
+    const e = setup();
+    e.step(0.2, FAR);
+    const tr = e.truck.truck();
+    e.step(0.1, { x: tr.x, z: tr.z });
+    return /按 E 倒垃圾/.test(e.truck.objective().text);
+  })());
+}
 
 // ======================= 6. 旋律 =======================
 {

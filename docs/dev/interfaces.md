@@ -183,7 +183,7 @@
 | 下車 / 扶起 | `tb-exit` | KeyF | tap | 駕駛 |
 | 手煞 | `tb-handbrake` | Space | hold | 駕駛 |
 | 喇叭 | `tb-horn` | KeyH | hold | 駕駛 |
-| 互動 | `tb-interact` | KeyE | tap | 步行 / 駕駛（`showWhen: 'always'` + 預設隱藏；有互動提示時由 hud.js `setTouchButtonVisible` 顯示）。位置：步行 = 攻擊鈕左側（slot `interact`）；駕駛 = 下車鈕左側同列（橫向右 176–232、上 134–190）、直向改左半時速錶上方（style.css `body.touch-drive .tbtn.slot-interact`） |
+| 互動 | `tb-interact` | KeyE | tap | 步行 / 駕駛（`showWhen: 'always'` + 預設隱藏；有互動提示時由 hud.js `setTouchButtonVisible` 顯示）。位置：步行 = 攻擊鈕左側（slot `interact`）；駕駛 = 橫向在下車鈕左側同列（右 176–232、上 134–190）；直向在右半下車鈕正下方（右 106–162、上 206–262，不與左半轉向區 `#touch-pad` 重疊），直向駕駛踏板上緣讓到 274px（style.css `body.touch-drive .tbtn.slot-interact` / `body.touch-drive #touch-pedals`） |
 | 電台 | `tb-radio` | KeyQ | tap | 駕駛（hud.js 註冊，slot `top2`，§21.2） |
 | 暫停（左上） | `tb-pause` | Escape | tap | 一直 |
 | 地圖（左上） | `tb-map` | KeyM | tap | 一直 |
@@ -534,6 +534,8 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 ### 22.1 垃圾車事件（`src/missions/garbage-truck.js`，由 `missions/index.js createMissions` 掛上；規則以該檔頭為準）
 - 規則：遊戲時刻 16:00–18:00 且無進行中委託 / 外送時出現；時限 180 s；完成冷卻 240 s、失敗 / 收走冷卻 120 s；獎勵 `garbageReward(剩餘秒)` = 250 + 剩餘秒（`economy.add(n, 'event')`）；玩家進 60 m 內 → `event:start`；車尾投入口 5 m 內（步行或駕駛）按 E 完成；逾時（已追車）或追車後離車 > 250 m 持續 10 s → 失敗；未追車逾時只 `event:closed`、不計失敗
 - 介面：`createMissions({ …, routeFor(player, rng) })`——**有注入 routeFor 才掛垃圾車**（未注入 = 既有行為不變）；`missions.truckState()` → `{ x, z, heading, speed, stopped, rearX, rearZ, distM, phase: 'open'|'chase', beacon }` 或 null（物件重用）；`missions.truck` = 完整 API（`update / truck / nearest / markers / objective / active / isOpen / isEngaged / abandon / serialize / restore / dispose`）
+- `missions.eventActive()` / `eventObjective()`：外送進行中回外送；否則追車中（`truck.isEngaged()`）回垃圾車——`eventActive()` → `{ id: 'garbage-truck', kind: 'truck', stage: 'chase', from: null, to: { x, z }（車尾投入口，隨車移動）, routeM: null, limitSec, elapsedSec, timerSec }`（欄位比照外送）、`eventObjective()` → `{ text, timerSec, distM, rewardNow }`（同 `truck.objective()`）；都沒有 → null。HUD 目標列不經這兩個方法，行為不變
+- 觸控文字：`createMissions({ …, isTouch, interactLabel })`（選填；`interactLabel` 預設 `isTouch ? '點「互動」鈕' : '按 E'`）——垃圾車目標列（`追上垃圾車，到車尾${interactLabel} 倒垃圾`）與 `event:available` / `event:start` 字幕用此操作詞；main.js 依 `mobile.js isTouch()` 注入 `isTouch: touch`（missions 內不讀 DOM / navigator）。互動提示本身（`按 E 倒垃圾` / `按 E 取餐`）仍由 hud.js `touchPromptText` 轉換；夜市外送目標列 / 字幕本來就不含「按 E」
 - 整合（main.js）：
   - `routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng)`：隨機方向取玩家 150–300 m 外的點以 `projectToGraph` 投影為起點（投影後須在 75–450 m），同方向 ±45° 再往外 250–450 m 投影為終點，`findRoute(graph, 起點, 終點).points`（≥ 100 m）；最多試 4 個方向，失敗回 null（garbage-truck.js 2 s 後再問）。graph 在 missions 之後建立，閉包呼叫時已存在
   - 車體：`createVehicleModel('garbage_truck')`（public/models/vehicles/manifest.json 的 garbage_truck）**純視覺**——不建物理剛體、不進 `VehicleManager`（不可上車 / 搶車）、不進 traffic 車流（traffic.js `CAR_TYPES` 不含）；每幀 `missions.update` 之後依 `truckState()` 擺 `position.set(x, heightAt(x, z), z)`、`rotation.y = heading`、輪子滾動角 += speed × simDt / 輪徑；null → `visible = false`；讀檔 / 新局後立即同步一次。glb 缺檔 → 無車體（事件與標記照常）
@@ -561,7 +563,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 - 各畫質（含 low）都擺；無碰撞體（純裝飾，玩家可穿過）；glb 缺檔 → 不擺（外送照常）
 
 ### 22.3 互動提示與 tb-interact
-- 車輛提示與互動提示互不覆蓋：見 §3.2 `setPrompts`；觸控 `tb-interact` 步行 / 駕駛有互動提示都顯示（§4.5 表）
+- 車輛提示與互動提示互不覆蓋：見 §3.2 `setPrompts`；觸控 `tb-interact` 步行 / 駕駛有互動提示都顯示（§4.5 表）；直向駕駛位置在右半下車鈕下方（不落在左半轉向區 `#touch-pad`），見 §4.5 表
 
 ### 22.4 回歸
 - `node tools/test/integration-gt.mjs`：main.js + loop.js + audio/index.js 靜態接線（routeFor / truckState / garbage_truck 車體 / garbageTruckDist / LOOPS.garbage_truck / loadPropModels / night_market_stall / placeProp / event-truck / simDt / setPrompts）、traffic.js CAR_TYPES 不含 garbage_truck；行為：main.js `garbageTruckRoute` / `stallPlacement` 原始碼抽出以假路網與真 citymodel 執行、garbage-truck.js 接 routeFor 出現在玩家附近且 simDt = 0 不推進、audio 垃圾車 loop 開關 / 遲滯 / 暫停、色表 / 圖例 / 操作說明

@@ -17,7 +17,8 @@
 //     mesh.rotation.y = heading、visible = true；null → 隱藏 / 移除（車體純視覺、不建剛體）；distM = 玩家到車體距離（旋律音量用）
 //   nearest(pos) → interactable { id: 'event:garbage-truck', text, dist, priority: EVENT_PRIORITY, act() } 或 null
 //   markers() → [{ x, z, kind: 'event-truck', label: '垃圾車' }]（陣列 / 物件重用）
-//   objective() → { text, timerSec, distM, rewardNow } 或 null（追車中才有）；active() → { id, stage: 'chase', limitSec, elapsedSec, timerSec } 或 null
+//   objective() → { text, timerSec, distM, rewardNow } 或 null（追車中才有；text 的操作詞取建構參數 interactLabel，預設「按 E」，觸控由 createMissions 注入「點「互動」鈕」）
+//   active() → { id, kind: 'truck', stage: 'chase', from: null, to: { x, z }（車尾投入口，隨車移動）, routeM: null, limitSec, elapsedSec, timerSec } 或 null（欄位比照夜市外送 active()）
 //   isOpen()、hour()、abandon()、serialize() → { completed: { 'garbage-truck': n }, cooldowns: { 'garbage-truck': 剩餘秒 } }、restore(data)、dispose()
 // 事件（bus）：event:available { id, title, x, z, kind: 'truck' } / event:closed { id } / event:start { id, title, limitSec, leftSec, kind: 'truck' }
 //   / event:complete { id, reward, timeSec, leftSec } / event:fail { id, reason } / ui:sound（不發 nav:*：目標會移動，靠標記追）
@@ -154,6 +155,7 @@ export function createGarbageTruck({
   bus = null,
   now = defaultNow,
   rng = Math.random,
+  interactLabel = '按 E',
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -173,8 +175,8 @@ export function createGarbageTruck({
   const truckOut = { x: 0, z: 0, heading: 0, speed: 0, stopped: false, rearX: 0, rearZ: 0, distM: null, phase: 'open', beacon: true };
   const marker = { x: 0, z: 0, kind: 'event-truck', label: '垃圾車' };
   const markerList = [];
-  const objectiveOut = { text: '追上垃圾車，到車尾按 E 倒垃圾', timerSec: 0, distM: null, rewardNow: 0 };
-  const activeOut = { id, stage: 'chase', limitSec: def.limitSec, elapsedSec: 0, timerSec: 0 };
+  const objectiveOut = { text: `追上垃圾車，到車尾${interactLabel} 倒垃圾`, timerSec: 0, distM: null, rewardNow: 0 };
+  const activeOut = { id, kind: 'truck', stage: 'chase', from: null, to: rear, routeM: null, limitSec: def.limitSec, elapsedSec: 0, timerSec: 0 };
   const inter = { id: `event:${id}`, text: '按 E 倒垃圾', dist: 0, priority: EVENT_PRIORITY, act: () => dump() };
 
   const isCooling = () => cooldownUntil > now();

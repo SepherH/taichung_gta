@@ -1,5 +1,5 @@
 // 資料驅動送貨委託（契約 §16）：日常打工 = 從真實地標接貨、送到另一個地標
-// createMissions({ bus, scene, root, landmarks, addMoney, fetchJson, now, rng }) → 契約 §16 的 API（另加 speedScale / isModalOpen / abandon）
+// createMissions({ bus, scene, root, landmarks, addMoney, fetchJson, now, rng, isTouch, interactLabel }) → 契約 §16 的 API（另加 speedScale / isModalOpen / abandon）
 // 流程：同時開放 3 個起點光柱 → 靠近按 E（interactable priority 3）→ 接單卡 → 目的地光柱 + nav:destination
 //   → 抵達目的地（地標 radius + 8 m 內，步行或駕駛）結算 → 結算面板；失敗（timeout / destroyed / ko / abandon）→ 失敗面板 + 重試
 // 條件：timed 倒數、超時失敗（只有 conditions 含 timed 者會因超時失敗）；非 timed 委託的 timeLimitSec 只作提早完成加成基準，
@@ -19,6 +19,7 @@
 //   garbageTruck（定義物件；false 關閉）；委託 / 外送進行中不出現（未追車時遇到即收走），追車中（truck.isEngaged()）不開放委託 / 外送互動、
 //   隱藏委託起點光柱；nearest() 車尾投入口優先；markers() 附加 kind 'event-truck'；目標列在無委託 / 外送時顯示追車倒數；
 //   bus 事件與外送共用 event:*（id 'garbage-truck'），統計同樣經 trackMissionStats；serialize() 的 events 欄位合併兩者（id 不重複）
+//   eventObjective() / eventActive()：外送進行中回外送，否則追車中回垃圾車（truck.objective() / truck.active()），都沒有 → null
 //   整合層：missions.truckState() → { x, z, heading, … } 或 null（每幀擺垃圾車模型）、missions.truck（完整 API）
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
@@ -115,6 +116,9 @@ export function createMissions({
   events = DEFAULT_EVENTS,
   routeFor = null,
   garbageTruck = GARBAGE_TRUCK_EVENT,
+  // 目標列 / 字幕的操作詞（互動提示本身由 hud.js 轉觸控文字，不經此處）：整合層依 mobile.js isTouch() 注入，不在 missions 內讀 DOM / navigator
+  isTouch = false,
+  interactLabel = isTouch ? '點「互動」鈕' : '按 E',
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -137,7 +141,7 @@ export function createMissions({
   } };
   const truck = garbageTruck === false || typeof routeFor !== 'function' ? null : createGarbageTruck({
     def: garbageTruck && typeof garbageTruck === 'object' ? garbageTruck : GARBAGE_TRUCK_EVENT,
-    getGameHour, routeFor, isBusy: () => !!run || evActive(), addMoney, bus: truckBus, now, rng,
+    getGameHour, routeFor, isBusy: () => !!run || evActive(), addMoney, bus: truckBus, now, rng, interactLabel,
   });
   const truckEngaged = () => !!(truck && truck.isEngaged());
 
@@ -623,11 +627,11 @@ export function createMissions({
   };
 
   function onTruckEvent(name, p) {
-    if (name === 'event:available') ui.subtitle('🎵 垃圾車來了！追上它，到車尾按 E 倒垃圾');
+    if (name === 'event:available') ui.subtitle(`🎵 垃圾車來了！追上它，到車尾${interactLabel} 倒垃圾`);
     else if (name === 'event:start') {
       objKeyT = -1;
       objKeyD = -1;
-      ui.subtitle(`追上垃圾車！${formatClock(p.leftSec)} 內到車尾投入口按 E 倒垃圾`);
+      ui.subtitle(`追上垃圾車！${formatClock(p.leftSec)} 內到車尾投入口${interactLabel} 倒垃圾`);
     } else if (name === 'event:complete') ui.subtitle(`垃圾倒好了！入帳 NT$${p.reward}`);
     else if (name === 'event:fail') ui.subtitle(TRUCK_FAIL_TEXT[p.reason] || '垃圾車開走了（不扣錢）。');
   }
@@ -804,8 +808,8 @@ export function createMissions({
     speedScale,
     isModalOpen: () => ui.isOpen(),
     abandon,
-    eventObjective: () => (timed ? timed.objective() : null),
-    eventActive: () => (timed ? timed.active() : null),
+    eventObjective: () => (timed && timed.objective()) || (truck && truck.objective()) || null,
+    eventActive: () => (timed && timed.active()) || (truck && truck.active()) || null,
     events: timed,
     truck,
     truckState: () => (truck ? truck.truck() : null),

@@ -930,7 +930,7 @@ body.touch #touch-hint:empty {
   display: none;
 }
 
-/* 觸控直向：右半在步行時只有底部按鈕群（上緣 = 底 222px）、駕駛時是下車 / 手煞一列（134–194px）+ 踏板（上緣 202px），HUD 改排：
+/* 觸控直向：右半在步行時只有底部按鈕群（上緣 = 底 222px）、駕駛時是下車 / 手煞一列（134–194px）+ 互動鈕列（206–262px）+ 踏板（上緣 274px），HUD 改排：
    右上 時間 · 金錢（寬度讓開左上小地圖）；左半欄 提示膠囊（180–240）→ 訊息（246–326）→ 觸控按鍵提示（332–368，兩行）；
    新手提示卡（只在步行）放右半 132–272；駕駛時時速錶群組在左下（底 40px，高 88px，橫排） */
 @media (orientation: portrait) {
@@ -1270,18 +1270,22 @@ body.touch-drive .tbtn.slot-interact {
   height: 56px;
 }
 
-/* 直向右半只有 180–215px 寬，放不下第三顆：改放左半、時速錶群組（底 40–128）上方與搖桿靜止底座（底 226–354）下方之間：
-   底 148–204、中線左側 12–68px；與時速錶 20px、搖桿底座 22px、踏板（中線右側 12px 起）24px */
+/* 直向右半只有 180–215px 寬，下車 / 手煞那一列放不下第三顆；左半是轉向區 #touch-pad（x 0 ～ 中線），放那裡拇指轉向時會誤觸：
+   改放右半、下車鈕正下方新的一列：上 206–262、右 106–162（中心對齊下車鈕），與下車 / 手煞 12px、踏板 12px，
+   左緣距中線 ≥ 18px（360 寬時 x 198 > 180），不與 #touch-pad 重疊；踏板上緣直向時讓到 274px（上 206 + 56 + 間距 12） */
 @media (orientation: portrait) {
   body.touch-drive .tbtn.slot-interact {
-    top: auto;
-    right: calc(50% + 12px);
-    bottom: calc(148px + env(safe-area-inset-bottom));
+    top: calc(206px + env(safe-area-inset-top));
+    right: calc(106px + env(safe-area-inset-right));
+  }
+
+  body.touch-drive #touch-pedals {
+    padding-top: calc(274px + env(safe-area-inset-top));
   }
 }
 
 /* 駕駛踏板：右半區兩大塊（左煞車、右油門），步行隱藏；駕駛時隱藏視角區。
-   上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px） */
+   上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px）；直向另讓出互動鈕列（上緣 274px，見上方） */
 #touch-pedals {
   position: absolute;
   right: 0;

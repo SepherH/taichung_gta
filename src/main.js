@@ -734,6 +734,7 @@ async function init() {
     routeLength: (a, b) => findRoute(graph, a, b)?.lengthM,
     // 垃圾車事件（garbage-truck.js）：路線 = 玩家附近道路點 → 更遠道路點的 findRoute 折線（graph 同樣閉包取用）；玩家位置未知時用 focus
     routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng),
+    isTouch: touch, // 目標列 / 字幕操作詞：觸控「點「互動」鈕」、桌機「按 E」
   });
   const graph = buildRoadGraph(surfaceRoads);
   // 垃圾車車體：manifest garbage_truck 經 createVehicleModel 建立的純視覺模型（不建剛體、不進 VehicleManager / traffic → 不可上車 / 劫車、不進車流）；

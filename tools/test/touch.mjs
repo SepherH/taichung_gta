@@ -442,32 +442,43 @@ input.endFrame();
   const dPort = block(/@media \(orientation: portrait\)\s*\{\s*body\.touch-drive \.tbtn\.slot-interact\s*\{([^}]*)\}/);
   const secRow = block(/body\.touch-drive \.tbtn\.slot-sec2,\s*body\.touch-drive \.tbtn\.slot-sec3\s*\{([^}]*)\}/);
   const pedalTop = Number((css.match(/#touch-pedals\s*\{[^}]*padding:\s*calc\((\d+)px/) || [])[1]);
-  check('style.css：駕駛互動鈕橫向 / 直向位置已定義、≥ 44px', px(dLand, 'width') >= 44 && px(dLand, 'height') >= 44 && Number.isFinite(px(dLand, 'top')) && Number.isFinite(px(dLand, 'right')) && Number.isFinite(px(dPort, 'bottom')) && /right:\s*calc\(50% \+/.test(dPort) && pedalTop > 0);
+  const pedalTopPort = Number((css.match(/@media \(orientation: portrait\)\s*\{[^@]*?body\.touch-drive #touch-pedals\s*\{[^}]*padding-top:\s*calc\((\d+)px/) || [])[1]) || pedalTop;
+  check('style.css：駕駛互動鈕橫向 / 直向位置已定義、≥ 44px', px(dLand, 'width') >= 44 && px(dLand, 'height') >= 44 && Number.isFinite(px(dLand, 'top')) && Number.isFinite(px(dLand, 'right')) && Number.isFinite(px(dPort, 'top')) && Number.isFinite(px(dPort, 'right')) && !/50%/.test(dPort) && pedalTop > 0 && pedalTopPort > 0);
   const R = (x, y, w, h, name) => ({ x, y, w, h, name });
   const gap = (a, b) => Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w), b.y - (a.y + a.h), a.y - (b.y + b.h));
   const size = px(dLand, 'width');
   const sec = px(secRow, 'width');
   const secTop = px(secRow, 'top');
   const bad = [];
+  const padOverlap = [];
   for (const [W, H] of [[568, 320], [640, 360], [740, 360], [844, 390], [932, 430], [360, 640], [375, 667], [390, 844], [430, 932]]) {
     const portrait = H > W;
     const me = portrait
-      ? R(W / 2 - px(dPort, 'right') - size, H - px(dPort, 'bottom') - size, size, size, 'interact')
+      ? R(W - px(dPort, 'right') - size, px(dPort, 'top'), size, size, 'interact')
       : R(W - px(dLand, 'right') - size, px(dLand, 'top'), size, size, 'interact');
     const topSz = portrait && W <= 400 ? 48 : 56;
+    const pTop = portrait ? pedalTopPort : pedalTop;
+    const narrow = portrait && W <= 400;
     const others = [
       R(W - 104 - sec, secTop, sec, sec, 'exit'),
       R(W - 16 - sec, secTop, sec, sec, 'handbrake'),
-      R(W - (portrait && W <= 400 ? 12 : 16) - topSz, 12, topSz, topSz, 'horn'),
+      R(W - (narrow ? 12 : 16) - topSz, 12, topSz, topSz, 'horn'),
       R(W - 82 - topSz, 12, topSz, topSz, 'radio'),
-      R(W / 2 + 12, pedalTop, W / 2 - 24, H - 16 - pedalTop, 'pedals'),
+      R(W - 148 - topSz, 12, topSz, topSz, 'top3'),
+      R(140, 12, 48, 48, 'pause'),
+      R(narrow ? 192 : 196, 12, 48, 48, 'map'),
+      R(narrow ? 244 : 252, 12, 48, 48, 'tl3'),
+      R(W / 2 + 12, pTop, W / 2 - 24, H - 16 - pTop, 'pedals'),
       R(110 - 64, (portrait ? H - 290 : H * 0.7) - 64, 128, 128, 'stick'),
       portrait ? R(10, H - 40 - 88, W / 2 - 14, 88, 'drive-panel') : R(W / 2 - 12 - 130, H - 40 - 120, 130, 120, 'drive-panel'),
     ];
     if (me.x < 0 || me.y < 0 || me.x + me.w > W || me.y + me.h > H) bad.push(`${W}x${H} 出界`);
     for (const o of others) if (gap(me, o) < 12) bad.push(`${W}x${H} ${o.name} 間距 ${gap(me, o)}`);
+    // 直式駕駛：左半轉向區 #touch-pad（x 0 ～ W/2、全高）——互動鈕不可落在其內（拇指轉向誤觸）
+    if (portrait && gap(me, R(0, 0, W / 2, H, 'touch-pad')) <= 0) padOverlap.push(`${W}x${H} x ${me.x}–${me.x + me.w}`);
   }
-  check('駕駛互動鈕：直式 / 橫式各尺寸與駕駛觸控鈕、踏板、搖桿底座、時速錶間距 ≥ 12px', bad.length === 0, bad.join('; '));
+  check('駕駛互動鈕：直式 / 橫式各尺寸與駕駛觸控鈕（下車 / 手煞 / 喇叭 / 換台 / 暫停 / 地圖）、踏板、搖桿底座、時速錶間距 ≥ 12px', bad.length === 0, bad.join('; '));
+  check('直式駕駛：tb-interact 不與左半轉向區 #touch-pad 重疊（360×640 ～ 430×932）', padOverlap.length === 0, padOverlap.join('; '));
 }
 // 踏板按住中切回步行 → 釋放
 gas.dispatch('pointerdown', pe(27, 900, 500));

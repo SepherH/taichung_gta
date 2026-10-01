@@ -57,6 +57,8 @@ const GROUPS = [
     'placeProp(stall,', "propEmissiveMaterials('night_market_stall')", 'scene.add(stall)', 'NIGHT_MARKET_DELIVERY.pickup']],
   ['標記：event-truck（小地圖 / 大地圖）', ['event-truck']],
   ['事件提示：垃圾車 available / closed 不沿用夜市外送文字', ["e.kind === 'truck'", "e.id === 'garbage-truck'"]],
+  ['觸控文字：createMissions 注入 isTouch（目標列 / 字幕「點「互動」鈕」，missions 內不讀 DOM / navigator）', [
+    /createMissions\(\{[^}]*\bisTouch: touch\b[^}]*\}\);/]],
 ];
 for (const [name, list] of GROUPS) {
   const miss = missing(list);
