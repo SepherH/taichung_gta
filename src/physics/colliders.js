@@ -242,6 +242,18 @@ function resolveLake(osm, lake) {
   return { poly: basin.lake, walkway: basin.levels.walkway, bottom: basin.levels.lakebed - LAKE_WALL_BELOW };
 }
 
+// ---------- 單一靜態方塊（道具碰撞，例：main.js 夜市攤車）----------
+// box = { x, y = 0, z, yaw = 0, width, depth, height }：(x, y, z) 為底面中心、繞 Y 轉 yaw（與 THREE rotation.y 同向），
+// width 沿本地 x、depth 沿本地 z；無父剛體的固定 collider，預設 WORLD 組；尺寸不合法回 null
+export function addStaticBox(RAPIER, world, { x, y = 0, z, yaw = 0, width, depth, height }, groups = GROUPS.WORLD) {
+  if (![x, y, z, yaw].every(Number.isFinite) || !(width > 0 && depth > 0 && height > 0)) return null;
+  const desc = RAPIER.ColliderDesc.cuboid(width / 2, height / 2, depth / 2)
+    .setTranslation(x, y + height / 2, z)
+    .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) });
+  desc.setCollisionGroups(groups).setSolverGroups(groups);
+  return world.createCollider(desc);
+}
+
 // ---------- 主函式 ----------
 // opts：{ osm, terrain, groups = GROUPS.WORLD, lake }
 //   lake：undefined = 讀 osm 湖面；null = 不建湖面阻擋；物件 = 覆寫（測試用 mock 湖）

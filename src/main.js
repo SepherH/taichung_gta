@@ -28,7 +28,8 @@
 //   垃圾車車體 = createVehicleModel('garbage_truck') 純視覺（無剛體、不可上車 / 劫車、不進 traffic），每幀依 missions.truckState() 擺位、null 隱藏，
 //   beacon 等發光材質 registerNight；音效 state.garbageTruckDist（無車 Infinity）→ audio LOOPS.garbage_truck；小地圖 / 大地圖標記 kind event-truck；
 //   missions.update 吃 worldStep.simDt（§20：暫停 / 面板開啟不推進、卡頓丟棄的時間不算）；
-//   夜市攤車 = loadPropModels → createPropModel('night_market_stall')，placeProp 擺在夜市外送取餐點旁人行側、+Z 面向道路（各畫質皆擺）
+//   夜市攤車 = loadPropModels → createPropModel('night_market_stall')，placeProp 擺在夜市外送取餐點旁離牆較遠的路側、+Z 面向道路，
+//     物理世界建好後 colliders.addStaticBox 補 WORLD 組靜態方塊（各畫質皆擺）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -69,7 +70,7 @@ import { createEconomy, LOOT_MIN, LOOT_MAX } from './economy.js';
 import { createMenu } from './ui/menu.js';
 import { createMapView } from './ui/map-view.js';
 import { initPhysics, PhysicsWorld } from './physics/world.js';
-import { buildWorldColliders, osmWithBuildings } from './physics/colliders.js';
+import { addStaticBox, buildWorldColliders, osmWithBuildings } from './physics/colliders.js';
 import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as G_NPC_CAR, PEDESTRIAN as G_PED, DEBRIS as G_DEBRIS } from './physics/groups.js';
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
@@ -116,6 +117,8 @@ const TRUCK_FAR_MAX = 450;
 const TRUCK_ROUTE_TRIES = 4; // 每次 routeFor 最多試幾個方向（都失敗 → 回 null，garbage-truck.js 隔 2 s 再問）
 const TRUCK_MIN_ROUTE_M = 100; // 太短的路線不用（垃圾車在折線上 ping-pong）
 const STALL_CURB_GAP = 1.2; // 夜市攤車離路緣（m）
+const STALL_WALL_GAP = 3; // 夜市攤車離建築外牆至少（m）
+const STALL_CLEAR_SCAN = 20; // 攤車兩側比較離牆距離時的掃描上限（m）
 const BASE_URL = import.meta.env.BASE_URL ?? './';
 const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值（'auto' = 自動切換）
 
@@ -323,8 +326,9 @@ function nearestRoadPoint(px, pz) {
   return best;
 }
 
-// 夜市攤車擺位：取餐點（惠來路道路中心點，events.js pickup）最近的車道 → 垂直方向路緣外 STALL_CURB_GAP + 半個攤車深的人行側
-// （兩側擇一：不在車道上、不在建築內；都不行退回第一側），正面（+Z）朝向該道路點；回傳 placeProp 的 opts（y 由呼叫端取地面高）
+// 夜市攤車擺位：取餐點（惠來路道路中心點，events.js pickup）最近的車道 → 垂直方向路緣外 STALL_CURB_GAP + 半個攤車深的兩側候選點
+// 合格 = 不在車道上、不在步道（footway）上（不擋人行動線）、離建築外牆 ≥ STALL_WALL_GAP；合格者取離牆較遠的一側
+// （避開貼著商場外牆的牆面陰影）；都不合格退回第一側。正面（+Z）朝向該道路點；回傳 placeProp 的 opts（y 由呼叫端取地面高）
 function stallPlacement(pickup, depth) {
   const road = nearestRoadPoint(pickup.x, pickup.z);
   if (!road) return { x: pickup.x, z: pickup.z, yaw: 0 };
@@ -332,14 +336,22 @@ function stallPlacement(pickup, depth) {
   const nx = -road.dz / len;
   const nz = road.dx / len;
   const off = road.hw + STALL_CURB_GAP + depth / 2;
+  // 離最近建築外牆的距離（1 m 解析度，上限 STALL_CLEAR_SCAN）
+  const clearance = (x, z) => {
+    for (let p = 0; p < STALL_CLEAR_SCAN; p++) if (buildingAt(x, z, p)) return p;
+    return STALL_CLEAR_SCAN;
+  };
   let pick = null;
+  let best = -1;
   for (const s of [1, -1]) {
     const x = road.x + nx * off * s;
     const z = road.z + nz * off * s;
     if (!pick) pick = { x, z };
-    if (!onRoadSurface(x, z, 0.3, false) && !buildingAt(x, z, 0.5)) {
+    if (onRoadSurface(x, z, 0.3, false) || onRoadSurface(x, z, depth / 2, true)) continue;
+    const c = clearance(x, z);
+    if (c >= STALL_WALL_GAP && c > best) {
+      best = c;
       pick = { x, z };
-      break;
     }
   }
   return { x: pick.x, z: pick.z, faceX: road.x, faceZ: road.z };
@@ -430,12 +442,15 @@ async function init() {
 
   await progress('載入角色與車輛模型…');
   await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]);
-  // 夜市攤車（prop-model.js）：夜市外送取餐點旁人行側、正面朝道路；各畫質（含 low）都擺；glb 缺檔 → createPropModel null，不擺
+  // 夜市攤車（prop-model.js）：夜市外送取餐點旁、離牆較遠的路側，正面朝道路；各畫質（含 low）都擺；glb 缺檔 → createPropModel null，不擺
+  // stallBox：擺好後的外接盒（底面中心 + yaw + manifest 尺寸），物理世界建好後補靜態碰撞體
   const stall = createPropModel('night_market_stall');
+  let stallBox = null;
   if (stall) {
     const info = propInfo('night_market_stall');
     const spot = stallPlacement(NIGHT_MARKET_DELIVERY.pickup, info ? info.depth : 1.5);
-    placeProp(stall, { ...spot, y: heightAt(spot.x, spot.z) });
+    const pl = placeProp(stall, { ...spot, y: heightAt(spot.x, spot.z) });
+    if (info) stallBox = { ...pl, width: info.width, depth: info.depth, height: info.height };
     scene.add(stall);
     for (const m of propEmissiveMaterials('night_market_stall')) registerNightOnce(m);
   }
@@ -451,6 +466,7 @@ async function init() {
   const pw = new PhysicsWorld(RAPIER);
   // 必須在 buildQiuhonggu / buildBuildings 之後：木平台等 addWalkable 追加的可行走面才會一併建成碰撞體
   const colliderStats = buildWorldColliders(RAPIER, pw.world, { osm: osmWithBuildings(osm, buildings.colliders), terrain });
+  if (stallBox) addStaticBox(RAPIER, pw.world, stallBox); // 夜市攤車：WORLD 組靜態方塊（各畫質皆有）
   const router = createContactRouter(RAPIER, pw);
   pw.onAfterStep((dt) => router.drain(dt));
   const physics = { RAPIER, pw, router, groups: GROUPS };
@@ -1216,7 +1232,7 @@ async function init() {
     hud.setHealth?.(a.hp, a.maxHp);
   };
   bus.on('player:money', ({ money, delta, reason }) => hud.setMoney?.(money, delta, reason));
-  // 時段事件（missions/events.js）：開放 / 時段結束提示；取餐 / 送達 / 失敗的字幕由 missions 自己顯示，入帳 reason 'event' 由 hud.setMoney 標示
+  // 時段事件（missions/events.js）：開放 / 時段結束提示；取餐 / 送達 / 失敗的字幕由 missions 自己顯示，入帳 reason 'event'（外送）/ 'garbage'（垃圾車）由 hud.setMoney 標示
   bus.on('event:available', (e) => {
     if (!state.started || !e || !e.title) return;
     // 垃圾車（kind 'truck'）：字幕由 missions 顯示，這裡只補簡短 toast（目標會移動，看小地圖 event-truck 標記）
@@ -1231,8 +1247,9 @@ async function init() {
   bus.on('event:closed', (e) => {
     // 垃圾車收走（未追車逾時 / 委託開始）不提示「夜市外送時段結束」
     if (e && e.id === 'garbage-truck') return;
-    // 取餐開始也會發 closed（此時事件已進行中）：只在真正關閉（時段結束 / 冷卻）時提示
-    if (state.started && !missions.eventActive()) hud.toast('夜市外送時段結束', 3);
+    // 取餐開始也會發 closed（此時該事件已進行中）：只在真正關閉（時段結束 / 冷卻）時提示；
+    // 依 payload id 查該事件自身狀態（不看「任一事件進行中」：追垃圾車時會吞掉外送的關閉提示）
+    if (state.started && !missions.eventRunning(e && e.id)) hud.toast('夜市外送時段結束', 3);
   });
   bus.on('toast', ({ text, seconds } = {}) => {
     if (text) hud.toast(text, seconds);

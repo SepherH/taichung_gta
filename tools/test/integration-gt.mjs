@@ -57,6 +57,10 @@ const GROUPS = [
     'placeProp(stall,', "propEmissiveMaterials('night_market_stall')", 'scene.add(stall)', 'NIGHT_MARKET_DELIVERY.pickup']],
   ['標記：event-truck（小地圖 / 大地圖）', ['event-truck']],
   ['事件提示：垃圾車 available / closed 不沿用夜市外送文字', ["e.kind === 'truck'", "e.id === 'garbage-truck'"]],
+  ['事件提示：event:closed 依 payload id 查該事件自身狀態（追垃圾車中外送關閉仍提示）', ['!missions.eventRunning(e && e.id)']],
+  ['夜市攤車碰撞：colliders.addStaticBox（物理世界建好後、各畫質皆有）', [
+    /import \{[^}]*\baddStaticBox\b[^}]*\} from '\.\/physics\/colliders\.js';/, 'if (stallBox) addStaticBox(RAPIER, pw.world, stallBox);',
+    'stallBox = { ...pl, width: info.width, depth: info.depth, height: info.height }']],
   ['觸控文字：createMissions 注入 isTouch（目標列 / 字幕「點「互動」鈕」，missions 內不讀 DOM / navigator）', [
     /createMissions\(\{[^}]*\bisTouch: touch\b[^}]*\}\);/]],
 ];
@@ -96,7 +100,7 @@ const extractFn = (name) => {
 const constDecls = [...mainSrc.matchAll(/^const (TRUCK_\w+|STALL_\w+) = [\d.]+;/gm)].map((m) => m[0]).join('\n');
 const makeHelpers = (deps) => new Function(
   'projectToGraph', 'findRoute', 'surfaceRoads', 'onRoadSurface', 'buildingAt',
-  `${constDecls}\n${extractFn('garbageTruckRoute')}\n${extractFn('nearestRoadPoint')}\n${extractFn('stallPlacement')}\nreturn { garbageTruckRoute, nearestRoadPoint, stallPlacement, TRUCK_NEAR_MIN, TRUCK_NEAR_MAX, TRUCK_ROUTE_TRIES, STALL_CURB_GAP };`,
+  `${constDecls}\n${extractFn('garbageTruckRoute')}\n${extractFn('nearestRoadPoint')}\n${extractFn('stallPlacement')}\nreturn { garbageTruckRoute, nearestRoadPoint, stallPlacement, TRUCK_NEAR_MIN, TRUCK_NEAR_MAX, TRUCK_ROUTE_TRIES, STALL_CURB_GAP, STALL_WALL_GAP };`,
 )(deps.projectToGraph, deps.findRoute, deps.surfaceRoads, deps.onRoadSurface, deps.buildingAt);
 const lcg = (seed) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
 
@@ -190,12 +194,51 @@ const fake = {
   const off = Math.hypot(spot.x - road.x, spot.z - road.z);
   check('攤車：在取餐點最近道路的路緣外（距中心線 = 半寬 + 間隙 + 半個攤車深）', !!road && Math.abs(off - (road.hw + H.STALL_CURB_GAP + depth / 2)) < 1e-6, `${off.toFixed(2)} m / hw ${road && road.hw}`);
   check('攤車：不在車道上、不在建築內', !city.onRoadSurface(spot.x, spot.z, 0.3, false) && !city.buildingAt(spot.x, spot.z, 0.5));
+  check('攤車：不在步道上（不擋人行動線）、離建築外牆 ≥ STALL_WALL_GAP（不緊貼商場外牆）', !city.onRoadSurface(spot.x, spot.z, depth / 2, true) && !city.buildingAt(spot.x, spot.z, H.STALL_WALL_GAP), `${spot.x.toFixed(2)}, ${spot.z.toFixed(2)}`);
+  // 另一側（緊貼新光三越外牆、壓在步道上）不得被選
+  const other = { x: 2 * road.x - spot.x, z: 2 * road.z - spot.z };
+  const wallD = (p) => { let d = 0; while (d < 30 && !city.buildingAt(p.x, p.z, d)) d++; return d; };
+  check('攤車：兩側取離牆較遠者', wallD(spot) > wallD(other), `${wallD(spot)} m vs ${wallD(other)} m`);
   check('攤車：離取餐點 < 取餐半徑（玩家在攤車旁即可按 E 取餐）', Math.hypot(spot.x - pk.x, spot.z - pk.z) < pk.radius, Math.hypot(spot.x - pk.x, spot.z - pk.z).toFixed(2));
   const obj = { position: { set(x, y, z) { Object.assign(this, { x, y, z }); } }, rotation: { y: NaN } };
   const pl = placeProp(obj, { ...spot, y: 12.5 });
   const front = propWorldPoint([0, 0, 1], pl);
   check('攤車：placeProp 套用位置 / y（地面高）、正面 +Z 朝向道路點', obj.position.x === spot.x && obj.position.z === spot.z && obj.position.y === 12.5 && Number.isFinite(obj.rotation.y) && Math.hypot(front.x - road.x, front.z - road.z) < Math.hypot(spot.x - road.x, spot.z - road.z) - 0.99);
   check('攤車：propPlacement 與 placeProp 同結果', JSON.stringify(propPlacement({ ...spot, y: 12.5 })) === JSON.stringify(pl));
+}
+
+// ---------- 行為：colliders.addStaticBox（假 RAPIER；夜市攤車碰撞體）----------
+{
+  const { addStaticBox } = await import('../../src/physics/colliders.js');
+  const { GROUPS } = await import('../../src/physics/groups.js');
+  const made = [];
+  const RAPIER = { ColliderDesc: { cuboid: (hx, hy, hz) => {
+    const d = { half: [hx, hy, hz], t: null, r: null, cg: null, sg: null };
+    d.setTranslation = (x, y, z) => ((d.t = [x, y, z]), d);
+    d.setRotation = (q) => ((d.r = q), d);
+    d.setCollisionGroups = (g) => ((d.cg = g), d);
+    d.setSolverGroups = (g) => ((d.sg = g), d);
+    return d;
+  } } };
+  const world = { createCollider: (d) => (made.push(d), { handle: made.length }) };
+  const yaw = 0.7;
+  const c = addStaticBox(RAPIER, world, { x: 10, y: 2, z: -5, yaw, width: 2.1, depth: 1.56, height: 3.04 });
+  const d = made[0];
+  check('addStaticBox：cuboid 半尺寸 = width / height / depth 的一半、底面中心 + 半高、繞 Y 轉 yaw、WORLD 組',
+    !!c && made.length === 1 && d.half.join() === [1.05, 1.52, 0.78].join() && d.t.join() === [10, 2 + 1.52, -5].join()
+      && Math.abs(d.r.y - Math.sin(yaw / 2)) < 1e-12 && Math.abs(d.r.w - Math.cos(yaw / 2)) < 1e-12 && d.r.x === 0 && d.r.z === 0
+      && d.cg === GROUPS.WORLD && d.sg === GROUPS.WORLD, JSON.stringify(d));
+  check('addStaticBox：尺寸 / 座標不合法 → null、不建 collider', addStaticBox(RAPIER, world, { x: 0, z: 0, width: 0, depth: 1, height: 1 }) === null
+    && addStaticBox(RAPIER, world, { x: NaN, z: 0, width: 1, depth: 1, height: 1 }) === null && made.length === 1);
+}
+{
+  const closedAt = mainSrc.indexOf("bus.on('event:closed'");
+  const closedBody = mainSrc.slice(closedAt, mainSrc.indexOf('\n  });', closedAt));
+  check('event:closed 提示不再用 eventActive()（追另一事件時會吞掉提示）', closedAt > 0 && !closedBody.includes('eventActive()'));
+  const hudSrc = read('src/hud.js');
+  const gtSrc = read('src/missions/garbage-truck.js');
+  check('入帳跳字：hud MONEY_REASON_LABEL 有 garbage「清運」、垃圾車入帳 reason garbage（不再用外送的 event）',
+    /MONEY_REASON_LABEL = \{[^}]*event: '外送 '[^}]*garbage: '清運 '/.test(hudSrc) && gtSrc.includes("addMoney(reward, 'garbage')") && !gtSrc.includes("addMoney(reward, 'event')"));
 }
 
 // ---------- 行為：音效（假 AudioContext） ----------

@@ -228,6 +228,10 @@ for (let i = 0; i < 120; i++) hud.update(1 / 60, walkState());
 check('+/− 約 1.8 s 後收起', hidden('money-delta'));
 hud.update(0.016, walkState({ money: 2400 }));
 check('update(state.money) 自動推算 +100', $('money').textContent === 'NT$ 2,400' && $('money-delta').textContent === '+NT$ 100' && !hidden('money-delta'), $('money-delta').textContent);
+hud.setMoney(2700, 300, 'event');
+check('setMoney reason event（外送入帳）：跳字前綴「外送」', $('money-delta').textContent === '外送 +NT$ 300', $('money-delta').textContent);
+hud.setMoney(3000, 300, 'garbage');
+check('setMoney reason garbage（垃圾車入帳）：跳字前綴「清運」、不顯示「外送」', $('money-delta').textContent === '清運 +NT$ 300', $('money-delta').textContent);
 
 // ---------- 血條 ----------
 hud.setHealth(50, 100);

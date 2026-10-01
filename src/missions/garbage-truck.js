@@ -2,7 +2,7 @@
 // 規則：遊戲時刻 16:00–18:00（傍晚收垃圾時段，與夜市外送 18–24 錯開）且無進行中的委託 / 外送 → 垃圾車出現在注入的道路折線起點，
 //   以 speed m/s 沿折線行駛、每 stopEveryM 公尺停靠 stopSec 秒收垃圾，走到折線終點折返（ping-pong），沿行進方向右側偏 laneOffsetM
 //   出現即 event:available；玩家首次進入 ENGAGE_M 內 → event:start（開始追車，計入統計的起點）；
-//   自出現起 limitSec 內走到車尾投入口 DUMP_RADIUS 內（步行或駕駛）按 E → event:complete，獎勵 garbageReward(剩餘秒) 入帳 reason 'event'，冷卻 cooldownSec
+//   自出現起 limitSec 內走到車尾投入口 DUMP_RADIUS 內（步行或駕駛）按 E → event:complete，獎勵 garbageReward(剩餘秒) 入帳 reason 'garbage'（HUD 跳字「清運」，不沿用外送的 'event'），冷卻 cooldownSec
 //   逾時：已追車 → event:fail { reason: 'timeout' }；未追車（玩家根本沒靠近）→ 只 event:closed、不計失敗；兩者皆冷卻 failCooldownSec、不扣錢
 //   追車後與車距離 > LOST_M 持續 LOST_SEC 秒 → event:fail { reason: 'lost' }（冷卻 failCooldownSec）；abandon() → fail 'abandon'
 //   未追車時若委託 / 外送開始（busy）→ 垃圾車收走（event:closed，冷卻 failCooldownSec）；已追車則照常進行
@@ -276,7 +276,7 @@ export function createGarbageTruck({
     run = null;
     completed++;
     if (def.cooldownSec > 0) cooldownUntil = now() + def.cooldownSec;
-    if (reward > 0) addMoney(reward, 'event');
+    if (reward > 0) addMoney(reward, 'garbage');
     emit('event:complete', out);
     emit('ui:sound', { kind: 'reward' });
     return out;

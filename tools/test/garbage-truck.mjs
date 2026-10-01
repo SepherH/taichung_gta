@@ -2,7 +2,7 @@
 // 垃圾車時段事件（src/missions/garbage-truck.js）無頭驗證 + createMissions 整合 + 旋律（src/audio/voices.js）+ 車型接入靜態檢查
 // 用法：node tools/test/garbage-truck.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // three 以 loader hook 換成最小替身（同 missions-events.mjs），.json → ES module、.css → 空字串；不需要 node_modules
-// 項目：時段外 / 無路線不開放；開放後車沿折線（含真實路網 findRoute 折線）前進、停靠、折返；時限內到車尾互動 → complete 且獎勵入帳（reason 'event'）；
+// 項目：時段外 / 無路線不開放；開放後車沿折線（含真實路網 findRoute 折線）前進、停靠、折返；時限內到車尾互動 → complete 且獎勵入帳（reason 'garbage'，HUD 跳字「清運」）；
 //   逾時 / 跟丟 → fail（不扣錢）、沒靠近過 → 只 closed；冷卻中不再開放、冷卻後可重複；serialize / restore 往返；
 //   createMissions 整合（標記 kind、互動、統計、存檔合併、未注入 routeFor 時不作用）；旋律音符序列非空且無音檔引用；
 //   manifest 有 garbage_truck（與美術建議條目一致）、CAR_TYPES / PARKED_TYPES 不含它、beacon 列入 EMISSIVE_MATERIALS
@@ -198,7 +198,7 @@ const rearOf = (t) => ({ x: t.rearX, z: t.rearZ });
   const left = DEF.limitSec - 10.2;
   it.act();
   const done = e.of('event:complete');
-  check('互動 → event:complete，獎勵入帳 reason event、金額 = garbageReward(剩餘秒)', done.length === 1 && e.money.length === 1 && e.money[0].reason === 'event' && e.money[0].n === done[0].p.reward && Math.abs(done[0].p.reward - garbageReward(left)) <= 1, JSON.stringify(e.money));
+  check('互動 → event:complete，獎勵入帳 reason garbage（不沿用外送的 event）、金額 = garbageReward(剩餘秒)', done.length === 1 && e.money.length === 1 && e.money[0].reason === 'garbage' && e.money[0].n === done[0].p.reward && Math.abs(done[0].p.reward - garbageReward(left)) <= 1, JSON.stringify(e.money));
   check('完成後車收走：truck() null、markers 空、completedCount 1', e.truck.truck() === null && e.truck.markers().length === 0 && e.truck.completedCount() === 1);
   e.step(DEF.cooldownSec - 20, FAR);
   check('冷卻中（完成 240 s）不再開放', e.of('event:available').length === 1);
@@ -372,7 +372,7 @@ function setupMs(extra = {}, hour = 17) {
   const it = env.ms.nearest({ x: tt.rearX, z: tt.rearZ });
   check('missions.nearest(車尾) → 垃圾車 interactable', it && it.id === 'event:garbage-truck');
   it.act();
-  check('倒垃圾 → 入帳 reason event、trackMissionStats missionsDone +1（不需改 index.js 統計表）', env.money.length === 1 && env.money[0].r === 'event' && env.stats.missionsDone === 1 && env.stats.missionsFailed === 0);
+  check('倒垃圾 → 入帳 reason garbage、trackMissionStats missionsDone +1（不需改 index.js 統計表）', env.money.length === 1 && env.money[0].r === 'garbage' && env.stats.missionsDone === 1 && env.stats.missionsFailed === 0);
   const s = env.ms.serialize();
   check('missions.serialize().events 帶 garbage-truck 完成次數 / 冷卻', s.events && s.events.completed['garbage-truck'] === 1 && s.events.cooldowns['garbage-truck'] === DEF.cooldownSec, JSON.stringify(s.events));
   const env2 = setupMs({ routeFor });

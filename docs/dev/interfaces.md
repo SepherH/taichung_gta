@@ -523,7 +523,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 ### 21.3 時段事件（夜市外送，`src/missions/events.js`）
 - `createMissions({ …, getGameHour: () => dayNight.hour, routeLength: (a, b) => findRoute(graph, a, b)?.lengthM })`（graph 在 missions 之後建立，閉包呼叫時已存在；查無路線 → events.js 以直線 × 1.3 估算）
 - 標記：`missions.markers()` 附 `event-start`（取餐點）/ `event-dest`（送達點）；色碼在 `map/marker-colors.js`（§17 色表來源：`event-start` #8dff3a、`event-dest` #2ee86a），小地圖超出半徑時貼邊；大地圖 `map/big-map.js` 定義 `MARKER_LABELS` 圖例（外送取餐點 / 外送送達點）、`PIN_KINDS`（`event-dest` 與 dest / mission-dest 同畫圖釘，其餘畫圓點）；main.js 不改寫 MARKER_COLORS
-- 事件提示：`event:available` → toast「🌙 <title>開放中：到<取餐點>取餐」；`event:closed` 且無進行中外送 → toast「夜市外送時段結束」；`event:start / complete / fail` 字幕由 missions 自己顯示；`player:money` reason `'event'` → `hud.setMoney(money, delta, reason)` 跳動文字前加「外送」
+- 事件提示：`event:available` → toast「🌙 <title>開放中：到<取餐點>取餐」；`event:closed` 且該 id 的事件自身未進行中（`missions.eventRunning(e.id)` 為 false；追垃圾車中外送關閉照常提示）→ toast「夜市外送時段結束」；`event:start / complete / fail` 字幕由 missions 自己顯示；`player:money` → `hud.setMoney(money, delta, reason)`：reason `'event'`（外送）跳動文字前加「外送」、`'garbage'`（垃圾車）加「清運」
 - 存檔：§18 Phase 5 增補 `missions.events`
 
 ### 21.4 回歸
@@ -532,9 +532,10 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 ## 22. 垃圾車事件 / 夜市攤車 / 互動提示（G2；接線點在 `src/main.js`）
 
 ### 22.1 垃圾車事件（`src/missions/garbage-truck.js`，由 `missions/index.js createMissions` 掛上；規則以該檔頭為準）
-- 規則：遊戲時刻 16:00–18:00 且無進行中委託 / 外送時出現；時限 180 s；完成冷卻 240 s、失敗 / 收走冷卻 120 s；獎勵 `garbageReward(剩餘秒)` = 250 + 剩餘秒（`economy.add(n, 'event')`）；玩家進 60 m 內 → `event:start`；車尾投入口 5 m 內（步行或駕駛）按 E 完成；逾時（已追車）或追車後離車 > 250 m 持續 10 s → 失敗；未追車逾時只 `event:closed`、不計失敗
+- 規則：遊戲時刻 16:00–18:00 且無進行中委託 / 外送時出現；時限 180 s；完成冷卻 240 s、失敗 / 收走冷卻 120 s；獎勵 `garbageReward(剩餘秒)` = 250 + 剩餘秒（`economy.add(n, 'garbage')`，HUD 跳字「清運」）；玩家進 60 m 內 → `event:start`；車尾投入口 5 m 內（步行或駕駛）按 E 完成；逾時（已追車）或追車後離車 > 250 m 持續 10 s → 失敗；未追車逾時只 `event:closed`、不計失敗
 - 介面：`createMissions({ …, routeFor(player, rng) })`——**有注入 routeFor 才掛垃圾車**（未注入 = 既有行為不變）；`missions.truckState()` → `{ x, z, heading, speed, stopped, rearX, rearZ, distM, phase: 'open'|'chase', beacon }` 或 null（物件重用）；`missions.truck` = 完整 API（`update / truck / nearest / markers / objective / active / isOpen / isEngaged / abandon / serialize / restore / dispose`）
 - `missions.eventActive()` / `eventObjective()`：外送進行中回外送；否則追車中（`truck.isEngaged()`）回垃圾車——`eventActive()` → `{ id: 'garbage-truck', kind: 'truck', stage: 'chase', from: null, to: { x, z }（車尾投入口，隨車移動）, routeM: null, limitSec, elapsedSec, timerSec }`（欄位比照外送）、`eventObjective()` → `{ text, timerSec, distM, rewardNow }`（同 `truck.objective()`）；都沒有 → null。HUD 目標列不經這兩個方法，行為不變
+- `missions.eventRunning(id)` → boolean：該 id 的事件自身是否進行中（外送已取餐 / 垃圾車追車中），不受另一事件影響；main.js `event:closed` 提示用
 - 觸控文字：`createMissions({ …, isTouch, interactLabel })`（選填；`interactLabel` 預設 `isTouch ? '點「互動」鈕' : '按 E'`）——垃圾車目標列（`追上垃圾車，到車尾${interactLabel} 倒垃圾`）與 `event:available` / `event:start` 字幕用此操作詞；main.js 依 `mobile.js isTouch()` 注入 `isTouch: touch`（missions 內不讀 DOM / navigator）。互動提示本身（`按 E 倒垃圾` / `按 E 取餐`）仍由 hud.js `touchPromptText` 轉換；夜市外送目標列 / 字幕本來就不含「按 E」
 - 整合（main.js）：
   - `routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng)`：隨機方向取玩家 150–300 m 外的點以 `projectToGraph` 投影為起點（投影後須在 75–450 m），同方向 ±45° 再往外 250–450 m 投影為終點，`findRoute(graph, 起點, 終點).points`（≥ 100 m）；最多試 4 個方向，失敗回 null（garbage-truck.js 2 s 後再問）。graph 在 missions 之後建立，閉包呼叫時已存在
@@ -552,21 +553,21 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 | `event:fail` | `{ id, reason: 'timeout'\|'lost'\|'abandon' }` |
 
   - 字幕由 missions 顯示；main.js `event:available` 且 `kind === 'truck'` → 簡短 toast「🚛 垃圾車來了：看小地圖紅點追上它」（不走夜市外送的「🌙 …開放中：到…取餐」）；`event:closed` 且 `id === 'garbage-truck'` 不提示「夜市外送時段結束」；不發 `nav:*`（目標會移動，靠標記追）
-  - HUD 目標列 / 互動提示沿用事件既有路徑：追車中 missions 目標列顯示倒數；`missions.nearest()` 回傳 `{ id: 'event:garbage-truck', text: '按 E 倒垃圾', priority: 3 }` 經 interactable 仲裁 → `hud.setInteractPrompt` / `setPrompts`；入帳 reason `'event'`
+  - HUD 目標列 / 互動提示沿用事件既有路徑：追車中 missions 目標列顯示倒數；`missions.nearest()` 回傳 `{ id: 'event:garbage-truck', text: '按 E 倒垃圾', priority: 3 }` 經 interactable 仲裁 → `hud.setInteractPrompt` / `setPrompts`；入帳 reason `'garbage'`
 - 存檔：`missions.events`（§18 Phase 5 增補）同一欄，垃圾車以 id `'garbage-truck'` 併入 `completed` / `cooldowns`；進行中的追車不存檔（讀檔作廢、不發 fail）；統計同 `trackMissionStats`（complete → missionsDone、fail → missionsFailed）
 - 音效：`audioState.garbageTruckDist` = `truckState().distM`（玩家到車體，無車 / 未知 = `Infinity`）；`audio/index.js` 在 `< TRUCK_ON`（220 m）開 `LOOPS.garbage_truck`（voices.js，《給愛麗絲》程序合成，**music 群組**），`≥ 235 m` 或非有限值關（遲滯）；未暫停時每幀 `ctrl.set(state, now)`（voices.js 依距離 `garbageTruckLevel` 調內部音量並排程音符），暫停時外層增益 0 且不排程
 - 標記：`missions.markers()` 附 `{ x, z, kind: 'event-truck', label: '垃圾車' }`；色碼 `map/marker-colors.js` `'event-truck'`（#ff4f6d）；大地圖圖例「垃圾車」（圓點，不在 `PIN_KINDS`）；小地圖超出半徑時貼邊（hud.js `EDGE_KINDS`）
 
 ### 22.2 夜市攤車（`src/prop-model.js`；格式與 glb 契約見該檔頭與 public/models/props/manifest.json）
 - API：`loadPropModels(manifestUrl?, { fetch? })` → `Promise<Map<id, entry>>`（只含 glb 載入成功者；缺 manifest → 空 Map，不報錯）、`createPropModel(id)` → Object3D | null、`propInfo(id)` → manifest 條目（`width / depth / height / counter?`）| null、`propEmissiveMaterials(id)` → 需登記夜間發光的共用材質、`placeProp(obj, { x, z, y, faceX, faceZ | yaw, anchor? })` → `{ x, y, z, yaw }`（本地 +Z 朝向 face 點；`propPlacement` / `propWorldPoint` 為純數學，node 可測）
-- 整合（main.js）：啟動 `await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()])`；`createPropModel('night_market_stall')` 非 null 時以 `stallPlacement(NIGHT_MARKET_DELIVERY.pickup, depth)` 擺位——取餐點（events.js pickup，惠來路道路中心點）最近的地面車道中心線點 → 垂直方向「半寬 + 1.2 m + 半個攤車深」的人行側（兩側擇一：不在車道上、不在建築內），`faceX / faceZ` = 該道路點（+Z 顧客面朝道路）、`y = heightAt(x, z)`；`scene.add`；`propEmissiveMaterials` 逐一 `registerNight(m, m.emissiveIntensity || 1)`（同材質只登記一次）
+- 整合（main.js）：啟動 `await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()])`；`createPropModel('night_market_stall')` 非 null 時以 `stallPlacement(NIGHT_MARKET_DELIVERY.pickup, depth)` 擺位——取餐點（events.js pickup，惠來路道路中心點）最近的地面車道中心線點 → 垂直方向「半寬 + 1.2 m + 半個攤車深」的兩側候選（合格 = 不在車道上、不在步道上、離建築外牆 ≥ 3 m；合格者取離牆較遠的一側，都不合格退回第一側；目前選到惠來路西側 ≈ (549.2, −112.4)，離取餐點 8.4 m、離新光三越外牆約 19 m），`faceX / faceZ` = 該道路點（+Z 顧客面朝道路）、`y = heightAt(x, z)`；`scene.add`；`propEmissiveMaterials` 逐一 `registerNight(m, m.emissiveIntensity || 1)`（同材質只登記一次）；物理世界建好後 `addStaticBox(RAPIER, pw.world, { ...placeProp 回傳, width, depth, height })`（`physics/colliders.js`：底面中心 + 半高、繞 Y 轉 yaw 的 cuboid，無父剛體、WORLD 組；各畫質皆有）
 - 各畫質（含 low）都擺；無碰撞體（純裝飾，玩家可穿過）；glb 缺檔 → 不擺（外送照常）
 
 ### 22.3 互動提示與 tb-interact
 - 車輛提示與互動提示互不覆蓋：見 §3.2 `setPrompts`；觸控 `tb-interact` 步行 / 駕駛有互動提示都顯示（§4.5 表）；直向駕駛位置在右半下車鈕下方（不落在左半轉向區 `#touch-pad`），見 §4.5 表
 
 ### 22.4 回歸
-- `node tools/test/integration-gt.mjs`：main.js + loop.js + audio/index.js 靜態接線（routeFor / truckState / garbage_truck 車體 / garbageTruckDist / LOOPS.garbage_truck / loadPropModels / night_market_stall / placeProp / event-truck / simDt / setPrompts）、traffic.js CAR_TYPES 不含 garbage_truck；行為：main.js `garbageTruckRoute` / `stallPlacement` 原始碼抽出以假路網與真 citymodel 執行、garbage-truck.js 接 routeFor 出現在玩家附近且 simDt = 0 不推進、audio 垃圾車 loop 開關 / 遲滯 / 暫停、色表 / 圖例 / 操作說明
+- `node tools/test/integration-gt.mjs`：main.js + loop.js + audio/index.js 靜態接線（routeFor / truckState / garbage_truck 車體 / garbageTruckDist / LOOPS.garbage_truck / loadPropModels / night_market_stall / placeProp / event-truck / simDt / setPrompts）、traffic.js CAR_TYPES 不含 garbage_truck；行為：main.js `garbageTruckRoute` / `stallPlacement` 原始碼抽出以假路網與真 citymodel 執行、colliders.js `addStaticBox`（假 RAPIER）、event:closed 改用 `eventRunning`、入帳 reason garbage「清運」、garbage-truck.js 接 routeFor 出現在玩家附近且 simDt = 0 不推進、audio 垃圾車 loop 開關 / 遲滯 / 暫停、色表 / 圖例 / 操作說明
 - `node tools/test/hud.mjs`：`setPrompts` 並列 / 各自按鈕狀態、event-truck 小地圖貼邊；`node tools/test/combat-integration.mjs`：`self` polyfill 只包住車輛模型載入（見該檔頭註解）
 
 ### 22.5 檔案清單（G2）

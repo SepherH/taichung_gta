@@ -20,6 +20,7 @@
 //   隱藏委託起點光柱；nearest() 車尾投入口優先；markers() 附加 kind 'event-truck'；目標列在無委託 / 外送時顯示追車倒數；
 //   bus 事件與外送共用 event:*（id 'garbage-truck'），統計同樣經 trackMissionStats；serialize() 的 events 欄位合併兩者（id 不重複）
 //   eventObjective() / eventActive()：外送進行中回外送，否則追車中回垃圾車（truck.objective() / truck.active()），都沒有 → null
+//   eventRunning(id)：該 id 的事件自身是否進行中（外送已取餐 / 垃圾車追車中）；不受另一事件影響（main.js event:closed 提示用）
 //   整合層：missions.truckState() → { x, z, heading, … } 或 null（每幀擺垃圾車模型）、missions.truck（完整 API）
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
@@ -810,6 +811,7 @@ export function createMissions({
     abandon,
     eventObjective: () => (timed && timed.objective()) || (truck && truck.objective()) || null,
     eventActive: () => (timed && timed.active()) || (truck && truck.active()) || null,
+    eventRunning: (id) => !!id && [timed, truck].some((src) => src && src.active() && src.active().id === id),
     events: timed,
     truck,
     truckState: () => (truck ? truck.truck() : null),

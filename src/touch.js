@@ -11,7 +11,7 @@
 //   不寫入鍵碼的功能鈕改給 onTap(input)（= onPress，按下時呼叫一次），此時可省略 code；hidden: true = 建立但不顯示
 //   同 id 重新註冊 = 取代（放開舊按鈕並重建）；setTouchButtonVisible(id, on) 動態顯示 / 隱藏（例：tb-interact 有提示才顯示）
 // slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
-//   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊；駕駛時橫向移到下車鈕左側、直向移到時速錶上方）/
+//   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊；駕駛時橫向移到下車鈕左側、直向移到右半下車鈕正下方，見 style.css slot-interact）/
 //   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、圖鑑，由左往右，排在小地圖右側；
 //   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊

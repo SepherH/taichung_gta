@@ -27,7 +27,7 @@
 //     駕駛中換台（index / on 改變）時以強調樣式顯示 RADIO_FLASH_SEC 秒（含「關閉」）；步行不顯示
 //   觸控換台鈕 tb-radio（top2，駕駛專屬；沿用 touch.js 按鈕樣式 / pointer 處理，送虛擬鍵 KeyQ = core/actions radioNext）
 //   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）與 'event-truck'（垃圾車，會移動）著色且超出半徑時貼邊
-//   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」
+//   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」、'garbage'（垃圾車入帳）加「清運」
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
@@ -53,7 +53,7 @@ export const RADIO_BTN_ID = 'tb-radio';
 const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
 // 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
 export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
-const MONEY_REASON_LABEL = { event: '外送 ' };
+const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ' }; // economy 入帳原因 → 跳動文字前綴
 const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空白）
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
@@ -399,7 +399,7 @@ export class HUD {
   }
 
   // ---------- 金錢 / 血量 ----------
-  // delta 省略時以上次金額推算；delta 為 0 不跳動；reason（economy 的入帳原因）'event' 時跳動文字加「外送」
+  // delta 省略時以上次金額推算；delta 為 0 不跳動；reason（economy 的入帳原因）'event' 加「外送」、'garbage' 加「清運」
   setMoney(money, delta, reason) {
     const m = Math.round(Number(money));
     if (!Number.isFinite(m)) return;

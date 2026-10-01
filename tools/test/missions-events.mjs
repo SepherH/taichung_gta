@@ -458,6 +458,40 @@ async function scenario(env) {
   for (const e of [A, T, B, C, D, R]) e.ms.dispose();
 }
 
+// ======================= 6b. event:closed 依 payload id 判斷事件自身狀態（main.js 提示條件）=======================
+// main.js：id 'garbage-truck' 不提示；其餘 !missions.eventRunning(e.id) 才 toast「夜市外送時段結束」（舊寫法 !eventActive() 在追垃圾車時會吞掉）
+{
+  const route = findRoute(graph, { x: 330, z: 380 }, { x: 820, z: 470 });
+  const shortNM = { ...NM, window: { start: 16, end: 17.5 } }; // 與垃圾車時段（16–18）重疊、17:30 先結束
+  let hour = 17;
+  const E = setupMs({ events: [shortNM], getGameHour: () => hour, routeLength, routeFor: () => route.points });
+  const notes = [];
+  E.bus.on('event:closed', (p) => notes.push({ id: p.id, toast: !!p && p.id !== 'garbage-truck' && !E.ms.eventRunning(p.id), oldToast: !E.ms.eventActive() }));
+  await E.ms.ready;
+  E.step(0.2, FAR);
+  const t = E.ms.truckState();
+  check('6b 前置：17 時外送開放、垃圾車出現', E.of('event:available').some((e) => e.p.id === NM.id) && !!t);
+  E.step(0.1, { x: t.x + 10, z: t.z });
+  check('6b 前置：追車中（eventActive() 為垃圾車、eventRunning(garbage-truck) true、eventRunning(外送) false）',
+    E.ms.truck.isEngaged() && E.ms.eventActive().id === 'garbage-truck' && E.ms.eventRunning('garbage-truck') && !E.ms.eventRunning(NM.id) && !E.ms.eventRunning(undefined));
+  hour = 17.6;
+  const tt = E.ms.truckState();
+  E.step(0.1, { x: tt.x + 10, z: tt.z });
+  const n = notes.filter((x) => x.id === NM.id);
+  check('追垃圾車中外送時段結束：event:closed（外送 id）仍提示（舊判斷 eventActive() 會吞掉）', n.length === 1 && n[0].toast === true && n[0].oldToast === false, JSON.stringify(notes));
+  E.ms.dispose();
+  // 取餐開始也發 closed：該外送已進行中 → 不提示
+  hour = 17;
+  const F = setupMs({ events: [shortNM], getGameHour: () => hour, routeLength });
+  const fn = [];
+  F.bus.on('event:closed', (p) => fn.push({ id: p.id, toast: p.id !== 'garbage-truck' && !F.ms.eventRunning(p.id) }));
+  await F.ms.ready;
+  F.step(0.2, FAR);
+  F.ms.nearest(PICK).act();
+  check('取餐開始的 event:closed：外送自身進行中（eventRunning true）→ 不提示', fn.length === 1 && fn[0].id === NM.id && fn[0].toast === false && F.ms.eventRunning(NM.id), JSON.stringify(fn));
+  F.ms.dispose();
+}
+
 // ======================= 7. 靜態檢查 =======================
 {
   const src = fs.readFileSync(path.join(ROOT, 'src/missions/events.js'), 'utf8');
