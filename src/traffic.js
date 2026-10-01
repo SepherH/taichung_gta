@@ -499,8 +499,9 @@ export class Traffic {
     p.animAcc = 0;
     p.walkAcc = 0;
     p.fine = true;
-    p.lastX = p.x;
-    p.lastZ = p.z;
+    p.moveD = 0;
+    p.moveT = 0;
+    p.animSpeed = 0;
     this.combat.register(a);
     const brain = new NpcBrain({ actor: a, heavy: p.variant === PED_HEAVY, seed: CITY_SEED });
     this.brains.set(a.id, brain);
@@ -783,8 +784,9 @@ export class Traffic {
     ped.kbz = 0;
     ped.settle = { settled: false, clearToStand: false };
     ped.intent = { moveX: 0, moveZ: 0, run: false, faceYaw: null };
-    ped.lastX = ped.x;
-    ped.lastZ = ped.z;
+    ped.moveD = 0; // 自上次動畫取樣以來走過的水平路徑長（m；漫步取沿路線的距離，掉頭不抵銷）
+    ped.moveT = 0; // 同期間位置實際推進過的模擬秒數（物理子步 / 累積走路）
+    ped.animSpeed = 0; // 上次取樣的水平速度（沒有推進的幀沿用）
     ped.actor = {
       id: null,
       kind: 'pedestrian',
@@ -1148,14 +1150,16 @@ export class Traffic {
     return Math.atan2(tmp.dx * p.dir, tmp.dz * p.dir);
   }
 
-  // 沿路線可行走區段 [s0, s1] 來回走：更新 p.x / p.y / p.z / p.yaw（骨架行人與替身市民共用）
+  // 沿路線可行走區段 [s0, s1] 來回走：更新 p.x / p.y / p.z / p.yaw（骨架行人與替身市民共用）；回傳本次沿路線走的距離（m）
+  // 走過端點的部分折返（不丟掉那段時間，掉頭時步速不掉）
   _walkPed(p, dt, snap = false) {
-    p.s += p.dir * p.speed * dt;
+    const d = p.speed * dt;
+    p.s += p.dir * d;
     if (p.s > p.s1) {
-      p.s = p.s1;
+      p.s = Math.max(p.s0, 2 * p.s1 - p.s);
       p.dir = -1;
     } else if (p.s < p.s0) {
-      p.s = p.s0;
+      p.s = Math.min(p.s1, 2 * p.s0 - p.s);
       p.dir = 1;
     }
     const want = this._pathPoint(p, p);
@@ -1163,6 +1167,7 @@ export class Traffic {
     p.y = this.terrain.querySurface(p.x, p.z, p.y, this._q).y;
     if (snap) p.yaw = want;
     else p.yaw += angleDelta(p.yaw, want) * Math.min(1, 8 * dt);
+    return d;
   }
 
   // 起身後走回人行道上最近的點（s 固定），到達後恢復來回走
@@ -1245,10 +1250,14 @@ export class Traffic {
     p.state = 'return';
   }
 
-  // 每個物理子步：依 ped.state 更新位置（wander = 原人行道邏輯、react = 大腦意圖），再疊加擊退
+  // 每個物理子步：依 ped.state 更新位置（wander = 原人行道邏輯、react = 大腦意圖），再疊加擊退；
+  // 回傳本子步走過的水平距離（m，動畫速度用：漫步取沿路線距離，其餘取位移）
   _updatePed(p, dt) {
+    const x0 = p.x;
+    const z0 = p.z;
+    let walked = 0;
     if (p.state === 'return') this._returnPed(p, dt);
-    else if (p.state === 'walk') this._walkPed(p, dt);
+    else if (p.state === 'walk') walked = this._walkPed(p, dt);
     else if (p.state === 'react') this._reactPed(p, dt);
     if (p.kbx !== 0 || p.kbz !== 0) {
       if (!this._pedMove(p, p.kbx * dt, p.kbz * dt)) {
@@ -1265,6 +1274,7 @@ export class Traffic {
     }
     if (p.state === 'react' || p.state === 'getup' || p.kbx !== 0) p.y = this.terrain.querySurface(p.x, p.z, p.y, this._q).y;
     this._syncActor(p);
+    return Math.max(walked, Math.hypot(p.x - x0, p.z - z0));
   }
 
   // 每幀：大腦決策 → ped.state 轉換（wander ↔ react、getup 結束）；意圖留給下一幀的物理子步套用
@@ -1308,7 +1318,8 @@ export class Traffic {
         p.state = 'react';
       }
       if (!p.fine && p.state === 'walk' && p.walkAcc > 0) {
-        this._walkPed(p, p.walkAcc);
+        p.moveD += this._walkPed(p, p.walkAcc);
+        p.moveT += p.walkAcc;
         p.walkAcc = 0;
         this._syncActor(p);
         p.body.setPose(p.x, p.y, p.z, p.yaw);
@@ -1367,7 +1378,8 @@ export class Traffic {
     }
     for (const p of this.peds) {
       if (p.state === 'down' || !p.fine) continue;
-      this._updatePed(p, dt);
+      p.moveD += this._updatePed(p, dt);
+      p.moveT += dt;
       p.body.setPose(p.x, p.y, p.z, p.yaw);
     }
   }
@@ -1386,6 +1398,8 @@ export class Traffic {
       if (p.state !== 'down') continue;
       p.settle = p.body.settleCheck(dt);
       const t = p.body.getPosition();
+      p.moveD += Math.hypot(t.x - p.x, t.z - p.z);
+      p.moveT += dt;
       p.x = t.x;
       p.y = t.y - p.body.centerY;
       p.z = t.z;
@@ -1657,13 +1671,17 @@ export class Traffic {
       const b = p.body;
       const c = p.citizen;
       // 動畫：間隔 = lod.mixerEvery（near 每幀、mid 每 3 幀、mid 視野外凍結），累積 dt（恢復時上限 ANIM_RESUME_MAX）；
-      // 速度 = 上次更新以來的水平位移 / 累積時間
+      // 速度 = 上次取樣以來走過的距離 moveD / 位置實際推進的模擬秒數 moveT（位置只在 1/60 子步或 AI 間隔推進，
+      // 不能除以渲染幀時間：高於 60Hz 時約半數幀沒有子步，會得到 0 / 加倍的速度而在 walk ↔ idle 間來回切）；
+      // 本次沒有推進（moveT 0）就沿用上次速度
       p.animAcc += dt;
       if (st.shouldTick(p.slot, this.frame, this.lod.mixerEvery(c.level, c.inView))) {
-        const speed = p.animAcc > 0 ? Math.hypot(p.x - p.lastX, p.z - p.lastZ) / p.animAcc : 0;
-        p.lastX = p.x;
-        p.lastZ = p.z;
-        p.anim.update(Math.min(p.animAcc, ANIM_RESUME_MAX), { speed });
+        if (p.moveT > 0) {
+          p.animSpeed = p.moveD / p.moveT;
+          p.moveD = 0;
+          p.moveT = 0;
+        }
+        p.anim.update(Math.min(p.animAcc, ANIM_RESUME_MAX), { speed: p.animSpeed });
         p.animAcc = 0;
       }
       if (!b.active) {

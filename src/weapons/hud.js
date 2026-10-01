@@ -1,17 +1,19 @@
 // 武器 HUD（契約 §12 / §13，前綴 wp-，z-index 50–59）：右上武器圖示 + 彈藥「12 / 36」+ 裝填進度、畫面中央準星
 //   （持手槍顯示、瞄準時收窄）、觸控武器鈕 tb-weapon（點擊循環 / 長按三格輪盤）、tb-reload / tb-aim（持手槍才顯示）
 // createWeaponHud({ root, touchRoot?, weapons, input?, isTouch?, imgBase = 'art/hud/', onCycle?, onSelect?, onReload? })
-//   → { update(dt, state), setDriving(bool), setVisible(bool), isWheelOpen(), aimHeld, dispose(), el }
+//   → { update(dt, state), setDriving(bool), setVisible(bool), isWheelOpen(), aimHeld, dispose(), el, keys（桌機鍵位提示，觸控 null） }
 //   root：HUD 容器（例 document.body 或 #hud）；touchRoot：觸控層 #touch-ui（isTouch 時才建按鈕）
 //   state：{ driving?, aimBlend?（camera rig.aimBlend，0..1） }；每幀呼叫，只有值變了才寫 DOM（不配置新物件）
 //   圖示 art/hud/weapon-<id>.png 缺檔 → 顯示文字名稱（onerror 退回，只 console.info 一次）
 //   按鈕預設動作：tb-weapon 點擊 = weapons.cycle()、輪盤選格 = weapons.select(slot)、tb-reload = weapons.reload()、
 //     tb-aim 按住 = input.touchPress('Mouse2', true) / touchRelease（沒給 input 時改讀 hud.aimHeld）；可用 onCycle / onSelect / onReload 覆寫
 //   觸控按鈕 ≥ 44 px、safe-area；駕駛中（setDriving(true) 或 body.touch-drive）全部隱藏
+//   桌機（非觸控）面板另列換武器鍵位提示 .wp-keys（鍵位讀 core/actions.js 的 ACTIONS：weaponCycle、slot1–3；目前槽加 .wp-cur 並加粗），駕駛中隱藏
 //   觸控版面（body.touch，weapons.css）：面板縮為一列放 #status 下方（直向在新手提示卡下方、高 < 380 橫向在 #status 上方），
 //     三鈕排在攻擊鈕周圍（矮橫向 ≤ 540：武器 / 瞄準在互動鈕下方、裝填在右上角）；駕駛中面板一併隱藏
 import './weapons.css';
 import { WEAPONS, SLOT_IDS } from './defs.js';
+import { ACTIONS } from '../core/actions.js';
 import { LONG_PRESS_MS, classifyPress, wheelSlotFromVector, wheelCellOffset, ammoText } from './wheel.js';
 
 let iconInfoShown = false;
@@ -25,6 +27,19 @@ function el(doc, tag, cls, id) {
 
 function toggle(e, cls, on) {
   if (e.classList) e.classList.toggle(cls, !!on);
+}
+
+// KeyboardEvent.code → 顯示用鍵名（KeyQ → Q、Digit1 → 1）
+const keyName = (code) => String(code).replace(/^Key|^Digit/, '');
+
+// 桌機換武器鍵位提示：[{ text, slot }]（slot -1 = 循環鍵）；鍵位單一來源 ACTIONS
+export function weaponKeyHints() {
+  const out = [{ text: `${ACTIONS.weaponCycle.keys.map(keyName).join('/')} 換武器`, slot: -1 }];
+  SLOT_IDS.forEach((id, i) => {
+    const a = ACTIONS[`slot${i + 1}`];
+    if (a) out.push({ text: `${a.keys.map(keyName).join('/')} ${WEAPONS[id].label}`, slot: i });
+  });
+  return out;
 }
 
 export function createWeaponHud({
@@ -57,6 +72,19 @@ export function createWeaponHud({
   panel.appendChild(name);
   panel.appendChild(ammo);
   panel.appendChild(bar);
+  // 桌機鍵位提示（觸控已有 tb-weapon，不建）；樣式內嵌（weapons.css 不動）
+  const keys = touch ? null : el(doc, 'span', 'wp-keys');
+  const keyCells = [];
+  if (keys) {
+    Object.assign(keys.style, { display: 'flex', gap: '6px', fontSize: '0.72em', fontWeight: 'normal', opacity: '0.85', whiteSpace: 'nowrap' });
+    for (const h of weaponKeyHints()) {
+      const k = el(doc, 'span', 'wp-key');
+      k.textContent = h.text;
+      keys.appendChild(k);
+      if (h.slot >= 0) keyCells[h.slot] = k;
+    }
+    panel.appendChild(keys);
+  }
   root.appendChild(panel);
 
   // 圖示：各武器一次載入結果（true = 可用、false = 缺檔、undefined = 尚未知）
@@ -224,6 +252,7 @@ export function createWeaponHud({
   let shownCross = null;
   let shownAim = null;
   let shownPistolBtns = null;
+  let shownKeys = null;
   let driving = false;
   let visible = true;
 
@@ -240,6 +269,11 @@ export function createWeaponHud({
       icon.src = `${imgBase}weapon-${id}.png`;
     }
     toggle(panel, 'wp-armed', id !== 'fist');
+    keyCells.forEach((k, i) => {
+      const cur = SLOT_IDS[i] === id;
+      toggle(k, 'wp-cur', cur);
+      k.style.fontWeight = cur ? 'bold' : 'normal';
+    });
     if (btnLabel) btnLabel.textContent = WEAPONS[id].label;
   }
 
@@ -252,7 +286,7 @@ export function createWeaponHud({
       shownAmmo = pistol;
       shownMag = a.mag;
       shownRes = a.reserve;
-      ammo.textContent = ammoText(id, a.mag, a.reserve);
+      ammo.textContent = ammoText(id, a.mag, Number.isFinite(a.reserve) ? a.reserve : '∞'); // 無限備彈顯示 ∞
       ammo.hidden = !pistol;
       toggle(ammo, 'wp-empty', pistol && a.mag === 0);
     }
@@ -281,6 +315,11 @@ export function createWeaponHud({
       btnReload.hidden = !pb;
       btnAim.hidden = !pb;
       if (!pb) releaseAim();
+    }
+    if (keys && drv !== shownKeys) {
+      shownKeys = drv;
+      keys.hidden = drv; // 駕駛中不處理武器鍵
+      keys.style.display = drv ? 'none' : 'flex';
     }
     if (drv && wheelOpen) setWheel(false);
   }
@@ -324,6 +363,7 @@ export function createWeaponHud({
     el: panel,
     crosshair: cross,
     buttons: { weapon: btnWeapon, reload: btnReload, aim: btnAim },
+    keys,
   });
   return hudApi;
 }

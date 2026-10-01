@@ -446,14 +446,34 @@ function makeActor(id, kind, x, z, yaw) {
   // 彈藥拾取 → addAmmo（同 main.js 的 pickup:ammo 接線）
   const pickups = W.createAmmoPickups({ bus, points: [{ x: 0, z: 0 }], canPickup: () => weapons.ammo().reserve < W.WEAPONS.pistol.reserveMax });
   bus.on('pickup:ammo', (e) => weapons.addAmmo(e.amount));
-  const r0 = weapons.ammo().reserve;
+  let pickedUp = 0;
+  bus.on('pickup:ammo', () => pickedUp++);
   pickups.update(1 / 60, { x: 0.5, y: 0, z: 0 });
-  check('組合：走進彈藥盒 1.5 m 內自動拾取 → 備彈 +12', weapons.ammo().reserve === r0 + 12, `${r0} → ${weapons.ammo().reserve}`);
+  check('組合：無限備彈（∞）→ 彈藥盒不拾取、不提示（canPickup 同 main.js 為 false）', weapons.ammo().reserve === Infinity && pickedUp === 0 && pickups.nearest({ x: 0.5, z: 0 }) === null && weapons.addAmmo(12) === 0);
+  // 無限備彈：連射超過原總量（12 + 36）仍可射，期間自動換彈
+  let fired = 0;
+  for (let i = 0; i < 600 && fired < 60; i++) {
+    if (weapons.attack(aim)) fired++;
+    step(0.25);
+  }
+  const reloads = [];
+  bus.on('weapon:reload', (e) => reloads.push(e));
+  for (let i = 0; i < 40 && weapons.ammo().mag > 0; i++) {
+    weapons.attack(aim);
+    step(0.25);
+  }
+  const needReload = weapons.ammo().mag === 0 && weapons.state === 'reloading' && weapons.attack(aim) === false;
+  step(1.5);
+  check('組合：無限備彈連射 60 發（> 48）仍可射；彈匣打完需換彈、換彈後 12', fired === 60 && needReload && weapons.ammo().mag === 12 && reloads.at(-1).phase === 'end', `fired ${fired} mag ${weapons.ammo().mag}`);
   // 存檔 v2：weapons.serialize 往返
   const ws = weapons.serialize();
   const w2 = W.createWeapons({ bus: createBus(), combat, player, settings, now: () => t });
   w2.restore(ws);
-  check('組合：weapons.serialize → restore 往返（槽位 / 彈匣 / 備彈）', w2.slot === 2 && w2.ammo().mag === ws.ammo.pistol.mag && w2.ammo().reserve === ws.ammo.pistol.reserve);
+  check('組合：weapons.serialize → restore 往返（槽位 / 彈匣 / 備彈）', w2.slot === 2 && w2.ammo().mag === ws.ammo.pistol.mag && w2.ammo().reserve === Infinity && Number.isInteger(ws.ammo.pistol.reserve));
+  const wjs = JSON.stringify(save.validateSave({ ...save.defaultSave(), weapons: ws }));
+  const w3 = W.createWeapons({ bus: createBus(), combat, player, settings, now: () => t });
+  w3.restore(save.validateSave(JSON.parse(wjs)).weapons);
+  check('組合：無限備彈存檔往返（validateSave → JSON → restore）仍 ∞、JSON 無 null / Infinity', !/Infinity/.test(wjs) && !/null/.test(JSON.stringify(JSON.parse(wjs).weapons)) && w3.ammo().reserve === Infinity && w3.ammo().mag === ws.ammo.pistol.mag);
   audio.dispose();
 }
 

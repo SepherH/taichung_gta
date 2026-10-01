@@ -313,7 +313,8 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   const eq = of('weapon:equip')[0];
   ok(eq && eq.slot === 1 && eq.weapon === 'bat' && eq.prev === 'fist', `weapon:equip { slot 1, weapon bat, prev fist }`);
   ok(w.attack() === false, 'equip 期間不能攻擊');
-  ok(w.select(2) === false && w.canSwitch() === false, 'equip 期間不能再切');
+  ok(w.select(2) === false && w.canSwitch() === false && w.current === 'bat' && w.pending === 2, 'equip 期間不能立即切，請求排隊（pending 2）');
+  ok(w.select(1) === false && w.pending === -1, '再選回目前的槽 → 取消排隊');
   step(0.2);
   ok(w.state === 'equipping' && w.attack() === false, 'equip 0.2 s 仍在 equipping');
   step(0.12);
@@ -321,7 +322,8 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   // 攻擊中 < 80% 不能切、≥ 80% 可切（球棒動作 = max(冷卻 0.75, clip 0.7) = 0.75 s）
   ok(w.attack() === true && w.state === 'attacking', '揮棒 → attacking');
   step(0.5);
-  ok(!w.canSwitch() && w.select(2) === false && w.current === 'bat', '揮擊 0.5 s（67%）不能切，請求被忽略（不排隊）');
+  ok(!w.canSwitch() && w.select(2) === false && w.current === 'bat' && w.pending === 2, '揮擊 0.5 s（67%）不能立即切，請求排隊');
+  w.select(1); // 取消排隊（排隊套用另見 tools/test/weapon-switch-hint.mjs）
   step(0.15);
   ok(w.canSwitch(), `揮擊 0.65 s（≥ 80% = ${(0.75 * SWITCH_AT).toFixed(2)} s）可切`);
   ok(w.cycle() === true && w.current === 'pistol', 'cycle：球棒 → 手槍');
@@ -537,7 +539,7 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   w.select(2);
   step(0.35);
   const a0 = w.ammo();
-  ok(a0.mag === 12 && a0.magSize === 12 && a0.reserve === 36, 'ammo() 12 / 12 / 36');
+  ok(a0.mag === 12 && a0.magSize === 12 && a0.reserve === Infinity, 'ammo() 12 / 12 / ∞（infiniteAmmo）');
   const hits = [];
   combat.on('hit', (e) => hits.push(e));
   const aim = aimAt(0, 1.2, 10);
@@ -579,7 +581,7 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   S4.step(0.35);
   S4.w.attack(aimAt(0, 30, 100));
   ok(S4.of('weapon:impact').length === 0 && S4.of('weapon:fire')[0].hit === false, '打空 → 無 impact、hit false');
-  // 彈匣打空 → 自動裝填一次；裝填中不能射、不能切；1.4 s 後 mag 12 / reserve 24
+  // 彈匣打空 → 自動裝填一次；裝填中不能射、不能切；1.4 s 後 mag 12（備彈無限）
   let shots = 0;
   for (let i = 0; i < 12; i++) {
     if (S4.w.attack(aimAt(0, 30, 100))) shots++;
@@ -587,21 +589,24 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   }
   ok(shots === 11 && S4.w.ammo().mag === 0, `連開打空彈匣（本段 ${shots} 發 + 先前 1 發）`);
   ok(S4.w.state === 'reloading' && S4.of('weapon:reload')[0].phase === 'start', '打空 → 自動裝填（weapon:reload start）');
-  ok(S4.w.attack(aimAt(0, 30, 100)) === false && S4.w.select(0) === false && !S4.w.canSwitch(), '裝填中不能射、不能切');
+  ok(S4.w.attack(aimAt(0, 30, 100)) === false && S4.w.select(0) === false && !S4.w.canSwitch() && S4.w.pending === 0, '裝填中不能射、不能立即切（排隊）');
+  S4.w.select(2); // 取消排隊
   const rp = S4.w.reloadProgress();
   ok(rp > 0 && rp < 1, `reloadProgress ${rp.toFixed(2)}`);
   S4.step(1.45);
   const re = S4.of('weapon:reload').at(-1);
-  ok(re.phase === 'end' && re.mag === 12 && re.reserve === 24 && S4.w.state === 'idle', `裝填完成：12 / 24（${re.mag} / ${re.reserve}）`);
+  ok(re.phase === 'end' && re.mag === 12 && re.reserve === Infinity && S4.w.state === 'idle', `裝填完成：12 / ∞（${re.mag} / ${re.reserve}）`);
   // 手動裝填：滿彈匣 → false；開 1 發後可裝
   ok(S4.w.reload() === false, '滿彈匣不能裝填');
   S4.w.attack(aimAt(0, 30, 100));
   S4.step(0.25);
   ok(S4.w.reload() === true && S4.w.state === 'reloading', '開 1 發後 reload() 可裝');
   S4.step(1.5);
-  ok(S4.w.ammo().mag === 12 && S4.w.ammo().reserve === 23, '手動裝填 11 → 12 / 23');
-  // 無備彈：空彈匣 → dryFire（節流）
+  ok(S4.w.ammo().mag === 12 && S4.w.ammo().reserve === Infinity, '手動裝填 11 → 12 / ∞');
+  // 無備彈：空彈匣 → dryFire（節流）——有限備彈路徑：建立時關掉 infiniteAmmo（旗標於 createWeapons 時讀取）
+  WEAPONS.pistol.infiniteAmmo = false;
   const S5 = setup();
+  WEAPONS.pistol.infiniteAmmo = true;
   S5.w.select(2);
   S5.step(0.35);
   S5.w.restore({ slot: 2, ammo: { pistol: { mag: 1, reserve: 0 } } });
@@ -629,6 +634,34 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
   S5.step(0.1);
   const last = S5.of('weapon:reload').at(-1);
   ok(S5.w.state === 'idle' && last.phase === 'end' && last.mag === 11, '裝填中被打倒 → 取消（彈藥不變）');
+  // 無限備彈（fix1-P4）：連射超過原備彈總量（12 + 36）仍可射；彈匣打完需換彈、換彈後回滿；不會 dryFire；addAmmo 回 0
+  const SInf = setup();
+  SInf.w.select(2);
+  SInf.step(0.35);
+  let fired = 0;
+  let mustReload = true;
+  let refill = true;
+  for (let i = 0; i < 400 && fired < 100; i++) {
+    const magBefore = SInf.w.ammo().mag;
+    if (SInf.w.attack(aimAt(0, 30, 100))) fired++;
+    else if (magBefore === 0 && SInf.w.state !== 'reloading') mustReload = false;
+    if (SInf.w.ammo().mag === 0) {
+      if (SInf.w.state !== 'reloading' && SInf.w.attack(aimAt(0, 30, 100))) mustReload = false; // 空彈匣不可能直接開槍
+      SInf.step(0.25);
+      if (SInf.w.state !== 'reloading' || SInf.w.attack(aimAt(0, 30, 100))) mustReload = false; // 打空 → 自動裝填、裝填中不能射
+      SInf.step(1.45);
+      if (SInf.w.ammo().mag !== 12) refill = false;
+    } else SInf.step(0.25);
+  }
+  const n0 = WEAPONS.pistol.magSize + WEAPONS.pistol.startReserve;
+  ok(fired === 100 && fired > n0 && SInf.w.ammo().reserve === Infinity, `無限備彈：連射 ${fired} 發（> 原總量 ${n0}）仍可射、reserve ∞`);
+  ok(mustReload && refill && SInf.of('weapon:reload').filter((e) => e.phase === 'end').length >= 8, '無限備彈：彈匣打完必經裝填（裝填中不能射）、換彈後彈匣回滿 12');
+  ok(SInf.of('weapon:dryFire').length === 0 && SInf.w.addAmmo(12) === 0 && SInf.w.ammo().reserve === Infinity, '無限備彈：不再 dryFire、addAmmo 回 0（不跳拾取提示）');
+  SInf.w.attack(aimAt(0, 30, 100));
+  SInf.step(0.25);
+  ok(SInf.w.reload() === true && SInf.w.state === 'reloading', '無限備彈：非空彈匣仍可按 R 換彈');
+  SInf.step(1.5);
+  ok(SInf.w.ammo().mag === 12 && SInf.w.reload() === false, '無限備彈：手動換彈後 12、滿彈匣不能再換');
   // 手槍 2 發 1.5 s 內擊倒行人（實際射擊流程）
   const tgt = mockActor('tgt', 0, 8, Math.PI);
   tgt.maxHp = tgt.hp = 200;
@@ -1167,7 +1200,7 @@ function sharedRay(inner) {
   ok(S.w.current === 'pistol' && !hud.isWheelOpen(), '放開 → 直選手槍、輪盤關閉');
   S.step(0.35);
   hud.update(FRAME, {});
-  ok(panel.children[2].textContent === '12 / 36' && !panel.children[2].hidden, "彈藥文字 '12 / 36'");
+  ok(panel.children[2].textContent === '12 / ∞' && !panel.children[2].hidden, "彈藥文字 '12 / ∞'（無限備彈）");
   ok(cross.classList.contains('wp-show') && !br.hidden && !ba.hidden, '持手槍：準星顯示、裝填 / 瞄準鈕顯示');
   hud.update(FRAME, { aimBlend: 1 });
   ok(cross.classList.contains('wp-aim'), '瞄準中準星收窄（wp-aim）');
@@ -1183,7 +1216,7 @@ function sharedRay(inner) {
   ok(!panel.children[3].hidden, '裝填中顯示進度條');
   S.step(1.5);
   hud.update(FRAME, {});
-  ok(panel.children[3].hidden && panel.children[2].textContent === '12 / 35', '裝填完成：進度條隱藏、12 / 35');
+  ok(panel.children[3].hidden && panel.children[2].textContent === '12 / ∞', '裝填完成：進度條隱藏、12 / ∞');
   // 長按但放在死區 → 不選（取消）
   bw.dispatch('pointerdown', { clientX: 32, clientY: 32 });
   t += 500;
@@ -1228,7 +1261,18 @@ function sharedRay(inner) {
   ok(S2.w.restore(d) === true && S2.w.current === 'pistol' && S2.w.state === 'idle' && S2.w.ammo().mag === 11, 'restore：直接換到手槍（不播 equip）、彈藥還原');
   ok(S2.of('weapon:equip').at(-1).weapon === 'pistol' && S2.of('weapon:ammo').at(-1).mag === 11, 'restore 發 weapon:equip / weapon:ammo');
   S2.w.restore({ slot: 7, ammo: { pistol: { mag: 99, reserve: -1 } } });
-  ok(S2.w.current === 'fist' && S2.w.ammo().mag === 12 && S2.w.ammo().reserve === 36, 'restore 非法值 → 預設（slot 0、12 / 36）');
+  ok(S2.w.current === 'fist' && S2.w.ammo().mag === 12 && S2.w.ammo().reserve === Infinity && S2.w.serialize().ammo.pistol.reserve === 36, 'restore 非法值 → 預設（slot 0、12 / ∞，存檔 reserve 36）');
+  // 無限備彈存檔往返：serialize → JSON → restore 後仍無限；JSON 不含 null / Infinity；舊存檔（數字備彈，含 0）讀入不壞
+  const js = JSON.stringify(S.w.serialize());
+  const S3 = setup();
+  ok(!/null|Infinity/.test(js) && S3.w.restore(JSON.parse(js)) === true && S3.w.ammo().reserve === Infinity && S3.w.ammo().mag === 11, `存檔往返：${js} → 仍無限、mag 11`);
+  for (const old of [{ slot: 2, ammo: { pistol: { mag: 0, reserve: 0 } } }, { slot: 2, ammo: { pistol: { mag: 5, reserve: 80 } } }, { slot: 2, ammo: { pistol: { mag: 3, reserve: null } } }]) {
+    S3.w.restore(JSON.parse(JSON.stringify(old)));
+    const okLoad = S3.w.ammo().reserve === Infinity && S3.w.reload() === true;
+    S3.step(1.5);
+    const back = JSON.stringify(S3.w.serialize());
+    ok(okLoad && S3.w.ammo().mag === 12 && !/null|Infinity/.test(back), `舊存檔 ${JSON.stringify(old.ammo.pistol)} → 無限、可換彈回 12、再存 ${back}`);
+  }
   S2.w.restore(null);
   ok(S2.w.current === 'fist', 'restore(null) 不丟例外');
   S2.w.dispose();

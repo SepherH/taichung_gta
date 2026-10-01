@@ -16,17 +16,19 @@
 //     省略或回 false 時用程序揮擊弧（面向右 75° → 左 75°，b 反向）
 //   rng() → 0..1：後座左右亂數（省略 = 固定種子 LCG，可重現）
 //
-// 回傳：{ current, slot, state, aiming, canSwitch(), select(slot), cycle(), attack(aim), reload(), update(dt, aim),
+// 回傳：{ current, slot, state, aiming, pending（排隊中的槽或 -1）, canSwitch(), select(slot), cycle(), attack(aim), reload(), update(dt, aim),
 //   ammo() → { mag, magSize, reserve }（重用同一物件）, addAmmo(n) → 實際加入數, recoilKick() → { pitch, yaw }（本幀累積、讀後歸零）,
 //   reloadProgress() → 0..1 | null, serialize(), restore(data), dispose() }
 //   aim = { origin:{x,y,z}, dir:{x,y,z}, aiming: boolean, muzzle?:{x,y,z}, candidates?: actor[] }（整合層每幀以鏡頭中心射線填入）
 //
 // 規則：
-//   切換：只有 state 'idle'，或 'attacking' 且動作進行 ≥ SWITCH_AT（80%）時可切；否則忽略（不排隊）；切換後 EQUIP_SEC 內不能攻擊
+//   切換：只有 state 'idle'，或 'attacking' 且動作進行 ≥ SWITCH_AT（80%）時可切；否則記下最後一次請求（pending），
+//     update 時一可切就套用（後來的請求覆蓋前面的；選回目前的槽 = 取消）；切換後 EQUIP_SEC 內不能攻擊
 //   球棒：命中窗內每幀以握把–棒頭膠囊與「上一幀棒頭 → 本幀棒頭」各掃掠一次，碰到的角色走 combat.applyHit（同一揮 swingId 去重）
 //   手槍：鏡頭射線取瞄點 → 槍口確認遮擋（aim.js resolveShot）；命中角色 → combat.applyHit（weapon 'pistol'），
 //     命中其他（或角色倒地中不受理）→ weapon:impact；射程（由槍口起算 80 m）內沒打到東西 → weapon:fire.miss = true（不發 impact）；
 //     每發 weapon:fire（另帶 miss / ex, ey, ez 落點或射程末端 / dist，供彈道特效）；打空彈匣後自動裝填一次；彈匣空且無備彈 → weapon:dryFire（DRY_FIRE_INTERVAL 節流）
+//     def.infiniteAmmo：備彈無限（裝填不扣備彈、不會沒子彈、addAmmo 回 0）；ammo() / 事件的 reserve 為 Infinity，serialize 仍存數字 reserve
 //     裝填中不能射、不能切；裝填中被打倒 → 取消（彈藥不變，發 reload end）
 // 事件（bus）：weapon:equip / swing / fire / dryFire / reload / ammo / impact（payload 見契約 §10）
 // 每幀路徑（update / attack）不配置新物件；事件 payload 只在事件發生時配置
@@ -120,6 +122,7 @@ export function createWeapons({
   const actor = player.actor || player;
   const P = WEAPONS.pistol;
   const B = WEAPONS.bat;
+  const INF = !!P.infiniteAmmo;
   let clock = 0;
   const time = now || (() => clock);
   const rand = rng || lcg();
@@ -136,6 +139,7 @@ export function createWeapons({
   let state = 'idle';
   let stateAt = -Infinity;
   let actionDur = 0; // 目前攻擊動作長度（canSwitch 的 80% 以此計）
+  let pending = -1; // 被狀態擋下的切換請求（最後一次），-1 = 無
   let disposed = false;
   let aiming = false;
   // 手槍
@@ -197,8 +201,11 @@ export function createWeapons({
     return undefined;
   }
 
+  const shownReserve = () => (INF ? Infinity : reserve);
+  const hasReserve = () => INF || reserve > 0;
+
   function ammoPayload() {
-    return { weapon: 'pistol', mag, magSize: P.magSize, reserve };
+    return { weapon: 'pistol', mag, magSize: P.magSize, reserve: shownReserve() };
   }
 
   function setState(s, t, dur = 0) {
@@ -209,12 +216,12 @@ export function createWeapons({
 
   function finishReload(cancel) {
     if (!cancel) {
-      const n = Math.min(P.magSize - mag, reserve);
+      const n = INF ? P.magSize - mag : Math.min(P.magSize - mag, reserve);
       mag += n;
-      reserve -= n;
+      if (!INF) reserve -= n;
     }
     setState('idle', time());
-    emit('weapon:reload', { weapon: 'pistol', phase: 'end', mag, reserve });
+    emit('weapon:reload', { weapon: 'pistol', phase: 'end', mag, reserve: shownReserve() });
     if (!cancel) emit('weapon:ammo', ammoPayload());
   }
 
@@ -242,9 +249,18 @@ export function createWeapons({
     return false;
   }
 
+  // 回傳 true = 立即切換；被擋下時記為 pending、回 false
   function select(s) {
-    if (disposed || !Number.isInteger(s) || s < 0 || s >= SLOT_IDS.length || s === slot) return false;
-    if (!canSwitch()) return false;
+    if (disposed || !Number.isInteger(s) || s < 0 || s >= SLOT_IDS.length) return false;
+    if (s === slot) {
+      pending = -1;
+      return false;
+    }
+    if (!canSwitch()) {
+      pending = s;
+      return false;
+    }
+    pending = -1;
     const prev = current();
     const t = time();
     slot = s;
@@ -256,15 +272,16 @@ export function createWeapons({
     return true;
   }
 
+  // 排隊中再按：從排隊的槽往下一格（連按 Q 兩下 = 跳兩格）
   function cycle() {
-    return select((slot + 1) % SLOT_IDS.length);
+    return select(((pending >= 0 ? pending : slot) + 1) % SLOT_IDS.length);
   }
 
   function startReload(t) {
-    if (current() !== 'pistol' || mag >= P.magSize || reserve <= 0 || isDown()) return false;
+    if (current() !== 'pistol' || mag >= P.magSize || !hasReserve() || isDown()) return false;
     setState('reloading', t, P.reloadSec);
     reloadEnd = t + P.reloadSec;
-    emit('weapon:reload', { weapon: 'pistol', phase: 'start', mag, reserve });
+    emit('weapon:reload', { weapon: 'pistol', phase: 'start', mag, reserve: shownReserve() });
     play('pistol_reload');
     return true;
   }
@@ -381,7 +398,7 @@ export function createWeapons({
 
   function attackPistol(t, aim) {
     if (mag <= 0) {
-      if (reserve > 0) {
+      if (hasReserve()) {
         startReload(t); // 空彈匣按攻擊 → 自動裝填（這一下不開槍）
         return false;
       }
@@ -430,7 +447,7 @@ export function createWeapons({
     kick.yaw += kickTmp.yaw;
     play('pistol_fire');
     setState('attacking', t, P.fireInterval);
-    if (mag === 0 && reserve > 0) autoReload = true;
+    if (mag === 0 && hasReserve()) autoReload = true;
     return true;
   }
 
@@ -451,18 +468,19 @@ export function createWeapons({
     const t = time();
     updateBat(t);
     tick(t);
+    if (pending >= 0 && canSwitch()) select(pending);
     aiming = !!(aim && aim.aiming) && current() === 'pistol';
   }
 
   function ammo() {
     ammoOut.mag = mag;
-    ammoOut.reserve = reserve;
+    ammoOut.reserve = shownReserve();
     return ammoOut;
   }
 
   function addAmmo(n) {
     const k = Math.floor(n);
-    if (disposed || !(k > 0)) return 0;
+    if (disposed || INF || !(k > 0)) return 0; // 無限備彈：不加、回 0（整合層不跳拾取提示）
     const added = Math.min(P.reserveMax - reserve, k);
     if (added <= 0) return 0;
     reserve += added;
@@ -504,6 +522,7 @@ export function createWeapons({
     reserve = pa && okInt(pa.reserve, P.reserveMax) ? pa.reserve : P.startReserve;
     const prev = current();
     slot = s;
+    pending = -1;
     swingActive = false;
     autoReload = false;
     setState('idle', time());
@@ -514,6 +533,7 @@ export function createWeapons({
 
   function dispose() {
     disposed = true;
+    pending = -1;
     swingActive = false;
     autoReload = false;
   }
@@ -531,6 +551,9 @@ export function createWeapons({
     },
     get aiming() {
       return aiming;
+    },
+    get pending() {
+      return pending;
     },
     canSwitch,
     select,

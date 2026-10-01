@@ -410,6 +410,31 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   check('無 bus / initial 也可運作', eco3.money === 500 && eco3.add(5) === 5 && eco3.money === 505);
 }
 
+// ---------- 手槍無限備彈（fix1-P4）：weapons.serialize → store.save（JSON）→ load → restore 後仍無限；JSON 不含 null / Infinity ----------
+{
+  const { createWeapons } = await import('../../src/weapons/weapons.js');
+  const mk = () => createWeapons({ player: { actor: { id: 'p', kind: 'player', pos: { x: 0, y: 0, z: 0 }, yaw: 0 } } });
+  const w = mk();
+  w.select(2);
+  w.update(0.5, null);
+  w.attack(null);
+  const s = fakeStorage({});
+  const st = createSaveStore({ storage: s, now: () => 1 });
+  check('無限備彈：save 含 weapons.serialize() → true', st.save({ ...defaultSave(), weapons: w.serialize() }) === true);
+  const raw = s.getItem('tcgta.save');
+  check('無限備彈：存檔 JSON 不含 Infinity、weapons 段不含 null', !/Infinity/.test(raw) && !/null/.test(JSON.stringify(JSON.parse(raw).weapons)), JSON.stringify(JSON.parse(raw).weapons));
+  const r = createSaveStore({ storage: s }).load();
+  const w2 = mk();
+  w2.restore(r.data.weapons);
+  check('無限備彈：讀回 restore 後 reserve 仍為 ∞、mag 11', r.status === 'ok' && w2.ammo().reserve === Infinity && w2.ammo().mag === 11 && w2.current === 'pistol');
+  const old = createSaveStore({ storage: fakeStorage({ 'tcgta.save': JSON.stringify({ ...defaultSave(), weapons: { slot: 2, ammo: { pistol: { mag: 0, reserve: 0 } } } }) }) }).load();
+  const w3 = mk();
+  w3.restore(old.data.weapons);
+  check('無限備彈：舊存檔（mag 0 / reserve 0）讀入不壞、可換彈', old.status === 'ok' && w3.ammo().reserve === Infinity && w3.reload() === true);
+  check('無限備彈：validateSave 遇 reserve Infinity / null → 數字預設 36（不寫入非數字）', validateSave({ version: 2, weapons: { ammo: { pistol: { mag: 3, reserve: Infinity } } } }).weapons.ammo.pistol.reserve === 36
+    && validateSave(JSON.parse(JSON.stringify({ version: 2, weapons: { ammo: { pistol: { mag: 3, reserve: Infinity } } } }))).weapons.ammo.pistol.reserve === 36);
+}
+
 const total = passed + failed;
 console.log(`\nsave.mjs：${passed} 通過 / ${failed} 失敗`);
 console.log(failed ? `FAIL ${failed}/${total}` : `PASS ${passed}/${total}`);

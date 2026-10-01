@@ -39,6 +39,7 @@ export const WEAPONS = {
     magSize: 12,
     startReserve: 36,
     reserveMax: 120,
+    infiniteAmmo: true, // 備彈無限（彈匣與換彈照舊）；ammo().reserve 回 Infinity，存檔仍只存數字 reserve
     fireInterval: 0.22, // 最短射擊間隔（秒，半自動按住連發）
     reloadSec: 1.4,
     range: 80, // 射程（m）
