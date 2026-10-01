@@ -21,6 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "vehicles"))
 import vehicle_lib as VL  # noqa: E402
 import blendsafe  # noqa: E402
+sys.path.insert(0, HERE)
+import prop_lib as PL  # noqa: E402
 
 SLUG = "night_market_stall"
 REPO = VL.REPO
@@ -169,12 +171,7 @@ def build():
                  notes=("臺灣夜市常見不鏽鋼攤車一般外觀（推測尺寸）：攤車 1.8 × 0.9 m、檯面高 0.88、棚頂約 2.3、招牌頂約 3.0。"
                         "顧客面（招牌、玻璃櫃）朝 glTF +Z；counter＝取餐點（檯面前緣上方，glTF 座標）。"
                         "招牌為本機生圖貼圖（虛構店名，無真實商標）；bulb 材質帶 emission。"))
-    manifest = {"convention": ("原點＝地面、外接盒中心正下方；+Y 上、正面（顧客面）朝 glTF +Z、公尺。"
-                               "節點 body（本體）+ sign（招牌貼圖面）；座標皆為 glTF（x 左右、y 上、z 前）。"),
-                "props": [entry]}
-    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    PL.merge_manifest(entry)   # 以 id 合併，保留其他道具條目（變體 / 泊車亭 / 提袋）
     Previews = VL.Vehicle.__dict__["_previews"]
     v.slug = SLUG
     views = {"front34": ((3.6, -6.0, 2.6), (0, 0, 1.5), 35), "rear34": ((-3.6, 5.8, 2.8), (0, 0, 1.5), 35)}
