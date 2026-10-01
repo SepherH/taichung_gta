@@ -58,7 +58,7 @@ import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
 import { setActiveByDistance, ACTIVE_RADIUS } from './physics/npc-bodies.js';
-import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, DEFAULT_AMMO_POINTS, WEAPONS } from './weapons/index.js';
+import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS } from './weapons/index.js';
 import { makeBatSegment } from './weapons/models.js';
 import { createWeaponHud } from './weapons/hud.js';
 import { attachWeapon, detachWeapon } from './character-animation.js';
@@ -567,7 +567,8 @@ async function init() {
   const whud = createWeaponHud({ root: document.body, touchRoot: document.getElementById('touch-ui'), weapons, input, isTouch: touch });
   const whudState = { driving: false, aimBlend: 0 };
   gunshotListeners(bus, () => traffic.brains.values()); // weapon:fire → 30 m 內行人 hear({ type: 'gunshot' })
-  const pickups = createAmmoPickups({ scene, bus, points: DEFAULT_AMMO_POINTS, heightAt, canPickup: () => weapons.ammo().reserve < WEAPONS.pistol.reserveMax });
+  // 無限備彈後不放置彈藥盒（場景 / 小地圖皆無）；系統與串接保留供日後其他拾取物使用
+  const pickups = createAmmoPickups({ scene, bus, points: [], heightAt, canPickup: () => weapons.ammo().reserve < WEAPONS.pistol.reserveMax });
   bus.on('pickup:ammo', (e) => {
     const n = weapons.addAmmo(e && e.amount);
     if (n > 0) hud.toast(`撿到手槍子彈 ×${n}`, 2);
@@ -1226,7 +1227,7 @@ async function init() {
       else if (jack) vehiclePrompt = `按 F 搶車（${(VEHICLE_TYPES[jack.type] || {}).label || '車'}）`;
       else if (near) vehiclePrompt = `按 F 上車（${near.spec.label}）`;
       if (jack || near) showHint('enter');
-      pickups.update(dt, player.pos); // 1.5 m 內自動拾取彈藥
+      pickups.update(dt, player.pos); // 拾取物（目前無放置點，保留串接）
       inter = free ? nearestInteractable(player.pos, true) : null;
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {

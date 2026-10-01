@@ -23,7 +23,7 @@
    - 既有 `combat.on('knockdown')` → `pedKnockdownPayload(e)` 已帶 `weapon`，cause 會是 'punch'|'bat'|'bullet'|'vehicle'
    - 槍聲：`gunshotListeners(bus, () => traffic 的 brain 迭代器)`（weapon:fire → 30 m 內 `brain.hear({ type: 'gunshot', x, z })`）
    - 彈藥：`bus.on('pickup:ammo', e => weapons.addAmmo(e.amount))`
-5. 彈藥拾取：`const pickups = createAmmoPickups({ scene, bus, points: DEFAULT_AMMO_POINTS, heightAt, canPickup: () => weapons.ammo().reserve < 120 })`；每幀 `pickups.update(dt, player.pos)`；互動清單加入 `pickups.nearest(player.pos)`（priority 0，自動拾取為主）；小地圖 markers 併入 `pickups.markers()`（kind 'ammo'）
+5. 彈藥拾取（系統保留、目前不放置）：手槍備彈無限（defs.js infiniteAmmo，ammo().reserve 回 Infinity）後，main.js 以 `createAmmoPickups({ scene, bus, points: [], heightAt, canPickup: () => weapons.ammo().reserve < WEAPONS.pistol.reserveMax })` 建立空清單，場景與小地圖不出現彈藥盒，canPickup 在無限備彈下恆為 false；每幀 `pickups.update`、互動清單 `pickups.nearest`、小地圖 `pickups.markers()` 的串接保留，日後傳入拾取點即生效
 6. 武器模型：`loadWeaponModels().then(m => …)`；W3 `attachWeapon(character, m.bat.object, { gripOffset: m.bat.grip })`，依 `weapon:equip` 切換顯示；棒頭 / 槍口世界座標 = `object.localToWorld(tip/muzzle.clone())`（可據此實作 getBatSegment / aim.muzzle）
 7. 存檔：`save.weapons = weapons.serialize()`；讀檔 `weapons.restore(data.weapons)`
 8. 取代直接改 entries：`knockDownPlayer` → `combat.knockdownActor(player.actor)`；traffic.spawnEjectedDriver 同理（`{ impulse }` 可交給 combat 推剛體）

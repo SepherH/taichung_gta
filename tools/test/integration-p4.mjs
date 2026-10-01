@@ -170,6 +170,8 @@ const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
     const lack = has(list);
     check(`main.js 接線：${name}`, lack.length === 0, lack.map(String).join(' | '));
   }
+  check('彈藥盒不放置：main.js createAmmoPickups points 為空、不引用 DEFAULT_AMMO_POINTS',
+    /createAmmoPickups\(\{[^}]*points: \[\]/.test(mainSrc) && !mainSrc.includes('DEFAULT_AMMO_POINTS'));
   // 規矩
   check('main.js：武器模型換裝時機（weapon:equip 先掛起 → layer swap 換手點換；equip 動作沒播 / 播完 / 打斷即換；讀檔 state 非 equipping 立即換）',
     ["player.weaponLayer.on('swap', finishWeaponSwap)", "player.weaponLayer.on('finished', equipEnded)", "player.weaponLayer.on('cancel', equipEnded)",
