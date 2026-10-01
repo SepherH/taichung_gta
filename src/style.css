@@ -1295,6 +1295,27 @@ body.touch-drive .tbtn[data-show="walk"] {
   }
 }
 
+/* 極矮窄橫向（568×320）步行：#status（76–106、金錢 +/− 到 126）會壓到上車鈕（sec2 x 458–530、上緣 98）8px、攻擊鈕（上緣 104）2px；
+   右上又有武器面板（x 380–492、26–54）與換彈鈕（x 500–552、14–66）→ 改放上車鈕左側、壓扁：右 116（x ≤ 452）、上 58、高 26、
+   寬 ≤ 170（x ≥ 282，讓開提示膠囊 140–280）、金錢 +/− 在其下 26–40（整組 58–98）；與上車鈕間距 6、攻擊鈕 6、左上小鈕列（底 56）2、武器面板 4；
+   駕駛時右上是喇叭 / 換台鈕（12–68）、下車 / 手煞列從 134 起 → 維持一般觸控位置 76–126 */
+@media (orientation: landscape) and (max-height: 379px) and (max-width: 639px) {
+  body.touch-walk #status {
+    right: calc(116px + env(safe-area-inset-right));
+    top: calc(58px + env(safe-area-inset-top));
+    max-width: 170px;
+    height: 26px;
+    font-size: 14px;
+  }
+
+  body.touch-walk #money-delta {
+    top: 26px;
+    height: 14px;
+    font-size: 12px;
+    line-height: 14px;
+  }
+}
+
 @media (orientation: portrait) {
   .tbtn.slot-view {
     top: calc(114px + env(safe-area-inset-top));

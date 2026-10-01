@@ -70,11 +70,17 @@ function mediaOk(media, vp) {
   });
 }
 
+const PAD_KEYS = ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'];
 // 依選擇器鏈（由低到高特異度）合併宣告；vp 省略 = 只看不在 @media 內的規則
 function resolve(chain, vp = null) {
   const decl = {};
   for (const sel of chain) {
-    for (const r of RULES) if (r.sels.includes(sel) && mediaOk(r.media, vp)) Object.assign(decl, r.decl);
+    for (const r of RULES) {
+      if (!r.sels.includes(sel) || !mediaOk(r.media, vp)) continue;
+      // padding 簡寫蓋掉先前的 padding-top / right / bottom / left 長寫（同 CSS 疊加順序）
+      if ('padding' in r.decl) for (const k of PAD_KEYS) delete decl[k];
+      Object.assign(decl, r.decl);
+    }
   }
   return decl;
 }
@@ -218,7 +224,9 @@ function attrRect(isTouch, vp) {
 // HUD 元素（依模式）與其選擇器鏈
 function hudRects(isTouch, driving, vp, scale) {
   const vars = { '--hud-scale': scale };
-  const chain = (id) => (isTouch ? [`#${id}`, `body.touch #${id}`] : [`#${id}`]);
+  // 觸控另套模式選擇器（touch.js 在 body 加 touch-walk / touch-drive；568×320 步行 #status 改排見 style.css）
+  const modeSel = driving ? 'body.touch-drive' : 'body.touch-walk';
+  const chain = (id) => (isTouch ? [`#${id}`, `body.touch #${id}`, `${modeSel} #${id}`] : [`#${id}`]);
   const ids = ['fps', 'status', 'minimap-wrap', 'prompt', 'toast', isTouch ? 'touch-hint' : 'ctrl-hint'];
   if (driving) ids.push('drive-panel');
   // 觸控駕駛中新手提示卡延後顯示（hud.js _hintBlocked），桌機駕駛中照常
@@ -241,7 +249,8 @@ function hudRects(isTouch, driving, vp, scale) {
 
 // 觸控鈕（touch.js 預設按鈕 + 預留的 tl3）與駕駛踏板區
 const WALK_SLOTS = ['main', 'sec1', 'sec2', 'attack', 'interact', 'tl1', 'tl2', 'tl3'];
-const DRIVE_SLOTS = ['sec2', 'sec3', 'top1', 'tl1', 'tl2', 'tl3'];
+// 駕駛：互動鈕（tb-interact，車上取外送餐等）也要檢查——直向在下車鈕下方 206–262、踏板上緣讓到 330（padding-top 長寫）
+const DRIVE_SLOTS = ['sec2', 'sec3', 'interact', 'top1', 'tl1', 'tl2', 'tl3'];
 function controlRects(driving, vp) {
   const out = [];
   const modeSel = driving ? 'body.touch-drive' : 'body.touch-walk';
@@ -263,7 +272,9 @@ function controlRects(driving, vp) {
       } else buf += ch;
     }
     if (buf) parts.push(buf);
-    const [pt, pr, pb, pl] = [parts[0], parts[1] ?? parts[0], parts[2] ?? parts[0], parts[3] ?? parts[1] ?? parts[0]].map((v, i) => evalLen(v, i % 2 ? 'x' : 'y', vp, {}));
+    // 簡寫四值再套之後規則的長寫（直向 body.touch-drive #touch-pedals { padding-top: 330px }）
+    const sides = [parts[0], parts[1] ?? parts[0], parts[2] ?? parts[0], parts[3] ?? parts[1] ?? parts[0]].map((v, i) => d[PAD_KEYS[i]] ?? v);
+    const [pt, pr, pb, pl] = sides.map((v, i) => evalLen(v, i % 2 ? 'x' : 'y', vp, {}));
     out.push({ name: '#touch-pedals', x: c.x + pl, y: c.y + pt, w: c.w - pl - pr, h: c.h - pt - pb });
   }
   return out;
@@ -369,6 +380,22 @@ for (const [w, h] of TOUCH_PORT) {
   }
   check('駕駛：手煞 / 下車鈕在踏板區外（間距 ≥ 4 px）', worst >= 4, `最小間距 ${worst.toFixed(1)} px @ ${at}`);
   check('駕駛：手煞 / 下車鈕在右半、手煞在油門（右）上方', sideOk);
+}
+
+// F6：推算器套用直向 padding-top 長寫（踏板上緣 330，橫向 202），互動鈕已列入駕駛檢查且與踏板 / 下車鈕不重疊
+{
+  const top = (vp) => controlRects(true, vp).find((r) => r.name === '#touch-pedals').y;
+  const vps = [{ w: 390, h: 844 }, { w: 360, h: 640 }, { w: 844, h: 390 }];
+  const tops = vps.map(top);
+  check('踏板上緣：直向 330（padding-top 長寫）/ 橫向 202', tops[0] === 330 && tops[1] === 330 && tops[2] === 202, tops.join(' / '));
+  const bad = [];
+  for (const [w, h] of [...TOUCH_LAND, ...TOUCH_PORT]) {
+    const rs = controlRects(true, { w, h });
+    const ib = rs.find((r) => r.name === '.slot-interact');
+    if (!ib) bad.push(`${w}×${h} 無互動鈕`);
+    else for (const r of rs) if (r !== ib && overlap(ib, r)) bad.push(`${w}×${h} 互動鈕[${fmt(ib)}] × ${r.name}[${fmt(r)}]`);
+  }
+  check('駕駛互動鈕列入檢查且不壓踏板 / 下車 / 手煞 / 左上小鈕', !bad.length, bad.slice(0, 3).join('；'));
 }
 
 // Phase 2 遺留：寬 < 810 px 橫向時觸控提示與授權標示水平重疊約 4 px → 兩者須完全分離（上下分列）
@@ -522,6 +549,44 @@ for (const [w, h] of TOUCH_PORT) {
   check(`武器 UI 共推算 ${rects} 個矩形；武器鈕 / 裝填鈕 / 瞄準鈕實際尺寸 ≥ 44 px`, rects > 0 && minBtn >= 44, `最小 ${minBtn} px`);
   check('武器鈕 / 瞄準鈕沿攻擊鈕周圍（間距 ≤ 80 px）', worstAtk <= 80, `最大間距 ${worstAtk.toFixed(0)} px`);
   check('武器面板在 #status 下方（高 < 380 的橫向改在 #status 上方）', !hudPlace.length, hudPlace.slice(0, 2).join('；'));
+
+  // F6 實測修正：568×320 步行 #status 曾與上車鈕（tb-enter）重疊 8 px、攻擊鈕 2 px（舊推算器沒列 568×320）；
+  // 568×320 / 844×390 / 360×740 / 390×844 × 步行 / 駕駛 × 縮放 0.8 / 1：#status（含金錢 +/−）不壓任何觸控鈕（含 tl4 手機、視角、互動、駕駛換台）、
+  // 踏板、武器 UI（步行）與其他 HUD 元素
+  {
+    const bad = [];
+    for (const [w, h] of [[568, 320], [844, 390], [360, 740], [390, 844]]) {
+      const vp = { w, h };
+      for (const driving of [false, true]) {
+        const modeSel = driving ? 'body.touch-drive' : 'body.touch-walk';
+        const extra = ['tl4', 'view', 'interact', ...(driving ? ['top2'] : [])].map((slot) => ({
+          name: `.slot-${slot}`,
+          ...box(resolve(['.tbtn', `.tbtn.slot-${slot}`, `${modeSel} .tbtn.slot-${slot}`], vp), vp, {}),
+        }));
+        for (const scale of [0.8, 1]) {
+          const hud = hudRects(true, driving, vp, scale);
+          const others = [...hud.filter((r) => r.name !== '#status'), ...controlRects(driving, vp), ...extra, ...(driving ? [] : wpRects(true, vp, scale))];
+          // 狀態列與金錢 +/− 分開算（+/− 貼狀態列右緣，hudRects 的聯集矩形在直向會把它誤延伸到左側視角鈕上），一起以 transform-origin 縮放
+          const vars = { '--hud-scale': scale };
+          const chain = (id) => [`#${id}`, `body.touch #${id}`, `${modeSel} #${id}`];
+          const sb = box(resolve(chain('status'), vp), vp, vars);
+          const dd = resolve(chain('money-delta'), vp);
+          const L = (k, axis) => evalLen(dd[k], axis, vp, vars);
+          const db = { x: sb.x + sb.w - L('right', 'x') - L('width', 'x'), y: sb.y + L('top', 'y'), w: L('width', 'x'), h: L('height', 'y') };
+          const k = evalLen(/scale\(([^)]*\)?)\)/.exec(sb.decl.transform)[1], 'x', vp, vars);
+          const ox = /left/.test(sb.decl['transform-origin']) ? sb.x : sb.x + sb.w;
+          const sc = (r, name) => ({ name, x: ox + (r.x - ox) * k, y: sb.y + (r.y - sb.y) * k, w: r.w * k, h: r.h * k });
+          for (const st of [sc(sb, '#status'), sc(db, '#money-delta')]) {
+            for (const b of others) {
+              const g = gap(st, b);
+              if (g < 0) bad.push(`${w}×${h} ${driving ? '駕駛' : '步行'}@${scale} ${st.name}[${fmt(st)}] × ${b.name}[${fmt(b)}] ${(-g).toFixed(0)} px`);
+            }
+          }
+        }
+      }
+    }
+    check('F6：568×320 / 844×390 / 360×740 / 390×844 步行 / 駕駛 #status 不壓觸控鈕 / 踏板 / 武器 UI / HUD', !bad.length, bad.slice(0, 3).join('；'));
+  }
   // 觸控面板縮為一列：固定高 28、寬 112
   {
     const d = wres(['.wp-hud', 'body.touch .wp-hud'], { w: 844, h: 390 }, { '--hud-scale': 1 });
