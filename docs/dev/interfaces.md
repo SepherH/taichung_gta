@@ -419,9 +419,9 @@ body.touch-drive #touch-look { display: none; }
 
 - `createAudio({ bus, settings, AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext })` → `{ unlock(), update(dt, state), play(name, opts), stats() → { voices, maxVoices: 12, unlocked }, dispose() }`
   - 首次 pointerdown / keydown / touchend 由整合層呼叫 `unlock()`（resume context）；未解鎖前 play 靜默略過；無 AudioContext（node）時整個模組為 no-op
-  - 程序合成（噪聲 buffer + 振盪器 + 濾波 + 包絡），不下載音檔：`gunshot`、`dryfire`、`reload`、`bat_hit`、`bat_swing`、`punch`、`footstep`、`crash`、`horn`、`tire`、`ui_*`、引擎（持續音源，依轉速）、路口聲景（持續、低音量）
+  - 程序合成（噪聲 buffer + 振盪器 + 濾波 + 包絡），不下載音檔：`gunshot`、`dryfire`、`ricochet`（跳彈 / 擊中，依 surface world / vehicle 分音色）、`reload`、`bat_hit`、`bat_swing`、`punch`、`footstep`、`crash`、`horn`、`tire`、`ui_*`、引擎（持續音源，依轉速）、路口聲景（持續、低音量）
   - 同時音源 ≤ 12（超過時丟棄最舊或最小聲者）；一次性音效 3D 衰減以 `state.x/z` 為聆聽點
-  - 訂閱：`weapon:fire / dryFire / reload / swing`、`combat:hit`、`vehicle:horn`、`vehicle:crash`、`mission:complete / fail`、`collect:*`、`ui:sound`；`settings.subscribe` 的三組音量（master × music / sfx）
+  - 訂閱：`weapon:fire / dryFire / reload / swing / impact`、`combat:hit`、`vehicle:horn`、`vehicle:crash`、`mission:complete / fail`、`collect:*`、`ui:sound`；`settings.subscribe` 的三組音量（master × music / sfx）；`weapon:impact` → `ricochet`（帶 x/z 做 3D 定位、走 sfx 群組與音源上限）
   - `state = { x, z, yaw, driving, speedKmh, rpm01, throttle, skid01, walkSpeed, grounded, nearJunction: 距離 m|null, paused }`；footstep 依 walkSpeed 與步距自行觸發；paused 時持續音源靜音
 
 ## 16. 任務：資料驅動委託（W4，src/missions/**）

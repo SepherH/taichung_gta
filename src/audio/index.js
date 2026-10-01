@@ -3,34 +3,14 @@
 // - AudioContext 延到 unlock()（首次使用者手勢）才建立並 resume；未解鎖前 play 靜默略過；無 AudioContext（node）時整個模組 no-op
 // - 音量：master × sfx（一次性音效、引擎、輪胎）、master × music（路口聲景）；settings.subscribe 即時生效
 // - 音源池 ≤ MAX_VOICES（持續音源算在內）；滿了停掉最舊的一次性音源
-// - weapon:impact → ricochet（world 石面「啾」/ vehicle 金屬「鏘」，配方在本檔 IMPACT_RECIPES）
+// - weapon:impact → ricochet（world 石面「啾」/ vehicle 金屬「鏘」，配方在 voices.js RECIPES）
 // - 一次性音效帶 opts.x / z 時以上一幀 update 的 state.x / z / yaw 為聆聽點：距離衰減（> MAX_DIST 不播）+ 左右聲像
 // - 每幀 update 不配置物件（只有腳步觸發時建立 WebAudio 節點，這是 WebAudio 一次性節點的本質）
 
-import { makeNoiseBuffers, noiseHit, toneHit } from './synth.js';
+import { makeNoiseBuffers } from './synth.js';
 import { RECIPES, LOOPS, UI_KINDS, clamp01 } from './voices.js';
 
-// ±k 的隨機音高變化（同 voices.js）
-const vary = (k) => 1 + (Math.random() * 2 - 1) * k;
-
-// 子彈擊中非角色（weapon:impact）：o.surface 'vehicle' → 金屬「鏘」，其餘（'world'）→ 石面「啾」
-const IMPACT_RECIPES = {
-  ricochet(v, t, o, nb) {
-    const p = vary(0.08);
-    if (o && o.surface === 'vehicle') {
-      // 金屬：窄帶通噪聲敲擊 + 兩個非諧和三角波共鳴
-      noiseHit(v, t, { buf: nb.white, type: 'bandpass', freq: 3200 * p, Q: 8, gain: 0.55, a: 0.001, d: 0.05 });
-      toneHit(v, t, { type: 'triangle', freq: 1850 * p, gain: 0.3, a: 0.001, d: 0.22 });
-      toneHit(v, t, { type: 'triangle', freq: 2730 * p, gain: 0.18, a: 0.001, d: 0.16 });
-      return 0.25;
-    }
-    // 石面：高通碎裂噪聲 + 由高往低滑的跳彈「啾」
-    noiseHit(v, t, { buf: nb.white, type: 'highpass', freq: 2400 * p, gain: 0.5, a: 0.001, d: 0.04 });
-    toneHit(v, t + 0.01, { type: 'sine', freq: 3400 * p, freqEnd: 1300 * p, gain: 0.16, a: 0.004, d: 0.14 });
-    return 0.17;
-  },
-};
-const ALL_RECIPES = Object.assign({}, RECIPES, IMPACT_RECIPES);
+const ALL_RECIPES = RECIPES;
 
 export const MAX_VOICES = 12;
 export const MAX_DIST = 60; // m，超過不播

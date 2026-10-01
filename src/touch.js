@@ -37,7 +37,8 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-jump', label: '跳', code: 'Space', mode: 'tap', slot: 'main', showWhen: 'walk' },
   { id: 'tb-run', label: '跑', code: 'ShiftLeft', mode: 'hold', slot: 'sec1', showWhen: 'walk' },
   { id: 'tb-enter', label: '上車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'walk' },
-  { id: ATTACK_ID, label: '攻擊', code: 'Mouse0', mode: 'tap', slot: 'attack', showWhen: 'walk' },
+  // hold：按下當幀 pressed（拳 / 棒單擊）、按住期間 down（手槍連發）
+  { id: ATTACK_ID, label: '攻擊', code: 'Mouse0', mode: 'hold', slot: 'attack', showWhen: 'walk' },
   // 互動（接委託 / 打卡 / 收集小吃）：預設隱藏，hud.setInteractPrompt 有提示時才顯示
   { id: 'tb-interact', label: '互動', code: 'KeyE', mode: 'tap', slot: 'interact', showWhen: 'walk', hidden: true },
   // 駕駛（油門 / 煞車改為踏板）

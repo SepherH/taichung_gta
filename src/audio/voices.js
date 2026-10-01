@@ -46,6 +46,21 @@ export const RECIPES = {
     }
     return 0.28;
   },
+  // 子彈打到非角色（weapon:impact）：world 石面「啾」/ vehicle 金屬「鏘」
+  ricochet(v, t, o, nb) {
+    const p = vary(0.08);
+    if (o && o.surface === 'vehicle') {
+      // 金屬：窄帶通噪聲敲擊 + 兩個非諧和三角波共鳴
+      noiseHit(v, t, { buf: nb.white, type: 'bandpass', freq: 3200 * p, Q: 8, gain: 0.55, a: 0.001, d: 0.05 });
+      toneHit(v, t, { type: 'triangle', freq: 1850 * p, gain: 0.3, a: 0.001, d: 0.22 });
+      toneHit(v, t, { type: 'triangle', freq: 2730 * p, gain: 0.18, a: 0.001, d: 0.16 });
+      return 0.25;
+    }
+    // 石面：高通碎裂噪聲 + 由高往低滑的跳彈「啾」
+    noiseHit(v, t, { buf: nb.white, type: 'highpass', freq: 2400 * p, gain: 0.5, a: 0.001, d: 0.04 });
+    toneHit(v, t + 0.01, { type: 'sine', freq: 3400 * p, freqEnd: 1300 * p, gain: 0.16, a: 0.004, d: 0.14 });
+    return 0.17;
+  },
   // 棒擊：木質 knock + 噪
   bat_hit(v, t, o, nb) {
     const p = vary(0.06);
