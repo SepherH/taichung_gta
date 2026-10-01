@@ -30,6 +30,10 @@
 //   missions.update 吃 worldStep.simDt（§20：暫停 / 面板開啟不推進、卡頓丟棄的時間不算）；
 //   夜市攤車 = loadPropModels → createPropModel('night_market_stall')，placeProp 擺在夜市外送取餐點旁離牆較遠的路側、+Z 面向道路，
 //     物理世界建好後 colliders.addStaticBox 補 WORLD 組靜態方塊（各畫質皆擺）
+// 遊戲內手機（I6b，§23.3）：createPhone（ui/phone.js）+ createPhoneLink（ui/phone-link.js 開關互斥 / 鎖輸入 / 資料注入）；
+//   T（actions phone）/ 觸控 tb-phone（tl4）在 started && !paused && !panelOpen() && !menu.isOpen() 時開；手機不列入 panelOpen（世界照跑），
+//   開啟中 input.enabled = false（syncPhone）；任務 App = missions.listings(focus)、導航 → nav.setDestination(…, 'phone')、
+//   地圖 App → 關手機開大地圖、設定 App → 關手機開暫停選單設定頁；Esc / T / 返回鈕由 phone.js keydown capture 處理
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -60,7 +64,7 @@ import { DayNight, nightMaterials, registerNight } from './daynight.js';
 import { createWeather, WEATHER_KINDS } from './weather.js';
 import { createEnvironment } from './environment.js';
 import { nextFrame } from './utils.js';
-import { applyRendererQuality, createAdaptiveResolution, isTouch, pixelRatioFor, qualityTier, setGameActive, setQualitySetting } from './mobile.js';
+import { applyRendererQuality, createAdaptiveResolution, isInputBlocked, isTouch, pixelRatioFor, qualityTier, setGameActive, setQualitySetting } from './mobile.js';
 import { bus } from './core/events.js';
 import { settings } from './core/settings.js';
 import { KEYMAP_HELP, TOUCH_HELP } from './core/actions.js';
@@ -69,6 +73,8 @@ import { createAutosave, createSaveStore, defaultSave, SAVE_VERSION } from './sa
 import { createEconomy, LOOT_MIN, LOOT_MAX } from './economy.js';
 import { createMenu } from './ui/menu.js';
 import { createMapView } from './ui/map-view.js';
+import { createPhone } from './ui/phone.js';
+import { canOpenPhone, createPhoneLink } from './ui/phone-link.js';
 import { initPhysics, PhysicsWorld } from './physics/world.js';
 import { addStaticBox, buildWorldColliders, osmWithBuildings } from './physics/colliders.js';
 import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as G_NPC_CAR, PEDESTRIAN as G_PED, DEBRIS as G_DEBRIS } from './physics/groups.js';
@@ -128,7 +134,7 @@ const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值
 // @integration-p3:pure-begin
 // HUD 底部常駐按鍵提示：由 KEYMAP_HELP / TOUCH_HELP（help）依模式取子集，不寫死按鍵文字
 const CONTROLS_HINT = {
-  walk: [['步行', 'attack'], ['步行', 'enterExit'], ['步行', 'sprint'], ['通用', 'map'], ['通用', 'pause']],
+  walk: [['步行', 'attack'], ['步行', 'enterExit'], ['步行', 'sprint'], ['通用', 'map'], ['通用', 'pause'], ['通用', 'phone']],
   drive: [['駕駛', 'horn'], ['駕駛', 'lookBack'], ['駕駛', 'enterExit'], ['通用', 'camera'], ['通用', 'pause']],
 };
 function helpItem(help, action, group = null) {
@@ -855,6 +861,50 @@ async function init() {
   // 觸控圖鑑鈕：touch.js 預設註冊為隱藏佔位；此處（input 建立 = initTouch 之後）以同 id 帶 onTap 重新註冊後顯示
   registerTouchButton({ id: 'tb-guide', label: '圖鑑', slot: 'tl3', showWhen: 'walk', onTap: () => openGuide() });
 
+  // ---------- 遊戲內手機（I6b，§23.3）----------
+  // 地圖 / 設定 App 是啟動器：先關手機再開大地圖（syncPanels 鎖輸入）/ 暫停選單設定頁（pauseGame 鎖輸入）；syncPhone 見到面板 / 暫停就不還原輸入
+  const phone = createPhone({
+    root: document.body,
+    bus,
+    isTouch: touch,
+    onOpenMap: () => {
+      phone.close();
+      bigMap.open();
+      syncPanels();
+      syncPhone();
+    },
+    onOpenSettings: () => {
+      phone.close();
+      menu.openPause('settings');
+      syncPhone();
+    },
+    onNavigate: (it) => nav.setDestination(it.x, it.z, it.title, 'phone', focus),
+  });
+  const phoneJobs = []; // missions.listings 的輸出陣列（重用）
+  const phoneLink = createPhoneLink({
+    phone,
+    input,
+    canOpen: () => canOpenPhone({ started: state.started, paused: state.paused, panelOpen: panelOpen(), menuOpen: menu.isOpen(), blocked: isInputBlocked() }),
+    canResume: () => state.started && !state.paused && !panelOpen() && !menu.isOpen(),
+    // 開啟：同 syncPanels 的鎖定（放開滑鼠鎖定、清提示、駕駛中手煞）；世界不暫停
+    onLock: () => {
+      releaseLock();
+      hud.setPrompt(null);
+      hud.setInteractPrompt?.(null);
+      if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
+    },
+    fillData: (d) => {
+      d.hour = dayNight.hour;
+      d.weatherIcon = weather.getState().icon;
+      d.money = economy.money;
+      d.jobs = missions.listings(focus, phoneJobs);
+    },
+  });
+  const syncPhone = () => phoneLink.sync();
+  const openPhone = () => phoneLink.open();
+  // 觸控手機鈕：touch.js 預設為隱藏佔位（tl4）；以同 id 帶 onTap 重新註冊後顯示（input.enabled = false 時觸控層不吃，關閉走手機內返回鈕）
+  registerTouchButton({ id: 'tb-phone', label: '手機', slot: 'tl4', showWhen: 'always', onTap: () => openPhone() });
+
   // ---------- 存檔與經濟 ----------
   let storage;
   try {
@@ -1302,6 +1352,7 @@ async function init() {
     if (open === panelWas) return open;
     panelWas = open;
     if (open) {
+      if (phone.isOpen()) phone.close(); // 面板（例：委託結算）蓋過手機：手機先關，syncPhone 見到面板開著不還原輸入
       input.enabled = false;
       releaseLock();
       hud.setPrompt(null);
@@ -1385,6 +1436,8 @@ async function init() {
   // ---------- 更新 ----------
   // 順序：輸入快照 → 選單 / 快轉 → 角色意圖 / 車輛控制 → 物理 step → 上下車 / 搶車 → 鏡頭 / HUD
   const updateGame = (dt) => {
+    // 手機開 / 關的轉換（Esc / T / 返回鈕在 keydown / click 內關手機，這裡下一幀才還原輸入）；手機開著世界照跑
+    let phoneOpen = syncPhone();
     // 全螢幕面板開啟中：世界與輸入暫停（面板自行處理 E / Esc；大地圖 / 圖鑑的 Esc 見 onPanelKey）
     if (syncPanels()) return;
     const snap = input.snapshot();
@@ -1404,6 +1457,8 @@ async function init() {
       syncPanels();
       return;
     }
+    // T：開手機（互斥條件見 canOpenPhone；開著時 input 已停用，關閉由 phone.js 的 Esc / T / 返回處理）
+    if (input.actions.pressed('phone') && openPhone()) phoneOpen = true;
     if (snap.pressed.timeSkip) {
       const fast = dayNight.toggleFast();
       hud.toast(fast ? '時間快轉中（再按一次恢復）' : '時間恢復正常', 2.5);
@@ -1412,8 +1467,9 @@ async function init() {
     lastThrottle = 0;
     if (state.mode === 'drive') {
       const v = state.vehicle;
-      v.setControls(driveControls(snap.move, snap.down.jump));
-      lastThrottle = snap.move.y;
+      // 手機開著：輸入已停用，維持手煞（不放任車子滑行）
+      v.setControls(phoneOpen ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));
+      lastThrottle = phoneOpen ? 0 : snap.move.y;
       if (input.actions.down('horn')) v.honk(); // 按住連續響（honk 自帶冷卻）
       // Q（或觸控 tb-radio 送的虛擬 KeyQ）：駕駛中 = 換台（步行時 Q 仍是換武器，見 handleWeaponInput）
       if (input.actions.pressedIn('radioNext', 'vehicle')) radio.next();
@@ -1497,6 +1553,8 @@ async function init() {
     missions.update(worldStep.simDt, missionCtx);
     syncGarbageTruck(worldStep.simDt);
     nav.update(dt, focus);
+    // 手機：開著才每幀注入時刻 / 天氣 / 金錢 / missions.listings（同一陣列重用）；update 吃渲染 dt（§20）
+    phoneLink.frame(dt);
     food.update(dt, player.pos, camera);
     blood.update(dt, camera);
     // 後座：weapons 本幀累積的鏡頭 pitch / yaw 增量 → rig（衰減回原位）；瞄準中滾輪不縮放鏡頭距離
@@ -1739,6 +1797,7 @@ async function init() {
     if (food.isOpen()) food.close();
     if (missions.isModalOpen()) missions.ui.closePanel();
     panelWas = false;
+    phoneLink.reset();
   };
 
   const startGame = (continued) => {
@@ -1788,6 +1847,7 @@ async function init() {
   const pauseGame = () => {
     if (!state.started || state.paused) return;
     state.paused = true;
+    phoneLink.reset(); // 暫停（含手機設定 App、切背景失去滑鼠鎖定）一律收起手機；繼續時不自動再開
     input.enabled = false;
     if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
     autosave.flush('pause');
@@ -1881,7 +1941,7 @@ async function init() {
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
-      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall,
+      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, phone, phoneLink,
       // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
       weather, env, radio,
       // 補手槍備彈（回實際加入數，上限 120）

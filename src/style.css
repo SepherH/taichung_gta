@@ -774,7 +774,7 @@ body.touch.swipe-mask {
 }
 
 /* 觸控 HUD 重新配置（橫向）。觸控層位置（touch.js slot，數值在本檔下方）：
-   左上小鈕 tl1–tl3 x 140–300 / y 12–60；右上小鈕 top1–3 右側 16–204 / y 12–68；右下按鈕群右側 24–238 / 底 24–222；
+   左上小鈕 tl1–tl4 x 140–356 / y 12–60；右上小鈕 top1–3 右側 16–204 / y 12–68；右下按鈕群右側 24–238 / 底 24–222；
    駕駛時右半區上方是下車 / 手煞一列（134–194px）、其下踏板（上緣 202px）。HUD 分區：
    左上 小地圖 + 血條 + 地名（x 10–130、y 10–172）；FPS 在小鈕正下方；左半欄（x 140 ～ 中線 −4）由上而下：
    提示膠囊（76–120）→ 訊息（124–188）→ 新手提示卡（192–288，只在步行）；駕駛時時速錶群組貼中線左側、底 40px；
@@ -946,7 +946,7 @@ body.touch #touch-hint:empty {
   display: none;
 }
 
-/* 觸控直向：右半在步行時只有底部按鈕群（上緣 = 底 222px）、駕駛時是下車 / 手煞一列（134–194px）+ 互動鈕列（206–262px）+ 踏板（上緣 274px），HUD 改排：
+/* 觸控直向：右半在步行時只有底部按鈕群（上緣 = 底 222px）、駕駛時是下車 / 手煞一列（134–194px）+ 互動鈕 / 換台鈕列（206–262px）+ 視角鈕（274–318px）+ 踏板（上緣 330px），HUD 改排：
    右上 時間 · 金錢（寬度讓開左上小地圖）；左半欄 提示膠囊（180–240）→ 訊息（246–326）→ 觸控按鍵提示（332–368，兩行）；
    新手提示卡（只在步行）放右半 132–272；駕駛時時速錶群組在左下（底 40px，高 88px，橫排） */
 @media (orientation: portrait) {
@@ -1209,10 +1209,12 @@ body.touch-drive .tbtn[data-show="walk"] {
   color: #7df0ff;
 }
 
-/* 左上三顆小鈕（暫停 / 地圖 / 圖鑑；隱藏的手機鈕也在第三格）：排在小地圖（120px）右側，≥ 44px */
+/* 左上小鈕（暫停 / 地圖 / 圖鑑 / 手機）：排在小地圖（120px）右側，≥ 44px；
+   手機 tl4（I6b，§23.3）= tl3 右側 +56px（x 308–356）；窄直向 / 極矮窄橫向 / 直向駕駛的改排見下方 */
 .tbtn.slot-tl1,
 .tbtn.slot-tl2,
-.tbtn.slot-tl3 {
+.tbtn.slot-tl3,
+.tbtn.slot-tl4 {
   top: calc(12px + env(safe-area-inset-top));
   width: 48px;
   height: 48px;
@@ -1231,11 +1233,17 @@ body.touch-drive .tbtn[data-show="walk"] {
   left: calc(252px + env(safe-area-inset-left));
 }
 
+.tbtn.slot-tl4 {
+  left: calc(308px + env(safe-area-inset-left));
+}
+
 /* 視角鈕（tb-view，slot-view，步行 / 駕駛共用；虛擬 KeyV 循環鏡頭段位）：
    橫向 = 右上第三格（右 148–204 / y 12–68，喇叭 top1 / 電台 top2 的左側；與左上小鈕 tl1–tl3 x 140–300 不重疊）；
-   極矮橫向（高 < 380）右上被武器面板（weapons.css，右 76–188、top 26–54）佔用 → 左移到右 196–244、48px；
-   直向右上排不下（右上第三格會壓到左上 tl2 / tl3）→ 移到左上小鈕列下方、小地圖右側（x 136–180、y 114–158；
-   在 #status 76–106 下方、提示膠囊 180 上方，直向新手提示卡 x ≥ 50% + 4 在其右側） */
+   極矮橫向（高 < 380）右上被武器面板（weapons.css，右 76–188、top 26–54）佔用 → 左移到右 196–244、48px
+   （640 寬時 x 396–444，與手機 tl4 308–356 間距 40px）；568×320 這類寬 < 640 的極矮橫向排不下 → 與左上小鈕併成一列（見下方）；
+   直向右上排不下（右上第三格會壓到左上 tl2 / tl3）→ 步行移到左上小鈕列下方、小地圖右側（x 136–180、y 114–158；
+   在 #status 76–106 下方、提示膠囊 180 上方，直向新手提示卡 x ≥ 50% + 4 在其右側）；
+   直向駕駛那裡是左半轉向區 #touch-pad → 改放右半電台鈕下方（見下方 body.touch-drive 直向規則） */
 .tbtn.slot-view {
   top: calc(12px + env(safe-area-inset-top));
   right: calc(148px + env(safe-area-inset-right));
@@ -1249,6 +1257,41 @@ body.touch-drive .tbtn[data-show="walk"] {
     right: calc(196px + env(safe-area-inset-right));
     width: 48px;
     height: 48px;
+  }
+}
+
+/* 極矮窄橫向（高 < 380 且寬 < 640，如 568×320）：tl3 右緣 300 到武器面板左緣（W − 188 = 380）只剩 80px，放不下手機 + 視角兩顆 48px →
+   左上小鈕與視角鈕併成一列 44px、間距 4px（同窄直向）：暫停 136–180、地圖 184–228、圖鑑 232–276、手機 280–324、視角 332–376
+   （與手機間距 8px、與武器面板 4px、與小地圖右緣 130 間距 6px；駕駛時換台鈕 430–486 / 喇叭 496–552 在右側） */
+@media (orientation: landscape) and (max-height: 379px) and (max-width: 639px) {
+  .tbtn.slot-tl1,
+  .tbtn.slot-tl2,
+  .tbtn.slot-tl3,
+  .tbtn.slot-tl4,
+  .tbtn.slot-view {
+    width: 44px;
+    height: 44px;
+  }
+
+  .tbtn.slot-tl1 {
+    left: calc(136px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-tl2 {
+    left: calc(184px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-tl3 {
+    left: calc(232px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-tl4 {
+    left: calc(280px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-view {
+    right: auto;
+    left: calc(332px + env(safe-area-inset-left));
   }
 }
 
@@ -1267,8 +1310,9 @@ body.touch-drive .tbtn[data-show="walk"] {
   display: none;
 }
 
-/* 窄直向（寬 ≤ 400px，如 360×640）：左上小鈕間距收為 4px、右上小鈕縮為 48px 並貼右 12px，
-   駕駛時喇叭（top1）與第三格小鈕（tl3）不重疊（原本 360 寬時重疊 12px） */
+/* 窄直向（寬 ≤ 400px，如 360×640）：左上小鈕間距收為 4px（暫停 140–188、地圖 192–240、圖鑑 244–292、手機 296–344）、
+   右上小鈕縮為 48px 並貼右 12px；步行時右上沒有鈕，手機 tl4 在 360 寬時距右緣 16px。
+   駕駛時喇叭（top1，360 寬 x 300–348）會壓到 tl4 → 直向駕駛手機改用 tl3 的位置（圖鑑步行專屬、駕駛隱藏），見下方 */
 @media (orientation: portrait) and (max-width: 400px) {
   .tbtn.slot-tl2 {
     left: calc(192px + env(safe-area-inset-left));
@@ -1276,6 +1320,10 @@ body.touch-drive .tbtn[data-show="walk"] {
 
   .tbtn.slot-tl3 {
     left: calc(244px + env(safe-area-inset-left));
+  }
+
+  .tbtn.slot-tl4 {
+    left: calc(296px + env(safe-area-inset-left));
   }
 
   .tbtn.slot-top1,
@@ -1318,9 +1366,39 @@ body.touch-drive .tbtn.slot-interact {
   height: 56px;
 }
 
+/* 直向駕駛（I6b）：上方一列放不下 暫停 / 地圖 / 手機 / 換台 / 喇叭 五顆（360 寬只有 x 140–348）→
+   手機補到 tl3 的位置（圖鑑駕駛隱藏；窄直向 244–292、其餘 252–300，與喇叭間距 ≥ 8px）；
+   換台鈕（top2，hud.js tb-radio）移到右半手煞鈕正下方（上 210–258、右 22–70，與互動鈕 106–162 間距 36px）；
+   視角鈕（tb-view）不進左半轉向區 → 換台鈕正下方（上 274–318、右 24–68，360 寬 x 292–336 > 中線 180）；踏板上緣讓到 330px */
+@media (orientation: portrait) {
+  body.touch-drive .tbtn.slot-tl4 {
+    left: calc(252px + env(safe-area-inset-left));
+  }
+
+  body.touch-drive .tbtn.slot-top2 {
+    top: calc(210px + env(safe-area-inset-top));
+    right: calc(22px + env(safe-area-inset-right));
+    width: 48px;
+    height: 48px;
+  }
+
+  body.touch-drive .tbtn.slot-view {
+    top: calc(274px + env(safe-area-inset-top));
+    right: calc(24px + env(safe-area-inset-right));
+    left: auto;
+  }
+}
+
+@media (orientation: portrait) and (max-width: 400px) {
+  body.touch-drive .tbtn.slot-tl4 {
+    left: calc(244px + env(safe-area-inset-left));
+  }
+}
+
 /* 直向右半只有 180–215px 寬，下車 / 手煞那一列放不下第三顆；左半是轉向區 #touch-pad（x 0 ～ 中線），放那裡拇指轉向時會誤觸：
    改放右半、下車鈕正下方新的一列：上 206–262、右 106–162（中心對齊下車鈕），與下車 / 手煞 12px、踏板 12px，
-   左緣距中線 ≥ 18px（360 寬時 x 198 > 180），不與 #touch-pad 重疊；踏板上緣直向時讓到 274px（上 206 + 56 + 間距 12） */
+   左緣距中線 ≥ 18px（360 寬時 x 198 > 180），不與 #touch-pad 重疊；
+   踏板上緣直向時讓到 330px（同列右側是換台鈕 210–258，其下視角鈕 274–318，再留 12px；I6b 前為 274） */
 @media (orientation: portrait) {
   body.touch-drive .tbtn.slot-interact {
     top: calc(206px + env(safe-area-inset-top));
@@ -1328,12 +1406,12 @@ body.touch-drive .tbtn.slot-interact {
   }
 
   body.touch-drive #touch-pedals {
-    padding-top: calc(274px + env(safe-area-inset-top));
+    padding-top: calc(330px + env(safe-area-inset-top));
   }
 }
 
 /* 駕駛踏板：右半區兩大塊（左煞車、右油門），步行隱藏；駕駛時隱藏視角區。
-   上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px）；直向另讓出互動鈕列（上緣 274px，見上方） */
+   上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px）；直向另讓出互動鈕列與換台 / 視角鈕（上緣 330px，見上方） */
 #touch-pedals {
   position: absolute;
   right: 0;

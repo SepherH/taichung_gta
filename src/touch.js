@@ -1,8 +1,9 @@
 // 觸控操作（B3）：左半螢幕浮動搖桿、右半螢幕拖曳轉視角 / 雙指捏合縮放（步行）或兩塊大踏板（駕駛）、虛擬按鈕
 // 一律用 Pointer Events，每個 pointerId 只綁定一個控制（搖桿 / 視角區 / 各踏板 / 各按鈕各自追蹤），多指同時操作互不搶
 // 按鈕以虛擬鍵碼寫入 Input（hold = 按住期間在 keys、按下當幀在 pressed；tap = 只在 pressed），鍵碼對齊 core/actions.js：
-//   Space 跳 / 手煞車、ShiftLeft 衝刺、KeyF 上下車 / 扶起、Mouse0 攻擊、KeyE 互動、KeyH 喇叭、Escape 暫停、KeyM 大地圖、KeyT 手機（隱藏）
+//   Space 跳 / 手煞車、ShiftLeft 衝刺、KeyF 上下車 / 扶起、Mouse0 攻擊、KeyE 互動、KeyH 喇叭、Escape 暫停、KeyM 大地圖
 // 圖鑑鈕 tb-guide 沒有對應鍵位（core/actions 無此動作）：以 onTap 回呼開啟，整合層用 registerTouchButton 以同 id 重新註冊帶入回呼後顯示
+// 手機鈕 tb-phone（I6b，§23.3）同樣以 onTap 開手機：預設為隱藏佔位，main.js 以同 id 重新註冊（slot tl4、always）後顯示
 // 搖桿推到底（≥ 0.9）= 衝刺（input.js 搖桿相容層寫入 ShiftLeft）
 // 駕駛：右半區換成 #touch-pedals（左 = 煞車、右 = 油門），深度 = 手指在踏板內的縱向位置（越下越深），寫入 input.setPedals
 // input.enabled = false（開始前 / 暫停 / 選單）時整個觸控層不吃操作，且 Input 會呼叫 onDisable 釋放所有按住中的觸控
@@ -12,8 +13,9 @@
 //   同 id 重新註冊 = 取代（放開舊按鈕並重建）；setTouchButtonVisible(id, on) 動態顯示 / 隱藏（例：tb-interact 有提示才顯示）
 // slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
 //   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊；駕駛時橫向移到下車鈕左側、直向移到右半下車鈕正下方，見 style.css slot-interact）/
-//   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、圖鑑，由左往右，排在小地圖右側；
-//   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）/ view（視角鈕 tb-view：橫向右上第三格、直向左上小鈕列下方，見 style.css slot-view）
+//   top1、top2、top3（右上小鈕，由右往左）/ tl1–tl4（左上小鈕：暫停、地圖、圖鑑、手機，由左往右，排在小地圖右側；
+//   直向駕駛時圖鑑隱藏，手機鈕補到 tl3 的位置、電台鈕移到右半手煞鈕下方，見 style.css slot-tl4）/
+//   view（視角鈕 tb-view：橫向右上第三格、直向步行左上小鈕列下方、直向駕駛右半電台鈕下方，見 style.css slot-view）
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
 // 攻擊鈕：id 為 ATTACK_ID 或 label 在 ATTACK_LABELS 內的按鈕一律改放 attack slot
 // 已移除的舊按鈕 id（DEPRECATED_IDS：翻正、靈敏度、舊揮拳、油門 / 煞車鈕）再註冊會被忽略（回傳 null），由 F 扶起與設定頁滑桿取代
@@ -30,7 +32,7 @@ const ATTACK_ID = 'tb-attack';
 const ATTACK_LABELS = ['攻擊', '揮拳'];
 export const DEPRECATED_IDS = ['tb-flip', 'tb-sens', 'tb-punch', 'tb-gas', 'tb-brake'];
 
-export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'interact', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3', 'view'];
+export const SLOTS = ['main', 'sec1', 'sec2', 'sec3', 'attack', 'interact', 'top1', 'top2', 'top3', 'tl1', 'tl2', 'tl3', 'tl4', 'view'];
 
 const DEFAULT_BUTTONS = [
   // 步行
@@ -45,12 +47,13 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-exit', label: '下車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'drive' },
   { id: 'tb-handbrake', label: '手煞', code: 'Space', mode: 'hold', slot: 'sec3', showWhen: 'drive' },
   { id: 'tb-horn', label: '喇叭', code: 'KeyH', mode: 'hold', slot: 'top1', showWhen: 'drive' },
-  // 共用：左上三顆小鈕
+  // 共用：左上小鈕（暫停 / 地圖 / 圖鑑 / 手機）
   { id: 'tb-pause', label: '暫停', code: 'Escape', mode: 'tap', slot: 'tl1', showWhen: 'always' },
   { id: 'tb-map', label: '地圖', code: 'KeyM', mode: 'tap', slot: 'tl2', showWhen: 'always' },
   // 視角（I6a，§23.2）：虛擬 KeyV = core/actions camera → main.js rig.update cycleView（段位寫回 settings、HUD 顯示「鏡頭：近 / 中 / 遠」）
   { id: 'tb-view', label: '視角', code: 'KeyV', mode: 'tap', slot: 'view', showWhen: 'always' },
-  { id: 'tb-phone', label: '手機', code: 'KeyT', mode: 'tap', slot: 'tl3', showWhen: 'always', hidden: true },
+  // 手機（I6b）：預設隱藏佔位；main.js 以同 id 帶 onTap（開手機）重新註冊後顯示（KeyT 留作無回呼時的退路）
+  { id: 'tb-phone', label: '手機', code: 'KeyT', mode: 'tap', slot: 'tl4', showWhen: 'always', hidden: true },
   // 圖鑑：整合層以同 id 重新註冊並給 onTap（開圖鑑）後才顯示；步行專屬（駕駛中不開全螢幕面板）
   { id: 'tb-guide', label: '圖鑑', onTap: () => {}, mode: 'tap', slot: 'tl3', showWhen: 'walk', hidden: true },
 ];

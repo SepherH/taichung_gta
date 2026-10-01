@@ -283,8 +283,8 @@ const pauseBtn = $('tb-pause');
 const mapBtn = $('tb-map');
 const phoneBtn = $('tb-phone');
 check(
-  '左上小鈕：暫停 / 地圖 / 手機（手機隱藏）',
-  pauseBtn.classList.contains('slot-tl1') && mapBtn.classList.contains('slot-tl2') && phoneBtn.classList.contains('slot-tl3') && phoneBtn.hidden === true && !pauseBtn.hidden && pauseBtn.attrs['data-show'] === 'always',
+  '左上小鈕：暫停 / 地圖 / 手機（手機 tl4、預設隱藏佔位，main.js 帶 onTap 重新註冊後顯示）',
+  pauseBtn.classList.contains('slot-tl1') && mapBtn.classList.contains('slot-tl2') && phoneBtn.classList.contains('slot-tl4') && phoneBtn.hidden === true && !pauseBtn.hidden && pauseBtn.attrs['data-show'] === 'always',
 );
 pauseBtn.dispatch('pointerdown', pe(12, 60, 20));
 pauseBtn.dispatch('pointerup', pe(12, 60, 20));

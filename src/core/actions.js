@@ -145,8 +145,8 @@ export const TOUCH_HELP = [
     items: [
       { keys: '左上「暫停」', action: 'pause', desc: '暫停選單' },
       { keys: '左上「地圖」', action: 'map', desc: '開 / 關大地圖' },
-      { keys: '左上「手機」', action: 'phone', desc: '開 / 關手機（任務 / 地圖 / 設定）' }, // touch.js tb-phone（I6 移到 tl4 並顯示）
-      { keys: '上方「視角」', action: 'camera', desc: '切換鏡頭距離（近 / 中 / 遠）' }, // touch.js tb-view（虛擬 KeyV；橫向右上、直向左上小鈕列下方）
+      { keys: '左上「手機」', action: 'phone', desc: '開手機（任務 / 地圖 / 設定；手機內「返回」關閉）' }, // touch.js tb-phone（slot tl4，main.js onTap 開手機）
+      { keys: '「視角」鈕', action: 'camera', desc: '切換鏡頭距離（近 / 中 / 遠）' }, // touch.js tb-view（虛擬 KeyV；橫向右上、直向步行左上小鈕列下方、直向駕駛右半電台鈕下方）
       { keys: '左上「圖鑑」', action: null, desc: '開 / 關小吃圖鑑（步行時顯示）' }, // tb-guide 無對應鍵位（onTap 開圖鑑）
       { keys: '傍晚垃圾車', action: null, desc: '16–18 時出現（小地圖紅點），3 分鐘內追上車尾點「互動」鈕倒垃圾（步行 / 駕駛皆可）' },
     ],
