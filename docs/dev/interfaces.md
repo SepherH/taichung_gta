@@ -491,7 +491,7 @@ render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 �
 | 渲染時間 `dt` | rAF 幀間隔，`core/loop.js` 夾到 `MAX_FRAME_DT` = 0.1 s | 只做插值、動畫 mixer、相機、UI / HUD、音效、特效粒子 |
 
 - **屬模擬時間**（只在固定子步推進，或每幀以 `simDt` 推進）：剛體 / 角色膠囊 / 車輛控制器（子步內）；車流車道邏輯與行人位置、擊退（traffic `_step` / traffic-peds `stepPeds`、`afterStepPeds`）；mid 級與替身行人的降頻走路、行人大腦 `brain.update` 的累積秒數（`thinkPeds(simDt)`，`simDt` 由 traffic `_step` 在子步內累加、`sync` 取走）；自建 combat 時鐘與密度管理計時（traffic.sync）；遊戲對抗時鐘 `gameTime` 與 `combat.update`、號誌相位 `lights.update`、玩家 KO 倒數、搶來 / 報廢車回收計時（main.js / loop.js）；委託 / 時段事件 / 垃圾車 `missions.update(worldStep.simDt)`（G2 起，含任務 elapsed、垃圾車行駛與車體輪子）
-- **屬渲染時間**：`InterpolatedBody.interpolate(alpha)` 擺網格、`anim.update` / 輪子 `animate`、`rig.update`、`hud` / `whud`、`audio.update`、`blood.update`、煙霧粒子、FPS、自適應解析度
+- **屬渲染時間**：選單運鏡巡覽計時（`menu-tour.js update(dt)` / `handoff(dt)`，§25）、`InterpolatedBody.interpolate(alpha)` 擺網格、`anim.update` / 輪子 `animate`、`rig.update`、`hud` / `whud`、`audio.update`、`blood.update`、煙霧粒子、FPS、自適應解析度
 - **遊戲時鐘（目前用渲染 dt，可接受）**：日夜 `dayNight.update`、自動存檔、遊玩 / 步行秒數、導航重算、補給重生；不影響物理狀態，差異只在累加器餘量（< 1 子步）與卡頓丟棄的時間
 - **速度一律 = 推進距離 ÷ 實際推進的模擬秒數**：例 行人動畫速度 = `moveD / moveT`（`moveT` 只在子步或降頻走路時累加）；某幀沒有推進（`moveT` = 0）就沿用上次速度。禁止「當幀位移 ÷ 渲染幀時間」——高於 60 Hz 時約半數幀沒有子步，會得到 0 / 加倍的速度
 - **上限**：渲染 `dt` ≤ `MAX_FRAME_DT` 0.1 s；單幀子步 ≤ `DEFAULT_MAX_SUBSTEPS` 5（= 0.083 s 模擬時間），超過即丟棄累加器餘量（`stepper.dropped` 累計）——卡頓時模擬時間會少於渲染時間，所以模擬計時必須吃 `simDt` 而不是 `dt`
@@ -746,6 +746,19 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 手機任務 App「打工」分頁：注入 jobSpots 後 `missions.listings` 帶 `category: 'job'` 項（開放中的夜市跑單 / 代客泊車，或進行中那一筆），經 I6b `fillData` → `phone.setData({ jobs })`
 - events.js（夜市外送）`update` 在 `step <= 0`（本幀無子步）時只刷新位置 / 時刻後早退，不做開放 / 抵達 / 逾時判定（同 garbage-truck.js）
 - 垃圾車仍只走純視覺車體，traffic `CAR_TYPES` 不含 garbage_truck；泊車車輛是一般 `VehicleManager` 車（不進車流）
+
+## 25. 選單運鏡巡覽（M6；`src/ui/menu-tour.js`，接線點在 `src/main.js`）
+
+未進入遊戲（開始畫面、回到主選單）時鏡頭以電影式運鏡循環巡覽全區，取代原「出生點環繞」。模組純邏輯（只 import `geom.js`），細節以檔頭為準。
+
+- **鏡位**（`tourStops`，全部由資料推導）：Tiger City / 新光三越 / 臺中國家歌劇院 / 市政府（臺灣大道市政大樓）/ 捷運市政府站 = citymodel `namedBuildings` 依名稱比對（同名取面積最大）的輪廓中心、OSM 高度、`terrain.buildingBase`；秋紅谷 = `osm.T.basins` 輪廓中心；夜市攤車 = `stallRow` 原攤車格 `pl`（缺 → `NIGHT_MARKET_DELIVERY.pickup`）。資料缺者略過。順序 = 老虎城起點的最短封閉迴圈
+- **型態**：`SHOT_TYPES` orbit 12 s / dolly 9 s / crane 10 s / road 11 s 依序輪替（road = 最近主要道路中心線上方 `ROAD_ALT` 10 m、14 m/s）；段間 Hermite 滑行（位置與速度 C1 連續、弧頂加高），秒數 = 距離 ÷ 45 m/s，夾 4–14 s；目前一輪約 138 s
+- **不穿地 / 不穿建物**：載入時以 10 Hz 取樣整輪，水平與看點循環平滑 1.2 s；高度 ≥ `floor` = max(地形（湖面取較高）+ `SAFE_CLEAR` 4 m, 水平 10 m 內建築頂 + 6 m)，並以 ≤ 12 m/s 的前後向包絡提早爬升；執行期 Catmull-Rom 內插、不配置物件
+- **時間步（§20）**：巡覽計時屬**渲染時間**——`update(dt)` 吃 `core/loop.js` 的渲染 `dt`（≤ `MAX_FRAME_DT`），不吃 `simDt`；卡頓丟子步時運鏡不變慢、與幀率無關（30 / 60 Hz 同時刻同鏡位）。暫停 / 切背景時 loop 不呼叫 `updateAttract`，計時停住。世界照常：`updateAttract` 仍為 `dayNight.update → stepWorld → updateEnvironment(dt, worldStep.simDt)`，模擬部分照舊吃 simDt；center 改為巡覽看點（`attractFocus`，原為老虎城中心）
+- **進出遊戲**：`startGame` → `tour.stop()`；`updateGame` 在 `rig.update` 之後 `tour.handoff(dt)`，1–2.5 s（距離 ÷ 80 m/s）由巡覽最後鏡位內插到 rig 鏡位（水平 smoothstep、高度後半程才下降、四元數 slerp、途中不低於 floor），之後不再動鏡頭；`quitToMenu` → `tour.start()`（時間接續，先升高再橫移回路徑）。不讀寫存檔、不碰遊戲狀態
+- **減少動態效果**：main.js 注入 `reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches`；為真時改走老虎城固定高度慢速環繞（`REDUCED_OMEGA` 0.03 rad/s、半徑 150 m、高度 max(70 m, 整圈 floor)），偏好中途切換時內插轉場
+- **效能**：每幀只做一次 Catmull-Rom + lookAt 四元數（node 實測 < 1 µs）；建路徑約 10 ms（載入時一次）；手機 / low 檔同樣生效
+- **回歸**：`node tools/test/p6-m6.mjs`（鏡位、型態秒數、60 Hz 每幀位移 ≤ 1.6 m / 轉角 ≤ 1.5°、全程 ≥ 地形 + 4 m 且不在建築內、循環接縫、handoff / start、減少動態效果、main.js 接線）
 
 ---
 

@@ -49,8 +49,8 @@ import { buildWorld, describeLocation } from './world.js';
 import { buildQiuhonggu } from './qiuhonggu.js';
 import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
-import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
-import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
+import { computeSpawn, computeParkedVehicles } from './places.js';
+import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
 import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
@@ -76,6 +76,7 @@ import { qualityBudget } from './core/quality.js';
 import { createAutosave, createSaveStore, defaultSave, SAVE_VERSION } from './save.js';
 import { createEconomy, LOOT_MIN, LOOT_MAX } from './economy.js';
 import { createMenu } from './ui/menu.js';
+import { createMenuTour } from './ui/menu-tour.js';
 import { createMapView } from './ui/map-view.js';
 import { createPhone } from './ui/phone.js';
 import { canOpenPhone, createPhoneLink } from './ui/phone-link.js';
@@ -1662,6 +1663,7 @@ async function init() {
       aim: aiming,
       onViewChange: onCamViewChange,
     });
+    tour.handoff(dt); // 剛進入遊戲：由巡覽最後鏡位平順內插到玩家鏡頭（§25），結束後不動鏡頭
 
     const loc = describeLocation(focus.x, focus.z);
     const placeId = loc.building ? loc.building.id : null;
@@ -1696,23 +1698,26 @@ async function init() {
     whud.update(dt, whudState);
   };
 
-  // 開始畫面：鏡頭緩慢環繞老虎城當作背景（世界照常更新）
-  const tiger = tigerCity();
-  const orbitCenter = new THREE.Vector3(tiger ? tiger.center.x : 0, 10, tiger ? tiger.center.z : 0);
-  let orbitT = 0;
-  let orbitY = 70;
+  // 開始畫面 / 回到主選單：電影式運鏡循環巡覽全區（ui/menu-tour.js，契約 §25；世界照常更新，center = 巡覽看點）
+  //   鏡位取 OSM 具名建築 / 秋紅谷 basin / 原攤車格；系統「減少動態效果」→ 老虎城慢速環繞；巡覽計時吃渲染 dt（§20 相機）
+  const reduceMotionMq = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const tourStall = stallSlots.find((s) => s.key === STALL_BASE_KEY) || stallSlots[0];
+  const attractFocus = new THREE.Vector3();
+  const tour = createMenuTour({
+    camera,
+    terrain,
+    buildings: cityBuildings,
+    namedBuildings,
+    roads: surfaceRoads,
+    basins: osm.T ? osm.T.basins : [],
+    stall: tourStall ? { x: tourStall.pl.x, z: tourStall.pl.z } : { ...NIGHT_MARKET_DELIVERY.pickup, source: 'NIGHT_MARKET_DELIVERY.pickup' },
+    reducedMotion: () => !!(reduceMotionMq && reduceMotionMq.matches),
+    focus: attractFocus,
+  });
   const updateAttract = (dt) => {
-    orbitT += dt * 0.05;
-    const ox = orbitCenter.x + Math.cos(orbitT) * 150;
-    const oz = orbitCenter.z + Math.sin(orbitT) * 150;
-    // 經過高樓時把鏡頭抬高，避免穿進建築
-    const tall = buildingAt(ox, oz, 25);
-    const wantY = Math.max(70, tall ? terrain.buildingBase(tall.id) + tall.height + 15 : 70);
-    orbitY += (wantY - orbitY) * Math.min(1, dt * 1.5);
-    camera.position.set(ox, orbitY, oz);
-    camera.lookAt(orbitCenter);
-    dayNight.update(dt, orbitCenter);
-    stepWorld(dt, orbitCenter);
+    tour.update(dt);
+    dayNight.update(dt, attractFocus);
+    stepWorld(dt, attractFocus);
     updateEnvironment(dt, worldStep.simDt);
   };
 
@@ -1907,6 +1912,7 @@ async function init() {
     nav.clear('map');
     blood.clear();
     dayNight.hour = save.world.hour;
+    tour.stop(); // 巡覽停止，handoff 接回玩家鏡頭
     state.started = true;
     state.paused = false;
     state.walkTime = 0;
@@ -1961,6 +1967,7 @@ async function init() {
     state.started = false;
     state.paused = false;
     input.enabled = false;
+    tour.start(); // 恢復選單巡覽（時間接續，由當下鏡頭內插回路徑）
     closePanels();
     hud.setVisible(false);
     whud.setVisible(false);
@@ -2024,7 +2031,7 @@ async function init() {
     });
     window.__game = {
       scene, camera, renderer, player, vehicles, traffic, combat, dayNight, state, input, hud, rig, terrain, qiuhonggu,
-      beginEnter, enterVehicle, exitVehicle, world, buildings, spawn, parked, updateGame: devUpdateGame, updateAttract, render,
+      beginEnter, enterVehicle, exitVehicle, world, buildings, spawn, parked, updateGame: devUpdateGame, updateAttract, menuTour: tour, render,
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
