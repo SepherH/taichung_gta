@@ -16,6 +16,11 @@ export const CONTENT_NOTICE = '本遊戲含槍械、暴力與血液畫面';
 // 設定頁的列（鍵名 / 範圍對齊契約 §2 SETTINGS_SCHEMA）
 const pct = (v) => `${Math.round(v * 100)}%`;
 const mul = (v) => `${v.toFixed(1)}×`;
+const VIEW_OPTIONS = [
+  [0, '近'],
+  [1, '中'],
+  [2, '遠'],
+];
 const SETTING_ROWS = [
   {
     key: 'quality',
@@ -33,6 +38,9 @@ const SETTING_ROWS = [
   { key: 'lookSensMouse', type: 'range', label: '滑鼠靈敏度', min: 0.3, max: 3, step: 0.1, fmt: mul },
   { key: 'lookSensTouch', type: 'range', label: '觸控靈敏度', min: 0.3, max: 3, step: 0.1, fmt: mul },
   { key: 'invertY', type: 'toggle', label: '反轉 Y 軸' },
+  // Phase 6（§23.2）：鏡頭段位（數值 option；遊戲中按 V 改段位也會寫回這兩鍵）
+  { key: 'camWalkView', type: 'segment', label: '步行鏡頭', options: VIEW_OPTIONS, note: '遊戲中按 V 也可切換' },
+  { key: 'camDriveView', type: 'segment', label: '駕駛鏡頭', options: VIEW_OPTIONS, note: '機車 / 公車 / 垃圾車依車型比例調整' },
   { key: 'volumeMaster', type: 'range', label: '主音量', min: 0, max: 1, step: 0.05, fmt: pct },
   { key: 'volumeMusic', type: 'range', label: '音樂', min: 0, max: 1, step: 0.05, fmt: pct },
   { key: 'volumeSfx', type: 'range', label: '音效', min: 0, max: 1, step: 0.05, fmt: pct },
@@ -254,7 +262,8 @@ export function createMenu({
         return b;
       });
       row.appendChild(seg);
-      update = (value) => btns.forEach((b) => b.classList.toggle('tg-on', b.dataset.value === value));
+      // dataset 一律是字串：數值 option（鏡頭段位）以字串比對
+      update = (value) => btns.forEach((b) => b.classList.toggle('tg-on', String(b.dataset.value) === String(value)));
     } else if (def.type === 'range') {
       const wrap = h('div', 'tg-range-wrap');
       const input = h('input', 'tg-range');

@@ -4,6 +4,7 @@
 // 美術實檔欄位：{ slug, name, file, title, brief, from, to, distance, timeLimit, reward, tags: [...] }；conditions 讀 raw.conditions ?? raw.tags
 //   只有 fragile / heavy / timed 進 conditions；原始 tag（含未知，如 smelly）全部保留在 tags 供 UI 顯示趣味標籤
 //   timeLimitSec：timed 者為倒數時限（超時失敗）；其餘只作提早完成加成的基準（UI 顯示「建議時間」）
+// 正規化結果一律帶 category: 'mission'（§23.4，手機任務 App 分類）
 // from / to 以地標 id（數字或字串皆以字串比對）或 slug 對應；對不到（或起訖相同）的委託丟棄，只 console.info 一次
 
 export const CARGO_MANIFEST_URL = 'art/cargo/manifest.json';
@@ -126,6 +127,7 @@ function normalizeItem(raw, index, lmIndex) {
     conditions: normTags(condRaw, true),
     tags: normTags(raw.tags ?? raw.conditions, false),
     distance: Number.isFinite(dist) && dist > 0 ? Math.round(dist) : 0,
+    category: 'mission', // §23.4 列表類別（manifest 可省略；一律為 'mission'）
   };
 }
 

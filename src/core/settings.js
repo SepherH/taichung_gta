@@ -1,4 +1,4 @@
-// 玩家設定（契約 §2 / §11 / §21）：畫質、鏡頭靈敏度、反轉 Y、音量、FPS 顯示、提示、UI 縮放、血液顯示、後座力、瞄準輔助、天氣
+// 玩家設定（契約 §2 / §11 / §21 / §23.2）：畫質、鏡頭靈敏度、反轉 Y、鏡頭段位、音量、FPS 顯示、提示、UI 縮放、血液顯示、後座力、瞄準輔助、天氣
 // 以 JSON 存在 storage 的 SETTINGS_KEY；storage 由呼叫端注入（node 測試用假物件），預設為安全包裝的 localStorage
 // 讀寫全部 try/catch：無痕模式 / 停用儲存 / node 無 window 時只存在記憶體，不丟例外
 // 舊版遷移：SETTINGS_KEY 不存在時讀舊的三段靈敏度（input.js 早期版本存的 'low'/'mid'/'high'）當初值；
@@ -14,6 +14,9 @@ export const SETTINGS_SCHEMA = {
   lookSensMouse: { type: 'number', min: 0.3, max: 3.0, step: 0.1, default: 1.0, label: '滑鼠視角靈敏度' },
   lookSensTouch: { type: 'number', min: 0.3, max: 3.0, step: 0.1, default: 1.0, label: '觸控視角靈敏度' },
   invertY: { type: 'boolean', default: false, label: '反轉 Y 軸' },
+  // Phase 6（§23.2）：鏡頭段位（camera.js WALK_DISTS / CAR_DISTS·BIKE_DISTS 索引）；舊存檔缺鍵 → 預設 1（中段）
+  camWalkView: { type: 'number', min: 0, max: 2, step: 1, default: 1, label: '步行鏡頭距離' },
+  camDriveView: { type: 'number', min: 0, max: 2, step: 1, default: 1, label: '駕駛鏡頭距離' },
   volumeMaster: { type: 'number', min: 0, max: 1, default: 0.8, label: '主音量' },
   volumeMusic: { type: 'number', min: 0, max: 1, default: 0.6, label: '音樂音量' },
   volumeSfx: { type: 'number', min: 0, max: 1, default: 0.9, label: '音效音量' },

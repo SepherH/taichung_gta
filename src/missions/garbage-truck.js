@@ -23,6 +23,9 @@
 // 事件（bus）：event:available { id, title, x, z, kind: 'truck' } / event:closed { id } / event:start { id, title, limitSec, leftSec, kind: 'truck' }
 //   / event:complete { id, reward, timeSec, leftSec } / event:fail { id, reason } / ui:sound（不發 nav:*：目標會移動，靠標記追）
 // routeFor(player, rng) → [{x,z}, …] 或 { points }：整合層包 navigation.js findRoute(graph, a, b).points（a / b 為玩家附近 150–300 m 的道路點與更遠的道路點）
+// 警示燈（Phase 6，§23.5）：truck().beaconT = 本趟出現以來的模擬秒數（只隨 update(simDt) 推進，暫停 / 無子步不動）；
+//   truck().beaconLevel = beaconLevel(beaconT, ctx.night)（ctx.night 0–1 由整合層傳 dayNight.night，未傳 = 0 白天）；
+//   整合層把材質名含 beacon 者交給 applyBeacon(materials, level)（不再 registerNight，否則 daynight 每幀覆寫 emissiveIntensity）
 
 import { EVENT_PRIORITY, inHourWindow } from './events.js';
 
@@ -61,6 +64,35 @@ export function truckRearPoint(x, z, heading, out = { x: 0, z: 0 }) {
   out.x = x + REAR_Z * Math.sin(heading);
   out.z = z + REAR_Z * Math.cos(heading);
   return out;
+}
+
+// 警示燈亮度（emissiveIntensity 倍率）：純函式。t = 模擬秒數、night = 0–1（boolean 亦可）；
+//   旋轉燈脈衝 BEACON_HZ（0 → 1 的 smooth 方波，亮段佔 ~半週期），白天上限 BEACON_DAY、夜間 BEACON_NIGHT（night 線性內插）
+export const BEACON_HZ = 1.5;
+export const BEACON_DAY = 0.15;
+export const BEACON_NIGHT = 2;
+export const BEACON_COLOR = 0xffa020; // glb beacon 材質 emissive 為黑時補上的琥珀色
+export function beaconLevel(t, night) {
+  const n = night === true ? 1 : Math.min(1, Math.max(0, Number(night) || 0));
+  const tt = Number.isFinite(t) ? t : 0;
+  const pulse = 0.5 + 0.5 * Math.cos(2 * Math.PI * BEACON_HZ * tt); // t = 0 時最亮
+  const k = pulse * pulse * (3 - 2 * pulse); // smoothstep：亮暗段拉開
+  return (BEACON_DAY + (BEACON_NIGHT - BEACON_DAY) * n) * k;
+}
+
+// 把亮度套到材質（鴨子型別，不 import three）：名稱含 beacon 者 emissiveIntensity = level；emissive 為黑（glb 沒帶 emission）時補 BEACON_COLOR
+//   回傳套用的材質數
+export function applyBeacon(materials, level) {
+  let n = 0;
+  const v = Number.isFinite(level) && level > 0 ? level : 0;
+  for (const m of materials || []) {
+    if (!m || typeof m.name !== 'string' || !m.name.includes('beacon')) continue;
+    const e = m.emissive;
+    if (e && typeof e.setHex === 'function' && !(e.r > 0 || e.g > 0 || e.b > 0)) e.setHex(BEACON_COLOR);
+    m.emissiveIntensity = v;
+    n++;
+  }
+  return n;
 }
 
 const angleWrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -119,15 +151,27 @@ export function createRouteFollower(points, { speed = 5, stopEveryM = 0, stopSec
   function step(dt) {
     if (length <= 0) return out;
     const t = Number.isFinite(dt) && dt > 0 ? dt : 0;
-    if (stopLeft > 0) {
-      stopLeft = Math.max(0, stopLeft - t);
-    } else {
-      let d = speed * t;
+    // 停靠開始 / 結束落在本步中間時，剩餘時間接著用（行駛 ↔ 停靠），結果與步長無關（多子步幀 = 逐子步）
+    let rem = t;
+    for (let guard = 0; rem > 1e-12 && guard < 64; guard++) {
+      if (stopLeft > 0) {
+        const u = Math.min(stopLeft, rem);
+        stopLeft -= u;
+        rem -= u;
+        if (stopLeft < 1e-12) stopLeft = 0;
+        continue;
+      }
+      if (!(speed > 0)) break;
+      let d = speed * rem;
       if (stopEveryM > 0 && sinceStop + d >= stopEveryM) {
         d = stopEveryM - sinceStop;
+        rem = Math.max(0, rem - d / speed);
         sinceStop = 0;
         stopLeft = stopSec;
-      } else sinceStop += d;
+      } else {
+        sinceStop += d;
+        rem = 0;
+      }
       s += dir * d;
       if (s >= length) {
         s = length - (s - length);
@@ -163,16 +207,17 @@ export function createGarbageTruck({
   const id = def.id;
   let completed = 0;
   let cooldownUntil = 0;
-  let run = null; // { follower, elapsed, engaged, lostT }
+  let run = null; // { follower, elapsed, engaged, lostT, beaconT }
   let hourNow = null;
   let hasPos = false;
   let px = 0;
   let pz = 0;
   let retryT = 0;
   let disposed = false;
+  let night = 0;
 
   const rear = { x: 0, z: 0 };
-  const truckOut = { x: 0, z: 0, heading: 0, speed: 0, stopped: false, rearX: 0, rearZ: 0, distM: null, phase: 'open', beacon: true };
+  const truckOut = { x: 0, z: 0, heading: 0, speed: 0, stopped: false, rearX: 0, rearZ: 0, distM: null, phase: 'open', beacon: true, beaconT: 0, beaconLevel: 0 };
   const marker = { x: 0, z: 0, kind: 'event-truck', label: '垃圾車' };
   const markerList = [];
   const objectiveOut = { text: `追上垃圾車，到車尾${interactLabel} 倒垃圾`, timerSec: 0, distM: null, rewardNow: 0 };
@@ -224,6 +269,8 @@ export function createGarbageTruck({
     truckOut.rearZ = rear.z;
     truckOut.distM = hasPos ? Math.hypot(st.x - px, st.z - pz) : null;
     truckOut.phase = run.engaged ? 'chase' : 'open';
+    truckOut.beaconT = run.beaconT;
+    truckOut.beaconLevel = beaconLevel(run.beaconT, night);
   }
 
   function tryOpen(step) {
@@ -236,7 +283,7 @@ export function createGarbageTruck({
       return;
     }
     retryT = 0;
-    run = { follower, elapsed: 0, engaged: false, lostT: 0 };
+    run = { follower, elapsed: 0, engaged: false, lostT: 0, beaconT: 0 };
     syncTruck();
     emit('event:available', { id, title: def.title, x: truckOut.x, z: truckOut.z, kind: 'truck' });
   }
@@ -294,15 +341,23 @@ export function createGarbageTruck({
       }
     }
     hourNow = readHour(ctx);
-    if (!run) {
-      tryOpen(step);
+    if (ctx && ctx.night !== undefined) night = ctx.night === true ? 1 : Math.min(1, Math.max(0, Number(ctx.night) || 0));
+    // 本幀無子步（simDt = 0，§20）：只刷新玩家距離，不開放 / 追車 / 判定——狀態轉換只發生在模擬時間有推進的幀，>60 Hz 與 60 Hz 落在同一子步
+    if (step <= 0) {
+      if (run) syncTruck();
       return;
+    }
+    if (!run) {
+      // 開放視為發生在本幀模擬區間的起點：同一幀接著推進 step（多子步幀與逐子步推進的 elapsed / 車位一致）
+      tryOpen(step);
+      if (!run) return;
     }
     if (!run.engaged && busy()) {
       close();
       return;
     }
     run.elapsed += step;
+    run.beaconT += step;
     run.follower.step(step);
     syncTruck();
     if (run.elapsed >= def.limitSec) {

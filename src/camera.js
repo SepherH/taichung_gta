@@ -11,6 +11,11 @@
 //
 // 距離三段（opts.cycleView = 本幀按 V 循環）：步行 WALK_DISTS（滾輪另可連續微調 WALK_DIST_MIN–MAX，V 會重設到該段）；
 //   駕駛 CAR_DISTS / 兩輪 BIKE_DISTS 乘 distScale 相對參考車（轎車 / 機車 camScale）的比例，隨速度再拉遠（最多 SPEED_DIST_MAX）
+//   步行 / 駕駛段位各自記憶（上下車不互相覆蓋）；滾輪微調只改 rig.dist、不持久化
+// Phase 6（§23.2）：段位持久化由整合層接 core/settings（camWalkView / camDriveView）：
+//   rig.setViews({ walk, drive }) 載入 / 設定頁變更時套用（不觸發 onViewChange）、rig.getViews() → { walk, drive }；
+//   rig.cycleView(kind?) 供觸控鈕等 V 鍵以外的入口循環段位（kind 省略 = 依上一幀是否駕駛）；
+//   段位因 V（opts.cycleView）或 cycleView() 改變時，下一次 update 呼叫 opts.onViewChange(kind: 'walk'|'drive', index)（同幀最多一次）
 // 步行越肩：鏡頭與注視點同時往右移 SHOULDER_OFFSET，側向掃掠貼牆時隨可用空間縮小
 // FOV：步行 WALK_FOV；駕駛依車速 DRIVE_FOV_MIN → DRIVE_FOV_MAX（0 → FOV_SPEED_KMH 線性、平滑）
 // 駕駛自動回正：RECENTER_IDLE 秒無轉視角輸入且前進車速 > RECENTER_MIN_KMH，yaw 以 RECENTER_RATE 轉回車尾（倒車不回正）；
@@ -72,6 +77,16 @@ export const AIM_BLEND_SEC = 0.15; // 進出瞄準的內插時間（s）
 export const RECOIL_TAU = 0.12; // 後座偏移衰減時間常數（s）：約 0.5 s 後剩 < 2%
 const RECOIL_MAX = 12 * DEG; // 後座累積偏移上限（rad），連射也不會把鏡頭甩飛
 
+// 段位循環：0 → 1 → 2 → 0（n = 段數）
+export function nextView(index, n = WALK_DISTS.length) {
+  return (index + 1) % n;
+}
+
+// 合法段位 = 0..n−1 的整數
+export function isViewIndex(v, n = WALK_DISTS.length) {
+  return Number.isInteger(v) && v >= 0 && v < n;
+}
+
 // 步行目標點離腳底高度（m）
 export function walkEyeHeight(playerHeight = DEFAULT_HEIGHT) {
   return playerHeight - EYE_BELOW_TOP;
@@ -91,6 +106,8 @@ export class CameraRig {
     this.walkView = DEFAULT_VIEW; // 步行段位（WALK_DISTS 索引）
     this.driveView = DEFAULT_VIEW; // 駕駛段位（CAR_DISTS / BIKE_DISTS 索引）
     this.dist = WALK_DISTS[DEFAULT_VIEW]; // 步行距離（滾輪連續微調；V 重設到段位值）
+    this._driving = false; // 上一幀是否駕駛（cycleView() 省略 kind 時用）
+    this._viewChanged = null; // 待通知的段位變更 kind（'walk' | 'drive'），update 內呼叫 onViewChange 後清除
     this.time = 0;
     this.lastManual = -10;
     this.nominal = null; // 平滑後的名目距離（首幀直接取目標值）
@@ -121,6 +138,32 @@ export class CameraRig {
     if (Number.isFinite(yaw)) this.recoilYaw = clamp(this.recoilYaw + yaw, -RECOIL_MAX, RECOIL_MAX);
   }
 
+  // 套用段位（設定載入 / 設定頁變更）；非 0–2 整數的欄位忽略；walk 同時把 dist 重設為該段距離；不觸發 onViewChange
+  setViews({ walk, drive } = {}) {
+    if (isViewIndex(walk, WALK_DISTS.length)) {
+      this.walkView = walk;
+      this.dist = WALK_DISTS[walk];
+    }
+    if (isViewIndex(drive, CAR_DISTS.length)) this.driveView = drive;
+  }
+
+  getViews() {
+    return { walk: this.walkView, drive: this.driveView };
+  }
+
+  // 循環段位（V 鍵以外的入口，例：觸控鈕）；kind 省略 = 依上一幀是否駕駛。回傳 { kind, index }；下一次 update 觸發 onViewChange
+  cycleView(kind = this._driving ? 'drive' : 'walk') {
+    if (kind === 'drive') {
+      this.driveView = nextView(this.driveView, CAR_DISTS.length);
+      this._viewChanged = 'drive';
+      return { kind, index: this.driveView };
+    }
+    this.walkView = nextView(this.walkView, WALK_DISTS.length);
+    this.dist = WALK_DISTS[this.walkView];
+    this._viewChanged = 'walk';
+    return { kind: 'walk', index: this.walkView };
+  }
+
   // 目前名目距離（未含遮擋縮短）；opts 同 update
   targetDistance(opts = {}) {
     if (!opts.driving) return this.dist;
@@ -132,23 +175,22 @@ export class CameraRig {
 
   // focus：跟隨目標位置；opts：{ driving, vehicleYaw, speed（m/s，負 = 倒車）, distScale（車種 camScale）, twoWheeler,
   //   cycleView（本幀按 V）, lookBack（按住 C，駕駛時看車後方）, clearRadius, clearHeight（駕駛時車身水平半徑 / 車頂上方高度）,
-  //   aim（步行肩後瞄準，駕駛時忽略）}
+  //   aim（步行肩後瞄準，駕駛時忽略）, onViewChange(kind, index)（段位改變時，同幀最多一次）}
   update(dt, input, focus, opts = {}) {
     this.time += dt;
     const driving = !!opts.driving;
+    this._driving = driving;
     const speed = opts.speed || 0;
     const m = input.consumeMouse();
     if (m.dx !== 0 || m.dy !== 0) this.lastManual = this.time;
     this.yaw -= m.dx * LOOK_RAD_PER_UNIT;
     this.pitch = clamp(this.pitch + m.dy * PITCH_PER_UNIT, PITCH_MIN, PITCH_MAX);
-    if (driving) {
-      if (opts.cycleView) this.driveView = (this.driveView + 1) % CAR_DISTS.length;
-    } else {
-      if (opts.cycleView) {
-        this.walkView = (this.walkView + 1) % WALK_DISTS.length;
-        this.dist = WALK_DISTS[this.walkView];
-      }
-      if (m.wheel !== 0) this.dist = clamp(this.dist * (1 + m.wheel * 0.001), WALK_DIST_MIN, WALK_DIST_MAX);
+    if (opts.cycleView) this.cycleView(driving ? 'drive' : 'walk');
+    if (!driving && m.wheel !== 0) this.dist = clamp(this.dist * (1 + m.wheel * 0.001), WALK_DIST_MIN, WALK_DIST_MAX);
+    if (this._viewChanged) {
+      const kind = this._viewChanged;
+      this._viewChanged = null;
+      if (opts.onViewChange) opts.onViewChange(kind, kind === 'drive' ? this.driveView : this.walkView);
     }
 
     // 開車時：RECENTER_IDLE 秒沒轉視角且前進中，鏡頭以固定角速度轉回車尾（起步 RECENTER_RAMP 秒內漸增）

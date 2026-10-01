@@ -36,6 +36,7 @@ export const EVENT_MAX_REWARD = 5000;
 
 export const NIGHT_MARKET_DELIVERY = {
   id: 'night-market-delivery',
+  category: 'nearby', // §23.4 列表類別（時段事件 / 垃圾車 = 附近）
   title: '夜市時段限定外送',
   window: { start: 18, end: 24 }, // 遊戲內時刻區間 [start, end)；end < start 表跨午夜
   pickup: { slug: 'shinkong-topcity-district', name: '新光三越．大遠百商圈', x: 557.2, z: -125.1, radius: 12 },

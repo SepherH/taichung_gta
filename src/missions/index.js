@@ -22,12 +22,19 @@
 //   eventObjective() / eventActive()：外送進行中回外送，否則追車中回垃圾車（truck.objective() / truck.active()），都沒有 → null
 //   eventRunning(id)：該 id 的事件自身是否進行中（外送已取餐 / 垃圾車追車中）；不受另一事件影響（main.js event:closed 提示用）
 //   整合層：missions.truckState() → { x, z, heading, … } 或 null（每幀擺垃圾車模型）、missions.truck（完整 API）
+// 打工委託（jobs.js，契約 §23.4，規則見該檔頭）：建構時注入 jobSpots / spawnValetCar / releaseValetCar（/ healthOf）；缺任一 → 該打工不作用
+//   互斥：委託 / 外送 / 追垃圾車 / 打工同一把鎖（isBusy）；打工進行中隱藏委託起點 / 取餐點、垃圾車不出現；nearest() 打工接單點（2.5 m）優先於外送取餐點
+//   markers() 附加 kind 'job-start' / 'job-dest' / 'job-car'；目標列在無委託 / 外送 / 追車時顯示打工倒數；bus 事件 job:*（統計同 trackMissionStats）
+//   serialize() 的 events 欄位合併打工（id 'night-market-run' / 'valet-parking'）；missions.jobs（完整 API）、jobObjective() / jobActive()
+// 手機任務 App（§23.3）：listings(pos, out) → [{ id, title, category: 'mission'|'nearby'|'job', reward, distanceM, navigable, x, z, active }]
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
 import { createBeaconPool } from './light-pillar.js';
 import { createMissionUi, formatClock, CONDITION_LABELS } from './ui.js';
 import { createTimedEvents, DEFAULT_EVENTS } from './events.js';
-import { createGarbageTruck, GARBAGE_TRUCK_EVENT } from './garbage-truck.js';
+import { createGarbageTruck, GARBAGE_TRUCK_EVENT, garbageReward } from './garbage-truck.js';
+import { createJobs, JOB_DEFS } from './jobs.js';
+import { eventReward, ROUTE_FALLBACK_K } from './events.js';
 
 export const OPEN_SLOTS = 3;
 export const COOLDOWN_SEC = 120;
@@ -48,6 +55,8 @@ export const MISSION_STAT_EVENTS = {
   'mission:fail': 'missionsFailed',
   'event:complete': 'missionsDone',
   'event:fail': 'missionsFailed',
+  'job:complete': 'missionsDone',
+  'job:fail': 'missionsFailed',
 };
 
 // 訂閱 MISSION_STAT_EVENTS，每次 +1 寫進 stats（整合層的 extraStats）；回傳取消訂閱函式
@@ -120,6 +129,12 @@ export function createMissions({
   // 目標列 / 字幕的操作詞（互動提示本身由 hud.js 轉觸控文字，不經此處）：整合層依 mobile.js isTouch() 注入，不在 missions 內讀 DOM / navigator
   isTouch = false,
   interactLabel = isTouch ? '點「互動」鈕' : '按 E',
+  // 打工（§23.4）：jobSpots = { stall, stallBack, sidewalkNear, valet: [...] }；spawnValetCar / releaseValetCar / healthOf 由整合層注入；jobs: false 關閉
+  jobSpots = null,
+  spawnValetCar = null,
+  releaseValetCar = null,
+  healthOf = null,
+  jobs: jobDefs = JOB_DEFS,
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -142,9 +157,23 @@ export function createMissions({
   } };
   const truck = garbageTruck === false || typeof routeFor !== 'function' ? null : createGarbageTruck({
     def: garbageTruck && typeof garbageTruck === 'object' ? garbageTruck : GARBAGE_TRUCK_EVENT,
-    getGameHour, routeFor, isBusy: () => !!run || evActive(), addMoney, bus: truckBus, now, rng, interactLabel,
+    getGameHour, routeFor, isBusy: () => !!run || evActive() || jobsEngaged(), addMoney, bus: truckBus, now, rng, interactLabel,
   });
   const truckEngaged = () => !!(truck && truck.isEngaged());
+  const jobBus = {
+    emit: (name, payload) => {
+      onJobEvent(name, payload);
+      emit(name, payload);
+    },
+    on: (name, fn) => (bus && typeof bus.on === 'function' ? bus.on(name, fn) : null),
+  };
+  const jobs = jobDefs === false ? null : createJobs({
+    bus: jobBus, now, rng, addMoney, getGameHour, spots: jobSpots, spawnValetCar, releaseValetCar, healthOf, routeLength,
+    isBusy: () => !!run || evActive() || truckEngaged(), defs: Array.isArray(jobDefs) ? jobDefs : JOB_DEFS, isTouch, interactLabel,
+  });
+  const jobsEngaged = () => !!(jobs && jobs.isEngaged());
+  // 互斥鎖（§23.4）：同時只能一個進行中
+  const isBusy = () => !!run || evActive() || truckEngaged() || jobsEngaged();
 
   let catalog = [];
   const bySlug = new Map();
@@ -194,7 +223,7 @@ export function createMissions({
       beacon: beacons.acquire('start', m.from.x, m.from.z, m.slug),
       inter: { id: `mission:${m.slug}`, text: `按 E 接委託：${m.title}`, dist: 0, priority: PRIORITY, act: () => openCard(off) },
     };
-    off.beacon.group.visible = !run && !evActive() && !truckEngaged();
+    off.beacon.group.visible = !isBusy();
     offers.push(off);
     emit('mission:available', { id: m.slug, title: m.title, x: m.from.x, z: m.from.z });
     return off;
@@ -263,7 +292,7 @@ export function createMissions({
   }
 
   function openCard(off) {
-    if (disposed || run || ui.isOpen() || offers.indexOf(off) < 0) return;
+    if (disposed || isBusy() || ui.isOpen() || offers.indexOf(off) < 0) return;
     pending = off.m;
     if (headless) {
       accept();
@@ -430,6 +459,10 @@ export function createMissions({
   }
 
   function onPlayerKo() {
+    if (!run && jobsEngaged()) {
+      jobs.onPlayerKo();
+      return;
+    }
     if (!run) return;
     if (has(run.m, 'fragile')) addDamage(KO_DAMAGE_PCT);
     else fail('ko');
@@ -459,6 +492,10 @@ export function createMissions({
       truck.update(step, ctx);
       syncTruckBeacons();
     }
+    if (jobs) {
+      jobs.update(step, ctx);
+      syncJobBeacons();
+    }
     refreshT += step;
     if (refreshT >= 1) {
       refreshT = 0;
@@ -475,6 +512,7 @@ export function createMissions({
         ui.setObjective(pm.retryText || (pm.retryText = `回到${pm.from.name}重接委託`), '', objDist, '');
       } else if (evActive()) eventObjectiveRow();
       else if (truckEngaged()) eventObjectiveRow(truck.objective());
+      else if (jobsEngaged()) eventObjectiveRow(jobs.objective());
       else ui.setObjective(null);
       return;
     }
@@ -516,6 +554,9 @@ export function createMissions({
     // 垃圾車投入口：追車中只認它；未追車時靠近車尾也可直接倒（同為 priority 3，投入口優先）
     const tk = truck ? truck.nearest(pos) : null;
     if (tk || truckEngaged()) return tk;
+    // 打工：進行中只認打工（送餐）；未進行時接單點（2.5 m）優先於外送取餐點 / 委託起點
+    const jb = jobs ? jobs.nearest(pos) : null;
+    if (jb || jobsEngaged()) return jb;
     if (evActive()) return null;
     let bestOff = null;
     let bestD = Infinity;
@@ -547,6 +588,7 @@ export function createMissions({
     }
     if (evActive()) return pushEventMarkers();
     if (truckEngaged()) return pushTruckMarkers();
+    if (jobsEngaged()) return pushJobMarkers();
     for (let i = 0; i < offers.length && i < markerPool.length; i++) {
       const mk = markerPool[i];
       const m = offers[i].m;
@@ -557,7 +599,14 @@ export function createMissions({
       markerList.push(mk);
     }
     if (timed) pushEventMarkers();
-    return truck ? pushTruckMarkers() : markerList;
+    if (truck) pushTruckMarkers();
+    return jobs ? pushJobMarkers() : markerList;
+  }
+
+  function pushJobMarkers() {
+    const list = jobs.markers();
+    for (let i = 0; i < list.length; i++) markerList.push(list[i]);
+    return markerList;
   }
 
   function pushTruckMarkers() {
@@ -606,7 +655,8 @@ export function createMissions({
   }
 
   function abandon() {
-    if (!run && evActive()) timed.abandon();
+    if (!run && jobsEngaged()) jobs.abandon();
+    else if (!run && evActive()) timed.abandon();
     else if (!run && truckEngaged()) truck.abandon();
     else fail('abandon');
   }
@@ -643,8 +693,54 @@ export function createMissions({
     const on = truckEngaged();
     if (on === truckWasEngaged) return;
     truckWasEngaged = on;
-    if (!run && !evActive()) setStartBeaconsVisible(!on);
-    for (const [key, b] of evBeacons) if (key.startsWith('start:')) b.group.visible = !on && !run;
+    if (!run && !evActive() && !jobsEngaged()) setStartBeaconsVisible(!on);
+    for (const [key, b] of evBeacons) if (key.startsWith('start:')) b.group.visible = !on && !run && !jobsEngaged();
+  }
+
+  // ---------- 打工 ----------
+  const JOB_FAIL_TEXT = {
+    timeout: '時間到了，客人等不及先走了（不扣錢）。',
+    vehicle: '跑單只能用走的！開車太久，老闆把單收回去了（不扣錢）。',
+    ko: '你被擊倒，打工泡湯了（不扣錢）。',
+    abandon: '你放棄了這份打工（不扣錢）。',
+    destroyed: '客人的車毀了……泊車亭請你明天不用來了（不扣錢）。',
+    lost: '你把客人的車丟在路邊跑太遠，泊車亭把車收回去了（不扣錢）。',
+  };
+
+  function onJobEvent(name, p) {
+    if (name === 'job:start') {
+      objKeyT = -1;
+      objKeyD = -1;
+      ui.subtitle(p.id === 'valet-parking'
+        ? `接下代客泊車！${formatClock(p.limitSec)} 內把指定車開進車格停穩`
+        : `接下跑單！${formatClock(p.limitSec)} 內走路把餐點送給 ${p.customers} 位客人，到客人旁${interactLabel} 送餐`);
+    } else if (name === 'job:stage' && p.stage !== 'deliver') ui.subtitle(p.text);
+    else if (name === 'job:complete') ui.subtitle(`打工完成！入帳 NT$${p.reward}`);
+    else if (name === 'job:fail') ui.subtitle(JOB_FAIL_TEXT[p.reason] || '打工失敗了（不扣錢）。');
+  }
+
+  // 打工光柱：依 jobs.markers() 重建（只在標記集合變動時）；job-start 用 'job' 色、job-dest 用 'dest'、job-car 不立光柱（跟著車走）
+  const jobBeacons = [];
+  let jobBeaconVer = -1;
+  let jobsWasEngaged = false;
+  function syncJobBeacons() {
+    const on = jobsEngaged();
+    if (on !== jobsWasEngaged) {
+      jobsWasEngaged = on;
+      if (!run && !evActive() && !truckEngaged()) setStartBeaconsVisible(!on);
+      for (const [key, b] of evBeacons) if (key.startsWith('start:')) b.group.visible = !on && !run && !truckEngaged();
+    }
+    const ver = jobs.markersVersion();
+    if (ver === jobBeaconVer) return;
+    jobBeaconVer = ver;
+    for (const b of jobBeacons) beacons.release(b);
+    jobBeacons.length = 0;
+    const list = jobs.markers();
+    for (let i = 0; i < list.length; i++) {
+      const mk = list[i];
+      if (mk.kind === 'job-car') continue;
+      jobBeacons.push(beacons.acquire(mk.kind === 'job-start' ? 'job' : 'dest', mk.x, mk.z, 'job'));
+    }
   }
 
   function evBeacon(key, kind, x, z, owner) {
@@ -672,13 +768,13 @@ export function createMissions({
       const defs = timed.defs();
       for (let i = 0; i < defs.length; i++) {
         const d = defs[i];
-        if (timed.isOpen(d.id)) evBeacon(`start:${d.id}`, 'start', d.pickup.x, d.pickup.z, d.id).group.visible = !run && !truckEngaged();
+        if (timed.isOpen(d.id)) evBeacon(`start:${d.id}`, 'start', d.pickup.x, d.pickup.z, d.id).group.visible = !run && !truckEngaged() && !jobsEngaged();
       }
     }
     const on = !!act;
     if (on !== evWasActive) {
       evWasActive = on;
-      if (!run) setStartBeaconsVisible(!on);
+      if (!run && !jobsEngaged()) setStartBeaconsVisible(!on);
     }
   }
 
@@ -697,6 +793,64 @@ export function createMissions({
     ui.setObjective(o.text, objTimer, objDist, '', o.timerSec < 15);
   }
 
+  // ---------- 手機任務 App 列表（§23.3 / §23.4）----------
+  const listPool = [];
+  let listN = 0;
+  function listItem(id, title, category, reward, x, z, isActive, pos) {
+    let it = listPool[listN];
+    if (!it) listPool[listN] = it = { id: '', title: '', category: '', reward: 0, distanceM: null, navigable: false, x: 0, z: 0, active: false };
+    listN++;
+    it.id = id;
+    it.title = title;
+    it.category = category;
+    it.reward = Math.max(0, Math.round(Number(reward) || 0));
+    it.x = x;
+    it.z = z;
+    it.active = isActive;
+    const hasXZ = Number.isFinite(x) && Number.isFinite(z);
+    it.distanceM = hasXZ && pos && Number.isFinite(pos.x) && Number.isFinite(pos.z) ? Math.round(Math.hypot(x - pos.x, z - pos.z)) : null;
+    it.navigable = hasXZ && (isActive || !isBusy());
+    return it;
+  }
+
+  // 委託（mission）/ 時段事件與垃圾車（nearby）/ 打工（job）；reward = 預估；out 陣列與元素物件重用
+  function listings(pos, out = []) {
+    out.length = 0;
+    listN = 0;
+    if (disposed) return out;
+    if (run) out.push(listItem(run.m.slug, run.m.title, 'mission', run.m.reward, run.m.to.x, run.m.to.z, true, pos));
+    else for (let i = 0; i < offers.length; i++) {
+      const m = offers[i].m;
+      out.push(listItem(m.slug, m.title, 'mission', m.reward, m.from.x, m.from.z, false, pos));
+    }
+    if (timed) {
+      const act = timed.active();
+      if (act) {
+        const o = timed.objective();
+        const defs = timed.defs();
+        let title = act.id;
+        for (let i = 0; i < defs.length; i++) if (defs[i].id === act.id) title = defs[i].title;
+        out.push(listItem(act.id, title, 'nearby', o ? o.rewardNow : 0, act.to.x, act.to.z, true, pos));
+      } else {
+        const defs = timed.defs();
+        for (let i = 0; i < defs.length; i++) {
+          const d = defs[i];
+          if (!timed.isOpen(d.id)) continue;
+          const est = eventReward((Number.isFinite(d.minDestM) ? d.minDestM : 150) * ROUTE_FALLBACK_K, 0);
+          out.push(listItem(d.id, d.title, 'nearby', est, d.pickup.x, d.pickup.z, false, pos));
+        }
+      }
+    }
+    if (truck && truck.isOpen()) {
+      const st = truck.truck();
+      const def = truck.def();
+      const o = truck.objective();
+      out.push(listItem(def.id, def.title, 'nearby', o ? o.rewardNow : garbageReward(def.limitSec), st.x, st.z, truckEngaged(), pos));
+    }
+    if (jobs) jobs.listings(pos, out);
+    return out;
+  }
+
   // ---------- 存檔（§18 missions）----------
   function serialize() {
     const t = now();
@@ -710,8 +864,9 @@ export function createMissions({
       const ev = timed.serialize();
       if (Object.keys(ev.completed).length || Object.keys(ev.cooldowns).length) out.events = ev;
     }
-    if (truck) {
-      const tv = truck.serialize();
+    for (const src of [truck, jobs]) {
+      if (!src) continue;
+      const tv = src.serialize();
       if (Object.keys(tv.completed).length || Object.keys(tv.cooldowns).length) {
         const ev = out.events || (out.events = { completed: {}, cooldowns: {} });
         Object.assign(ev.completed, tv.completed);
@@ -756,6 +911,10 @@ export function createMissions({
       truck.restore(src.events);
       syncTruckBeacons();
     }
+    if (jobs) {
+      jobs.restore(src.events);
+      syncJobBeacons();
+    }
     refreshOffers();
   }
 
@@ -773,6 +932,8 @@ export function createMissions({
     if (run) endRun();
     if (timed) timed.dispose();
     if (truck) truck.dispose();
+    if (jobs) jobs.dispose();
+    jobBeacons.length = 0;
     evBeacons.clear();
     disposed = true;
     offers.length = 0;
@@ -815,6 +976,10 @@ export function createMissions({
     events: timed,
     truck,
     truckState: () => (truck ? truck.truck() : null),
+    jobs,
+    jobObjective: () => (jobs && jobs.objective()) || null,
+    jobActive: () => (jobs && jobs.active()) || null,
+    listings,
     // 除錯 / 測試
     catalog: () => catalog,
     source: () => source,

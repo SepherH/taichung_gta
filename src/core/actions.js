@@ -3,6 +3,7 @@
 // reserved：預留動作（尚無功能，說明表不列）；hold：按住有意義（否則只看「本幀剛按下」）
 // 三個與舊版衝突的鍵：H 說明 → 喇叭（說明移到暫停選單）、R 翻車 → 裝填（翻車改 F 扶起）、E 揮拳 → 互動（攻擊改左鍵）
 // Phase 4（§12）：aim / interact / reload 取消預留；Q 由電台改為武器循環（radio 移除）；1 / 2 / 3 直選武器
+// Phase 6（§23.3）：phone（T）取消預留，列入說明表；實際開手機由整合層接 ui/phone.js
 // Phase 5：情境動作 CONTEXT_ACTIONS——與 ACTIONS 共用按鍵、只在特定模式有效（Q：步行 = weaponCycle、駕駛 = radioNext）
 //   不放進 ACTIONS（ACTIONS 維持「同一 code 只綁一個 action」）；以 reader.pressedIn(action, mode) / actionForKey(code, mode) 分流
 
@@ -21,7 +22,7 @@ export const ACTIONS = {
   slot1: { keys: ['Digit1'], label: '空手', hold: false },
   slot2: { keys: ['Digit2'], label: '球棒', hold: false },
   slot3: { keys: ['Digit3'], label: '手槍', hold: false },
-  phone: { keys: ['KeyT'], label: '手機', hold: false, reserved: true },
+  phone: { keys: ['KeyT'], label: '手機', hold: false },
   map: { keys: ['KeyM'], label: '大地圖', hold: false },
   pause: { keys: ['Escape', 'KeyP'], label: '暫停', hold: false },
   timeSkip: { keys: ['KeyN'], label: '時間快轉', hold: false },
@@ -81,7 +82,7 @@ export const KEYMAP_HELP = [
       { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 倒垃圾 / 收集小吃 / 撿彈藥）' },
       { keys: 'F', action: 'enterExit', desc: '上車 / 搶車' },
       { keys: '滑鼠移動', action: null, desc: '轉動視角（點畫面鎖定滑鼠，Esc 解除）' },
-      { keys: '滾輪', action: null, desc: '拉近 / 拉遠鏡頭（瞄準中不縮放）' },
+      { keys: '滾輪', action: null, desc: '拉近 / 拉遠鏡頭微調（按 V 回到段位；瞄準中不縮放）' },
     ],
   },
   {
@@ -100,7 +101,8 @@ export const KEYMAP_HELP = [
   {
     group: '通用',
     items: [
-      { keys: 'V', action: 'camera', desc: '切換鏡頭距離（三段）' },
+      { keys: 'V', action: 'camera', desc: '切換鏡頭距離（近 / 中 / 遠；步行與駕駛各自記憶）' },
+      { keys: 'T', action: 'phone', desc: '開 / 關手機（任務 / 地圖 / 設定）' },
       { keys: 'M', action: 'map', desc: '開 / 關大地圖' },
       { keys: 'Esc / P', action: 'pause', desc: '暫停選單（暫停中按 P 繼續）' },
       { keys: 'N', action: 'timeSkip', desc: '時間快轉' },
@@ -143,6 +145,8 @@ export const TOUCH_HELP = [
     items: [
       { keys: '左上「暫停」', action: 'pause', desc: '暫停選單' },
       { keys: '左上「地圖」', action: 'map', desc: '開 / 關大地圖' },
+      { keys: '左上「手機」', action: 'phone', desc: '開 / 關手機（任務 / 地圖 / 設定）' }, // touch.js tb-phone（I6 移到 tl4 並顯示）
+      { keys: '右上「視角」', action: 'camera', desc: '切換鏡頭距離（近 / 中 / 遠）' }, // I6 註冊 tb-view（虛擬 KeyV）
       { keys: '左上「圖鑑」', action: null, desc: '開 / 關小吃圖鑑（步行時顯示）' }, // tb-guide 無對應鍵位（onTap 開圖鑑）
       { keys: '傍晚垃圾車', action: null, desc: '16–18 時出現（小地圖紅點），3 分鐘內追上車尾點「互動」鈕倒垃圾（步行 / 駕駛皆可）' },
     ],

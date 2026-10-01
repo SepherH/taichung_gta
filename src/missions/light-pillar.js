@@ -1,12 +1,12 @@
 // 任務光柱（契約 §16）：半透明加色圓柱 + 緩慢脈動；物件池（幾何共用、材質每柱一份以便各自脈動）
-// 起點 kind 'start'（金黃）、目的地 kind 'dest'（青藍）；柱高 220 m，高過七期最高樓，遠處也看得到
+// 起點 kind 'start'（金黃）、目的地 kind 'dest'（青藍）、打工接單點 kind 'job'（紫）；柱高 220 m，高過七期最高樓，遠處也看得到
 // update 只改既有物件的 opacity / scale，不配置新物件
 // 檔名刻意避開 beacon 等廣告阻擋字樣（原 beacon.js 會被瀏覽器阻擋外掛攔下，整個模組圖不執行）
 import * as THREE from 'three';
 
 export const BEACON_HEIGHT = 220;
 export const BEACON_RADIUS = 2.4;
-export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff };
+export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff }; // job = 打工接單點（§23.4）
 const BASE_OPACITY = 0.3;
 const PULSE_SPEED = 1.6; // rad/s，約 4 s 一個週期
 
@@ -45,7 +45,7 @@ export function createBeaconPool({ scene, heightAt = null } = {}) {
   // 取一根光柱放到 (x, z)；owner 供呼叫端辨識
   function acquire(kind, x, z, owner = null) {
     const b = pool.pop() || build();
-    b.kind = kind === 'dest' ? 'dest' : 'start';
+    b.kind = BEACON_COLORS[kind] !== undefined ? kind : 'start';
     b.owner = owner;
     b.phase = live.length * 1.3;
     const color = BEACON_COLORS[b.kind];

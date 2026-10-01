@@ -10,6 +10,9 @@ export const MARKER_COLORS = {
   'event-start': '#8dff3a',
   'event-dest': '#2ee86a',
   'event-truck': '#ff4f6d', // 垃圾車事件（missions/garbage-truck.js markers()；目標會移動，小地圖超出半徑時貼邊）
+  'job-start': '#9b7bff', // 打工接單點（missions/jobs.js：夜市攤位 / 泊車亭）
+  'job-dest': '#d6c8ff', // 打工目的地（跑單客人 / 泊車車格；大地圖畫圖釘）
+  'job-car': '#f4f4f4', // 代客泊車指定車（會移動，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';

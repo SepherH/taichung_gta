@@ -397,7 +397,7 @@ async function scenario(env) {
 
 // ======================= 6b. 委託統計（missionsDone / missionsFailed）計入時段事件 =======================
 {
-  check('MISSION_STAT_EVENTS：委託與事件的完成 / 失敗對應 missionsDone / missionsFailed', MISSION_STAT_EVENTS['mission:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['event:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['mission:fail'] === 'missionsFailed' && MISSION_STAT_EVENTS['event:fail'] === 'missionsFailed' && Object.keys(MISSION_STAT_EVENTS).length === 4);
+  check('MISSION_STAT_EVENTS：委託與事件的完成 / 失敗對應 missionsDone / missionsFailed', MISSION_STAT_EVENTS['mission:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['event:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['mission:fail'] === 'missionsFailed' && MISSION_STAT_EVENTS['event:fail'] === 'missionsFailed' && MISSION_STAT_EVENTS['job:complete'] === 'missionsDone' && MISSION_STAT_EVENTS['job:fail'] === 'missionsFailed' && Object.keys(MISSION_STAT_EVENTS).length === 6);
   const withStats = async (extra) => {
     const E = setupMs(extra);
     const stats = { missionsDone: 0, missionsFailed: 0, shotsFired: 7 };

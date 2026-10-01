@@ -1,0 +1,321 @@
+/* 遊戲內手機（由 src/ui/phone.js import；契約 §23.3）：全部 ph- 前綴；z-index 80（全螢幕面板帶 80–89，只在遊戲中開）
+   右下滑出；上緣讓開右上 #status（top 16 + 高 36），不遮擋關鍵 HUD（右上時間 / 金錢、小地圖 + 血條）：
+   - 桌機（橫向）：right 16 / bottom 16，寬 320，高 min(560, 100vh − 80)；左下小地圖（≤ 18 + 200 寬）不重疊；
+     會蓋住右下時速錶與中下提示——手機開啟中輸入已鎖、手煞，兩者無用
+   - 觸控橫向：right 12 / bottom 12 / top 64，寬 clamp(260, 40vw, 320)；左上小地圖 + tl1–tl4 小鈕（x ≤ 356）在 667 寬以上不重疊
+   - 觸控直向：left / right 12、top 184（讓開左上小地圖 + 血條 + 地名：10 + 162 + 12）、bottom 12，寬 = 100vw − 24（≤ 400）
+   觸控目標一律 ≥ 44px；安全區以 env(safe-area-inset-*) 內縮；介面大小讀 --tg-ui-scale（同 menu.css） */
+
+.ph-phone {
+  --ph-s: var(--tg-ui-scale, 1);
+  --ph-accent: #ffd23f;
+  --ph-line: rgba(255, 255, 255, 0.14);
+  position: fixed;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 80;
+  width: 320px;
+  height: min(560px, calc(100vh - 80px - env(safe-area-inset-bottom)));
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 10px 12px 12px;
+  border: 3px solid #2a2f45;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(18, 24, 48, 0.96), rgba(8, 11, 24, 0.96));
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(15px * var(--ph-s));
+  line-height: 1.4;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  animation: ph-slide-in 0.22s ease-out;
+}
+
+.ph-phone[hidden],
+.ph-phone [hidden] {
+  display: none !important;
+}
+
+@keyframes ph-slide-in {
+  from {
+    transform: translate(40px, 60%);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ph-phone {
+    animation: none;
+  }
+}
+
+.ph-phone button {
+  min-width: 44px;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+/* 狀態列 */
+.ph-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 6px 6px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--ph-line);
+}
+
+.ph-bar-clock {
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-bar-money {
+  margin-left: auto;
+  color: var(--ph-accent);
+}
+
+/* 鎖屏 */
+.ph-lock {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.ph-lock-clock {
+  font-size: calc(56px * var(--ph-s));
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 2px;
+}
+
+.ph-lock-weather {
+  font-size: calc(20px * var(--ph-s));
+  opacity: 0.85;
+}
+
+.ph-unlock {
+  margin-top: 16px;
+  padding: 0 18px;
+  border: 1px solid var(--ph-line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 首頁：App 圖示格 */
+.ph-home {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  align-content: start;
+  gap: 12px;
+  padding: 18px 4px;
+}
+
+.ph-app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 76px;
+  padding: 8px 0;
+  border: none;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ph-app:hover,
+.ph-app:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.ph-app-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.ph-app-label {
+  font-size: 13px;
+}
+
+.ph-badge {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 10px;
+  background: #e0392b;
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* 任務 App */
+.ph-jobs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ph-tabs {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.ph-tab {
+  flex: 1;
+  border: 1px solid var(--ph-line);
+  border-radius: 12px;
+  background: transparent;
+  white-space: nowrap;
+}
+
+.ph-tab.ph-on {
+  border-color: var(--ph-accent);
+  background: rgba(255, 210, 63, 0.18);
+  color: var(--ph-accent);
+  font-weight: bold;
+}
+
+.ph-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ph-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--ph-line);
+}
+
+.ph-row.ph-active .ph-row-title {
+  color: var(--ph-accent);
+}
+
+.ph-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ph-row-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: bold;
+}
+
+.ph-row-meta {
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.ph-go {
+  flex: none;
+  padding: 0 14px;
+  border: 1px solid var(--ph-accent);
+  border-radius: 12px;
+  background: rgba(255, 210, 63, 0.15);
+  color: var(--ph-accent);
+}
+
+.ph-go:disabled {
+  border-color: var(--ph-line);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: default;
+}
+
+.ph-empty {
+  padding: 24px 0;
+  text-align: center;
+  opacity: 0.6;
+}
+
+/* 底部返回 */
+.ph-nav {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding-top: 8px;
+  border-top: 1px solid var(--ph-line);
+}
+
+.ph-back {
+  min-width: 120px;
+  border: none;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 觸控橫向 */
+.ph-phone.ph-touch {
+  top: calc(64px + env(safe-area-inset-top));
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  width: clamp(260px, 40vw, 320px);
+  height: auto;
+  border-radius: 22px;
+}
+
+/* 觸控直向：讓開左上小地圖 + 血條 + 地名（10 + 162），左右各留 12 */
+@media (orientation: portrait) {
+  .ph-phone.ph-touch {
+    top: calc(184px + env(safe-area-inset-top));
+    left: calc(12px + env(safe-area-inset-left));
+    width: auto;
+    max-width: 400px;
+    margin-left: auto;
+  }
+}
+
+/* 矮橫向（高 ≤ 420，如 844×390）：收緊內距與鎖屏字級 */
+@media (max-height: 420px) {
+  .ph-phone {
+    padding: 6px 10px 8px;
+  }
+
+  .ph-home {
+    padding: 8px 4px;
+    gap: 8px;
+  }
+
+  .ph-app {
+    min-height: 64px;
+  }
+
+  .ph-lock-clock {
+    font-size: 40px;
+  }
+}

@@ -14,7 +14,7 @@ export const TAP_PX = 6; // 移動小於此值視為點擊
 const BTN_ZOOM = 1.5;
 const WHEEL_K = 0.0015;
 
-// 標記顏色（src/map/marker-colors.js，與小地圖同源）/ 圖例文字（MARKER_LABELS）/ 圖釘樣式（PIN_KINDS）：三者同一份 kind 清單，含時段事件 event-start / event-dest 與垃圾車 event-truck（圓點）
+// 標記顏色（src/map/marker-colors.js，與小地圖同源）/ 圖例文字（MARKER_LABELS）/ 圖釘樣式（PIN_KINDS）：三者同一份 kind 清單，含時段事件 event-start / event-dest、垃圾車 event-truck（圓點）與打工 job-start / job-dest（圖釘）/ job-car
 export { MARKER_COLORS };
 export const MARKER_LABELS = {
   'mission-start': '委託起點',
@@ -26,9 +26,12 @@ export const MARKER_LABELS = {
   'event-start': '外送取餐點',
   'event-dest': '外送送達點',
   'event-truck': '垃圾車',
+  'job-start': '打工接單點',
+  'job-dest': '打工目的地',
+  'job-car': '泊車指定車',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
-export const PIN_KINDS = new Set(['dest', 'mission-dest', 'event-dest']);
+export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);
 const ROUTE_COLOR = '#35f2ff';
 const PLAYER_COLOR = '#ffd23f';
 

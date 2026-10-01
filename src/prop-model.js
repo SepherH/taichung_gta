@@ -6,7 +6,7 @@
 //   材質 bulb 帶 emission、招牌材質帶微弱 emission（夜間發光由呼叫端以 propEmissiveMaterials 登記 daynight）
 // 畫質：各級都載入同一個 glb（攤車 2314 tris / 116 KB，在 low 預算內），不做材質降級；
 //   castShadow / receiveShadow 一律開，low 由 applyRendererQuality 關掉 renderer.shadowMap（與車輛相同）
-// 本檔頂層不 import three（GLTFLoader 於載入時動態 import）：propPlacement / placeProp / propWorldPoint / parsePropManifest 可在 node 無頭測試
+// 本檔頂層不 import three（GLTFLoader 於載入時動態 import）：propPlacement / placeProp / propWorldPoint / parsePropManifest / propColliderBox 可在 node 無頭測試
 const BASE_URL = import.meta.env?.BASE_URL ?? './';
 export const DEFAULT_PROP_MANIFEST = `${BASE_URL}models/props/manifest.json`;
 
@@ -93,6 +93,29 @@ async function doLoad(manifestUrl, fetchImpl) {
 // manifest 條目（未知 id → null）；glb 載入失敗時仍可查尺寸 / counter
 export function propInfo(id) {
   return entries.get(id) || null;
+}
+
+// 碰撞盒（docs/dev/interfaces.md §23.1，攤車本地座標、公尺）：半尺寸 halfW（本地 X）/ halfD（本地 Z）/ halfH，
+//   off* = 盒中心相對 glb 原點（底面中心）的偏移；攤車半寬 1.11 = 2.1 / 2 + 遮雨棚每側外伸 0.06（盒寬與棚同寬 2.22）
+export const PROP_COLLIDERS = {
+  night_market_stall: { halfW: 1.11, halfD: 0.78, halfH: 1.52, offX: 0, offY: 1.52, offZ: 0 },
+};
+
+// placement（placeProp / propPlacement 回傳 { x, y, z, yaw }）→ physics/colliders.js addStaticBox 參數 { x, y, z, yaw, width, depth, height }
+//   （y = 盒底面；offX / offZ 依 yaw 轉到世界）；未登記於 PROP_COLLIDERS → 退回 manifest 外接盒（中心在原點正上方）；兩者皆無 → null
+export function propColliderBox(id, placement) {
+  const p = placement || {};
+  const x = Number(p.x) || 0;
+  const y = Number(p.y) || 0;
+  const z = Number(p.z) || 0;
+  const yaw = Number(p.yaw) || 0;
+  const c = PROP_COLLIDERS[id];
+  if (c) {
+    const [dx, , dz] = rotateLocal(c.offX, c.offZ, yaw);
+    return { x: x + dx, y: y + c.offY - c.halfH, z: z + dz, yaw, width: c.halfW * 2, depth: c.halfD * 2, height: c.halfH * 2 };
+  }
+  const e = propInfo(id);
+  return e ? { x, y, z, yaw, width: e.width, depth: e.depth, height: e.height } : null;
 }
 
 // 已載入模型的共用材質（所有複本共用）

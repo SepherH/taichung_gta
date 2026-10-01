@@ -175,7 +175,7 @@ function fakeStorage(init = {}) {
       all.showBlood === true && all.recoil === 1 && all.aimAssist === true && all.weather === 'auto',
     JSON.stringify(all),
   );
-  check('settings：schema 有 14 個鍵（§2 十個 + §11 三個 + §21 weather）', Object.keys(SETTINGS_SCHEMA).length === 14 && Object.keys(all).length === 14);
+  check('settings：schema 有 16 個鍵（§2 十個 + §11 三個 + §21 weather + §23.2 camWalkView / camDriveView）', Object.keys(SETTINGS_SCHEMA).length === 16 && Object.keys(all).length === 16);
   check(
     'settings：§21 weather schema（enum auto / clear / rain / fog、預設 auto）',
     SETTINGS_SCHEMA.weather.type === 'enum' && SETTINGS_SCHEMA.weather.values.join(',') === 'auto,clear,rain,fog' && SETTINGS_SCHEMA.weather.default === 'auto' && SETTINGS_SCHEMA.weather.label === '天氣',
@@ -393,7 +393,7 @@ function fakeStorage(init = {}) {
   check('actions：同一 code 不重複綁兩個 action', dups.length === 0, dups.join(' '));
   check('actions：pause 例外（Escape / KeyP 同屬 pause）', owner.get('Escape') === 'pause' && owner.get('KeyP') === 'pause');
   const reserved = names.filter((n) => ACTIONS[n].reserved);
-  check('actions：預留動作只剩 phone（aim / interact / reload 已取消預留）', reserved.join(',') === 'phone', reserved.join(','));
+  check('actions：無預留動作（Phase 6 phone 已取消預留；aim / interact / reload 於 Phase 4 取消）', reserved.length === 0, reserved.join(','));
 
   const helpShape = (help) =>
     Array.isArray(help) && help.every((g) => ['步行', '駕駛', '通用'].includes(g.group) && Array.isArray(g.items) && g.items.every((it) => typeof it.keys === 'string' && typeof it.desc === 'string' && (it.action === null || ACTIONS[it.action])));
