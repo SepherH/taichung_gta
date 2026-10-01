@@ -7,7 +7,7 @@
 //   行為（node 可執行、不 import three / rapier）：save.js validateSave 接受合法 missions.events、格式錯誤整欄丟棄且不影響其他欄位、
 //     存讀來回；audio getOutput() 解鎖前 null、解鎖後 { ctx, out: master }；雨聲 loop 依 state.rain 開關、暫停靜音；
 //     radio 接 audio.getOutput() 時輸出接 master；loop.js worldStep.simDt（step 後 = simDt、resetPerf 歸零）；
-//     missions 的 events.serialize → validateSave → events.restore 來回
+//     missions 的 events.serialize → validateSave → events.restore 來回；選單天氣列（menu.js getSetting / setSetting 本體）寫入 settings.weather 並持久化
 import { register } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -314,6 +314,35 @@ class FakeAudioContext {
   check('worldStep.simDt：step 後 = 本幀 simDt（1/30 s → 2 子步）', Math.abs(ws.simDt - 2 / 60) < 1e-9, String(ws.simDt));
   ws.resetPerf();
   check('worldStep.simDt：resetPerf（每幀開頭）歸零 → 暫停 / 面板開啟時天氣不推進', ws.simDt === 0);
+}
+
+// ---------- 選單天氣列 → settings.weather（正式路徑，非 fallback） ----------
+// 取 menu.js 原始碼中的 getSetting / setSetting 本體，接真的 core/settings（假 storage）執行，避免 menu.js 的 DOM 依賴
+{
+  const { createSettings, SETTINGS_KEY } = await import('../../src/core/settings.js');
+  const menuSrc = read('src/ui/menu.js');
+  const a = menuSrc.indexOf('  const localVals = {};');
+  const b = menuSrc.indexOf('    return ok;\n  };', a);
+  check('menu.js：可取出 getSetting / setSetting 本體', a > 0 && b > a);
+  const body = menuSrc.slice(a, b + '    return ok;\n  };'.length);
+  const make = new Function('settings', 'bus', 'SETTING_ROWS', 'LOCAL_FALLBACK_EVENTS', `${body}\nreturn { getSetting, setSetting, localVals };`);
+  const m = new Map();
+  const storage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+  const settings = createSettings({ storage });
+  const evs = [];
+  const bus = { emit: (n, p) => evs.push([n, p]) };
+  const rows = [{ key: 'weather', type: 'segment', fallback: 'auto' }];
+  const menu = make(settings, bus, rows, { weather: 'weather:setting' });
+  check('天氣列初值讀 settings.weather（auto）', menu.getSetting('weather') === 'auto' && settings.get('weather') === 'auto');
+  const ok = menu.setSetting('weather', 'rain');
+  check(
+    '天氣列點「雨」→ settings.set 成功、寫入 settings.weather 並持久化、不走本地 fallback',
+    ok === true && settings.get('weather') === 'rain' && JSON.parse(m.get(SETTINGS_KEY)).weather === 'rain' && !('weather' in menu.localVals),
+  );
+  check('天氣列仍 emit weather:setting { value: rain }（整合層即時套用）', JSON.stringify(evs.at(-1)) === JSON.stringify(['weather:setting', { value: 'rain' }]));
+  check('重新整理（新 settings 實例、同 storage）→ weather 仍為 rain', createSettings({ storage }).get('weather') === 'rain');
+  const bad = menu.setSetting('weather', 'snow');
+  check('非法天氣值 → settings 拒收、維持 rain', bad === false && settings.get('weather') === 'rain');
 }
 
 console.log(`${failed ? 'FAIL' : 'PASS'} ${failed ? failed : passed}/${passed + failed}`);

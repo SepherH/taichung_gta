@@ -1,4 +1,4 @@
-// 玩家設定（契約 §2 / §11）：畫質、鏡頭靈敏度、反轉 Y、音量、FPS 顯示、提示、UI 縮放、血液顯示、後座力、瞄準輔助
+// 玩家設定（契約 §2 / §11 / §21）：畫質、鏡頭靈敏度、反轉 Y、音量、FPS 顯示、提示、UI 縮放、血液顯示、後座力、瞄準輔助、天氣
 // 以 JSON 存在 storage 的 SETTINGS_KEY；storage 由呼叫端注入（node 測試用假物件），預設為安全包裝的 localStorage
 // 讀寫全部 try/catch：無痕模式 / 停用儲存 / node 無 window 時只存在記憶體，不丟例外
 // 舊版遷移：SETTINGS_KEY 不存在時讀舊的三段靈敏度（input.js 早期版本存的 'low'/'mid'/'high'）當初值；
@@ -24,6 +24,8 @@ export const SETTINGS_SCHEMA = {
   showBlood: { type: 'boolean', default: true, label: '顯示血液' },
   recoil: { type: 'number', min: 0.2, max: 1.0, step: 0.1, default: 1.0, label: '後座力' },
   aimAssist: { type: 'boolean', default: true, label: '瞄準輔助' }, // 只作用於觸控
+  // Phase 5（§21.1）：'auto' = 晴 / 雨 / 霧隨時間變化；其他 = 固定該天氣
+  weather: { type: 'enum', values: ['auto', 'clear', 'rain', 'fog'], default: 'auto', label: '天氣' },
 };
 
 function defaults() {

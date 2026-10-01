@@ -172,10 +172,19 @@ function fakeStorage(init = {}) {
   check(
     'settings：預設值',
     all.quality === 'auto' && all.lookSensMouse === 1 && all.lookSensTouch === 1 && all.invertY === false && all.volumeMaster === 0.8 && all.volumeMusic === 0.6 && all.volumeSfx === 0.9 && all.showFps === false && all.showHints === true && all.uiScale === 1 &&
-      all.showBlood === true && all.recoil === 1 && all.aimAssist === true,
+      all.showBlood === true && all.recoil === 1 && all.aimAssist === true && all.weather === 'auto',
     JSON.stringify(all),
   );
-  check('settings：schema 有 13 個鍵（§2 十個 + §11 三個）', Object.keys(SETTINGS_SCHEMA).length === 13 && Object.keys(all).length === 13);
+  check('settings：schema 有 14 個鍵（§2 十個 + §11 三個 + §21 weather）', Object.keys(SETTINGS_SCHEMA).length === 14 && Object.keys(all).length === 14);
+  check(
+    'settings：§21 weather schema（enum auto / clear / rain / fog、預設 auto）',
+    SETTINGS_SCHEMA.weather.type === 'enum' && SETTINGS_SCHEMA.weather.values.join(',') === 'auto,clear,rain,fog' && SETTINGS_SCHEMA.weather.default === 'auto' && SETTINGS_SCHEMA.weather.label === '天氣',
+  );
+  check(
+    'settings：normalizeSetting weather 只收四個合法值',
+    ['auto', 'clear', 'rain', 'fog'].every((v) => normalizeSetting('weather', v) === v) &&
+      normalizeSetting('weather', 'snow') === undefined && normalizeSetting('weather', 'Rain') === undefined && normalizeSetting('weather', 1) === undefined && normalizeSetting('weather', null) === undefined,
+  );
   check(
     'settings：§11 schema（showBlood / aimAssist boolean、recoil 0.2–1.0 step 0.1）',
     SETTINGS_SCHEMA.showBlood.type === 'boolean' && SETTINGS_SCHEMA.aimAssist.type === 'boolean' && SETTINGS_SCHEMA.recoil.type === 'number' &&
@@ -217,6 +226,9 @@ function fakeStorage(init = {}) {
     ['aimAssist', null],
     ['recoil', Infinity],
     ['recoil', 'max'],
+    ['weather', 'snow'],
+    ['weather', ''],
+    ['weather', 2],
   ];
   const rejected = bad.every(([k, v]) => s.set(k, v) === false);
   check('settings：非法值回 false 且不存', rejected && JSON.stringify(s.getAll()) === before);
@@ -225,6 +237,11 @@ function fakeStorage(init = {}) {
     'settings：§11 三鍵 set / 持久化',
     s.set('showBlood', false) && s.get('showBlood') === false && s.set('aimAssist', false) && s.get('aimAssist') === false && s.set('recoil', 0.33) && s.get('recoil') === 0.3 &&
       JSON.parse(st.m.get(SETTINGS_KEY)).recoil === 0.3 && JSON.parse(st.m.get(SETTINGS_KEY)).showBlood === false,
+  );
+  check(
+    'settings：weather 四值皆可 set / 持久化（最後 fog）',
+    ['clear', 'rain', 'auto', 'fog'].every((v) => s.set('weather', v) === true && s.get('weather') === v) && JSON.parse(st.m.get(SETTINGS_KEY)).weather === 'fog' &&
+      createSettings({ storage: st }).get('weather') === 'fog',
   );
 
   // 訂閱
@@ -258,6 +275,7 @@ function fakeStorage(init = {}) {
   s.reset();
   check('settings：reset() 全部回預設並存檔', s.get('invertY') === false && s.get('lookSensMouse') === 1 && JSON.parse(st.m.get(SETTINGS_KEY)).invertY === false);
   check('settings：reset() 含 §11 三鍵', s.get('showBlood') === true && s.get('aimAssist') === true && s.get('recoil') === 1 && JSON.parse(st.m.get(SETTINGS_KEY)).recoil === 1);
+  check('settings：reset() 含 weather → auto', s.get('weather') === 'auto' && JSON.parse(st.m.get(SETTINGS_KEY)).weather === 'auto');
 }
 {
   // 舊鍵遷移
@@ -297,6 +315,10 @@ function fakeStorage(init = {}) {
   check('settings：§11 三鍵損毀 → showBlood / aimAssist 預設 true、recoil clamp 0.2', sb.get('showBlood') === true && sb.get('aimAssist') === true && sb.get('recoil') === 0.2);
   const sOld = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ quality: 'low', uiScale: 1.2 }) }) });
   check('settings：Phase 3 舊設定（無 §11 鍵）→ 原值保留、新鍵補預設', sOld.get('quality') === 'low' && sOld.get('uiScale') === 1.2 && sOld.get('showBlood') === true && sOld.get('recoil') === 1 && sOld.get('aimAssist') === true);
+  const sP4 = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ quality: 'high', showBlood: false, recoil: 0.5, aimAssist: false }) }) });
+  check('settings：Phase 4 舊設定（無 weather 鍵）→ 原值保留、weather 補 auto', sP4.get('quality') === 'high' && sP4.get('showBlood') === false && sP4.get('recoil') === 0.5 && sP4.get('weather') === 'auto');
+  const sw = createSettings({ storage: fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ weather: 'snow' }) }) });
+  check('settings：存檔內 weather 非法 → auto', sw.get('weather') === 'auto');
   // storage 丟例外（無痕模式）
   const throwing = {
     getItem() {
