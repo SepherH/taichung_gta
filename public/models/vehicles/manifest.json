@@ -205,6 +205,49 @@
       },
       "triangles": 4959,
       "bytes": 129040
+    },
+    {
+      "id": "garbage_truck",
+      "name": "垃圾車",
+      "file": "garbage_truck.glb",
+      "length": 7.373,
+      "width": 2.67,
+      "height": 3.05,
+      "wheelbase": 3.8,
+      "track": 1.8,
+      "wheelRadius": 0.46,
+      "mass": 9000,
+      "seat": [
+        0.55,
+        1.55,
+        2.984
+      ],
+      "paint": "#F2C200",
+      "notes": "臺灣常見 7 m 級後裝壓縮式垃圾車一般外觀（虛構塗裝，不仿特定車款 / 機關）。規格約 7.2 × 2.3 × 3.0 m；軸距、輪距、輪徑、前後懸、各部位尺寸皆為推測。平頭駕駛室 + 壓縮車斗 + 後方尾門（投入口在車尾，glTF −Z 面）。車斗兩側 decal 為獨立節點（白底綠色回收箭頭貼圖、無文字），不參與 paint 換色。beacon 材質為琥珀色警示燈（帶 emission，未列入 EMISSIVE_MATERIALS）。後輪雙胎以單一寬 0.46 輪表示。外接盒寬含後照鏡。seat = 駕駛座 H 點（左駕）。",
+      "wheels": {
+        "wheel_fl": [
+          0.9,
+          0.46,
+          2.384
+        ],
+        "wheel_fr": [
+          -0.9,
+          0.46,
+          2.384
+        ],
+        "wheel_rl": [
+          0.9,
+          0.46,
+          -1.416
+        ],
+        "wheel_rr": [
+          -0.9,
+          0.46,
+          -1.416
+        ]
+      },
+      "triangles": 4928,
+      "bytes": 168904
     }
   ]
 }

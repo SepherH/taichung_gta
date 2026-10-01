@@ -7,6 +7,8 @@
 // - 一次性音效帶 opts.x / z 時以上一幀 update 的 state.x / z / yaw 為聆聽點：距離衰減（> MAX_DIST 不播）+ 左右聲像
 // - 雨聲（Phase 5）：state.rain（weather.getState().rain，0–1）> RAIN_ON 時開 LOOPS.rain（sfx 群組），≤ RAIN_OFF 關；
 //   每幀 ctrl.set(state, now) 由 voices.js 依雨勢調內部音量，外層增益 paused 時 0
+// - 垃圾車音樂（垃圾車事件）：state.garbageTruckDist（玩家到垃圾車 m；無車 Infinity）< TRUCK_ON 時開 LOOPS.garbage_truck（music 群組），
+//   ≥ TRUCK_OFF 或非有限值關；未暫停時每幀 ctrl.set(state, now)（voices.js 依距離調內部音量並排程音符），暫停時外層增益 0、不排程
 // - getOutput() → { ctx, out: master } | null：給車上電台（audio/radio.js getAudio）；解鎖前 / 無 AudioContext / 已 dispose 回 null。
 //   電台接 master（已含主音量）、自己乘音樂音量，不可接 music 群組（否則音樂音量乘兩次）
 // - 每幀 update 不配置物件（只有腳步觸發時建立 WebAudio 節點，這是 WebAudio 一次性節點的本質）
@@ -27,6 +29,8 @@ const JUNCTION_OFF = 70; // m：遲滯，超過才停
 const RUN_SPEED = 3.5; // m/s：以上算跑步（腳步較響）
 export const RAIN_ON = 0.01; // state.rain 超過才開雨聲
 const RAIN_OFF = 0.005; // 遲滯：低於才關
+export const TRUCK_ON = 220; // m：垃圾車距離小於此值開旋律（= voices.js GARBAGE_TRUCK_FAR_M，再遠音量本來就是 0）
+const TRUCK_OFF = 235; // m：遲滯，超過才關
 
 // 距離 → 音量倍率（近處 1，60 m 前 12 m 內淡到 0）
 export function distanceGain(d) {
@@ -82,7 +86,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
   const outRef = { ctx: null, out: null }; // getOutput() 回傳（重用，每幀呼叫不配置）
 
   const voices = []; // { ctx, out, sources, end, loop, panner }
-  const loops = { engine: null, tire: null, ambience: null, rain: null }; // { v, ctrl, last }
+  const loops = { engine: null, tire: null, ambience: null, rain: null, garbage_truck: null }; // { v, ctrl, last }
   // 聆聽點（上一幀 state）
   let hasListener = false;
   let lx = 0;
@@ -321,6 +325,16 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
       loopGain(loops.rain, paused ? 0 : 1, now);
     }
 
+    // 垃圾車音樂（LOOPS.garbage_truck，music 群組；距離遲滯；音量由 voices.js 依 garbageTruckDist 調整，暫停時外層增益 0 且不排程音符）
+    const td = state.garbageTruckDist;
+    const hasTd = typeof td === 'number' && Number.isFinite(td);
+    if (hasTd && td < TRUCK_ON && !loops.garbage_truck) loops.garbage_truck = startLoop('garbage_truck', music);
+    else if (loops.garbage_truck && (!hasTd || td >= TRUCK_OFF)) stopLoop('garbage_truck');
+    if (loops.garbage_truck) {
+      if (!paused) loops.garbage_truck.ctrl.set(state, now);
+      loopGain(loops.garbage_truck, paused ? 0 : 1, now);
+    }
+
     // 腳步：依 walkSpeed 累積步距（跑步步距較長、較響）
     const ws = Number.isFinite(state.walkSpeed) ? state.walkSpeed : 0;
     if (!paused && !driving && state.grounded !== false && ws > 0.4 && dt > 0) {
@@ -421,7 +435,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
         disconnect(v);
       }
       voices.length = 0;
-      loops.engine = loops.tire = loops.ambience = loops.rain = null;
+      loops.engine = loops.tire = loops.ambience = loops.rain = loops.garbage_truck = null;
       try {
         const p = ctx.close && ctx.close();
         if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -442,7 +456,8 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
       voices: voices.length,
       maxVoices: MAX_VOICES,
       unlocked: running(),
-      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0) + (loops.rain ? 1 : 0),
+      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0) + (loops.rain ? 1 : 0) + (loops.garbage_truck ? 1 : 0),
+      garbageTruck: !!loops.garbage_truck,
       plays: playCount,
       last: lastPlayed,
     }),

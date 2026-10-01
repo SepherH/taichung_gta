@@ -36,6 +36,9 @@ export const VEHICLE_TYPES = {
   scooter: { label: '機車', length: 1.9, width: 0.7, height: 1.1, maxSpeed: 26.4, maxReverse: 3, accel: 8.5, brake: 14, turnRate: 2.4, camScale: 1.0, twoWheeler: true, mass: 125, maxLatAccel: 6.5 },
   // 公車：外形取 docs/ref/qiuhonggu-opera-vehicle-reference.md §4.1（12.19 × 2.50 × 3.14 m）
   bus: { label: '公車', length: 12.2, width: 2.5, height: 3.14, maxSpeed: 22, maxReverse: 4, accel: 3.4, brake: 7, turnRate: 0.8, camScale: 2.4, mass: 11000, maxLatAccel: 5, tiltScale: 1.4 },
+  // 垃圾車（時段事件 missions/garbage-truck.js 專用，不進車流 / 停車隨機生成）：外形 / 質量取美術 manifest（7.37 × 2.67 × 3.05 m、9000 kg）；
+  //   手感推測：重車、極速 70 km/h、起步比公車略快（車身短）、轉向比公車靈活（軸距 3.8 m）
+  garbage_truck: { label: '垃圾車', length: 7.4, width: 2.5, height: 3.05, maxSpeed: 19.5, maxReverse: 4, accel: 3.8, brake: 8, turnRate: 1.0, camScale: 1.9, mass: 9000, maxLatAccel: 5.5, tiltScale: 1.4 },
 };
 
 // 程序化車（無 glb）的座位點（本地座標，角色 drive 動作 Hips 位置；推測值，依方塊車外形目測）
@@ -44,6 +47,7 @@ const FALLBACK_SEAT = {
   taxi: { x: 0.37, y: 0.55, z: -0.2 },
   suv: { x: 0.38, y: 0.75, z: -0.25 },
   bus: { x: 0.72, y: 1.35, z: 4.8 },
+  garbage_truck: { x: 0.55, y: 1.55, z: 2.98 },
   scooter: { x: 0, y: 0.84, z: -0.25 },
 };
 const FALLBACK_PAINT = '#f2f2ee'; // 呼叫端未給車色（例：公車用 manifest 預設塗裝）而又沒有 glb 時的程序化車色
@@ -143,7 +147,7 @@ export function createVehicleMesh(type, color) {
   } else {
     const L = spec.length;
     const W = spec.width;
-    const tall = type === 'suv' || type === 'bus';
+    const tall = type === 'suv' || type === 'bus' || type === 'garbage_truck';
     const bodyH = tall ? 0.85 : 0.65;
     const bodyY = tall ? 0.78 : 0.62;
     const cabH = tall ? 0.72 : 0.55;

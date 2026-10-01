@@ -6,6 +6,7 @@
 // 座標與縮放 / 平移沿用 src/ui/map-view.js 的純函式（世界 X 東、Z 南，北朝上）
 import { BOUNDS, MAJOR_TYPES, ATTRIBUTION, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from '../citymodel.js';
 import { screenToWorld, worldToScreen, clampView, zoomAt, panBy, fitScale } from '../ui/map-view.js';
+import { MARKER_COLORS, CAR_MARKER_COLOR } from './marker-colors.js';
 import './map.css';
 
 const FONT = '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif';
@@ -13,17 +14,8 @@ export const TAP_PX = 6; // 移動小於此值視為點擊
 const BTN_ZOOM = 1.5;
 const WHEEL_K = 0.0015;
 
-// 標記顏色 / 圖例文字（MARKER_LABELS）/ 圖釘樣式（PIN_KINDS）：三者同一份 kind 清單，含時段事件 event-start / event-dest（小地圖 hud.js 可沿用）
-export const MARKER_COLORS = {
-  'mission-start': '#ffd23f',
-  'mission-dest': '#ff8c1a',
-  dest: '#2fe0e0',
-  checkin: '#b36bff',
-  food: '#ff7ab8',
-  ammo: '#9aa0a6',
-  'event-start': '#8dff3a',
-  'event-dest': '#2ee86a',
-};
+// 標記顏色（src/map/marker-colors.js，與小地圖同源）/ 圖例文字（MARKER_LABELS）/ 圖釘樣式（PIN_KINDS）：三者同一份 kind 清單，含時段事件 event-start / event-dest 與垃圾車 event-truck（圓點）
+export { MARKER_COLORS };
 export const MARKER_LABELS = {
   'mission-start': '委託起點',
   'mission-dest': '委託目的地',
@@ -33,6 +25,7 @@ export const MARKER_LABELS = {
   ammo: '彈藥',
   'event-start': '外送取餐點',
   'event-dest': '外送送達點',
+  'event-truck': '垃圾車',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'event-dest']);
@@ -196,7 +189,7 @@ export function drawBigMap(ctx, view, data = {}) {
       const sx = X(m.x);
       const sy = Y(m.z);
       if (sx < -20 || sx > view.w + 20 || sy < -30 || sy > view.h + 20) continue;
-      const color = MARKER_COLORS[m.kind] || '#4fc3ff';
+      const color = MARKER_COLORS[m.kind] || CAR_MARKER_COLOR;
       ctx.fillStyle = color;
       ctx.strokeStyle = '#000000';
       ctx.lineWidth = 2;

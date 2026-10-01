@@ -300,7 +300,7 @@ check('main.js 舊註冊（tb-flip / tb-punch）被忽略', touch.registerTouchB
 // 5b. Phase 4：互動鈕 tb-interact（KeyE、有提示才顯示）、圖鑑鈕 tb-guide（onTap 回呼）、setTouchButtonVisible
 {
   const inter = $('tb-interact');
-  check('互動鈕：interact slot、步行、預設隱藏', !!inter && inter.classList.contains('slot-interact') && inter.attrs['data-show'] === 'walk' && inter.hidden === true && inter.textContent === '互動');
+  check('互動鈕：interact slot、步行 / 駕駛皆可（data-show always，不被模式 CSS 隱藏）、預設隱藏', !!inter && inter.classList.contains('slot-interact') && inter.attrs['data-show'] === 'always' && inter.hidden === true && inter.textContent === '互動');
   check('SLOTS 含 interact', touch.SLOTS.includes('interact'));
   check('setTouchButtonVisible(tb-interact, true) → 顯示', touch.setTouchButtonVisible('tb-interact', true) === true && inter.hidden === false && touch.isTouchButtonVisible('tb-interact'));
   inter.dispatch('pointerdown', pe(40, 700, 350));
@@ -418,6 +418,57 @@ exitBtn.dispatch('pointerdown', pe(26, 900, 200));
 check('下車鈕 → KeyF', input.wasPressed('KeyF'));
 exitBtn.dispatch('pointerup', pe(26, 900, 200));
 input.endFrame();
+// 駕駛中互動鈕（車上取外送餐等）：有提示才顯示、送 KeyE（與桌機 E 同路徑）；無提示隱藏
+{
+  const inter = $('tb-interact');
+  check('駕駛：互動鈕預設隱藏', inter.hidden === true && !touch.isTouchButtonVisible('tb-interact'));
+  touch.setTouchButtonVisible('tb-interact', true);
+  check('駕駛：有提示 → 顯示（data-show 非 walk，不被駕駛 CSS 隱藏）', inter.hidden === false && inter.attrs['data-show'] !== 'walk');
+  inter.dispatch('pointerdown', pe(27, 600, 160));
+  check('駕駛：互動鈕 tap → KeyE（snapshot.pressed.interact）、不按住、不動踏板', input.wasPressed('KeyE') && input.snapshot().pressed.interact && !input.down('KeyE') && input.pedals.throttle === 0 && input.pedals.brake === 0);
+  inter.dispatch('pointerup', pe(27, 600, 160));
+  input.endFrame();
+  touch.setTouchButtonVisible('tb-interact', false);
+  check('駕駛：提示消失 → 隱藏', inter.hidden === true && !touch.isTouchButtonVisible('tb-interact'));
+  // 版面：駕駛時互動鈕與下車 / 手煞 / 喇叭 / 電台 / 踏板 / 搖桿靜止底座 / 時速錶間距 ≥ 12px（直式 + 橫式多種尺寸，不含 safe-area）
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../src/style.css', import.meta.url), 'utf8');
+  const block = (re) => (css.match(re) || [])[1] || '';
+  const px = (b, prop) => {
+    const m = b.match(new RegExp(`(?:^|[;{\\s])${prop}:\\s*(?:calc\\()?(?:50% \\+ )?(-?\\d+)px`));
+    return m ? Number(m[1]) : NaN;
+  };
+  const dLand = block(/body\.touch-drive \.tbtn\.slot-interact\s*\{([^}]*)\}/);
+  const dPort = block(/@media \(orientation: portrait\)\s*\{\s*body\.touch-drive \.tbtn\.slot-interact\s*\{([^}]*)\}/);
+  const secRow = block(/body\.touch-drive \.tbtn\.slot-sec2,\s*body\.touch-drive \.tbtn\.slot-sec3\s*\{([^}]*)\}/);
+  const pedalTop = Number((css.match(/#touch-pedals\s*\{[^}]*padding:\s*calc\((\d+)px/) || [])[1]);
+  check('style.css：駕駛互動鈕橫向 / 直向位置已定義、≥ 44px', px(dLand, 'width') >= 44 && px(dLand, 'height') >= 44 && Number.isFinite(px(dLand, 'top')) && Number.isFinite(px(dLand, 'right')) && Number.isFinite(px(dPort, 'bottom')) && /right:\s*calc\(50% \+/.test(dPort) && pedalTop > 0);
+  const R = (x, y, w, h, name) => ({ x, y, w, h, name });
+  const gap = (a, b) => Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w), b.y - (a.y + a.h), a.y - (b.y + b.h));
+  const size = px(dLand, 'width');
+  const sec = px(secRow, 'width');
+  const secTop = px(secRow, 'top');
+  const bad = [];
+  for (const [W, H] of [[568, 320], [640, 360], [740, 360], [844, 390], [932, 430], [360, 640], [375, 667], [390, 844], [430, 932]]) {
+    const portrait = H > W;
+    const me = portrait
+      ? R(W / 2 - px(dPort, 'right') - size, H - px(dPort, 'bottom') - size, size, size, 'interact')
+      : R(W - px(dLand, 'right') - size, px(dLand, 'top'), size, size, 'interact');
+    const topSz = portrait && W <= 400 ? 48 : 56;
+    const others = [
+      R(W - 104 - sec, secTop, sec, sec, 'exit'),
+      R(W - 16 - sec, secTop, sec, sec, 'handbrake'),
+      R(W - (portrait && W <= 400 ? 12 : 16) - topSz, 12, topSz, topSz, 'horn'),
+      R(W - 82 - topSz, 12, topSz, topSz, 'radio'),
+      R(W / 2 + 12, pedalTop, W / 2 - 24, H - 16 - pedalTop, 'pedals'),
+      R(110 - 64, (portrait ? H - 290 : H * 0.7) - 64, 128, 128, 'stick'),
+      portrait ? R(10, H - 40 - 88, W / 2 - 14, 88, 'drive-panel') : R(W / 2 - 12 - 130, H - 40 - 120, 130, 120, 'drive-panel'),
+    ];
+    if (me.x < 0 || me.y < 0 || me.x + me.w > W || me.y + me.h > H) bad.push(`${W}x${H} 出界`);
+    for (const o of others) if (gap(me, o) < 12) bad.push(`${W}x${H} ${o.name} 間距 ${gap(me, o)}`);
+  }
+  check('駕駛互動鈕：直式 / 橫式各尺寸與駕駛觸控鈕、踏板、搖桿底座、時速錶間距 ≥ 12px', bad.length === 0, bad.join('; '));
+}
 // 踏板按住中切回步行 → 釋放
 gas.dispatch('pointerdown', pe(27, 900, 500));
 touch.setTouchMode('walk');

@@ -5,7 +5,7 @@
 //   node tools/test/combat-integration.mjs             完整版（真的 import rapier；需要 dist/rapier.mjs）：世界碰撞體 + 真物理，
 //                                                       另加「車以 30 km/h 實際撞上行人 → knockdown」
 //   node tools/test/combat-integration.mjs --no-rapier 以 mock RAPIER 跑同一套接線（不模擬真物理：車撞行人以碰撞開始事件注入）
-// 項目：vehicle-model 五種真 glb（節點 / 輪數 / spec 取自 manifest / 輪子同步）、玩家出拳命中一次扣血 → 行人 hit / fight / flee、
+// 項目：vehicle-model 六種真 glb（含垃圾車）（節點 / 輪數 / spec 取自 manifest / 輪子同步）、玩家出拳命中一次扣血 → 行人 hit / fight / flee、
 //   連 3 拳 knockdown → settle → getup → 回 wander、NPC 還手扣玩家血、車撞行人 knockdown、擊退不穿牆、上車 enter_car → drive、
 //   玩家在車內不受拳擊、效能（30 行人 + 10 車的 mixer + AI 每幀 CPU 時間）
 // exit code：0 = 全過；1 = 有斷言失敗；2 = 完整版找不到 rapier
@@ -21,6 +21,20 @@ export async function load(url, context, next) {
   return next(url, context);
 }`;
 register(`data:text/javascript,${encodeURIComponent(JSON_HOOK)}`, import.meta.url);
+// GLTFLoader 解析內嵌貼圖的 glb（例：垃圾車 decal）會用到 self（瀏覽器全域 self.URL）；node 端只在「車輛模型載入期間」補上（見下方 withSelf），
+// 不可設成檔頭全域：角色 hero.glb 也有內嵌貼圖，無 self 時在 node 解析失敗（本測試預期 3 種行人 variant、主角退回行人模型），
+// 有 self 時 hero 變成載入成功 → variant 4 種、玩家改用 hero 骨架（Hips 高不同）→「三種 variant」與「駕駛中座位點」兩項斷言失敗
+async function withSelf(fn) {
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'self');
+  const prev = globalThis.self;
+  if (!had) globalThis.self = globalThis;
+  try {
+    return await fn();
+  } finally {
+    if (!had) delete globalThis.self;
+    else globalThis.self = prev;
+  }
+}
 
 const ctx2d = new Proxy({}, {
   get: (_, k) => (k === 'measureText' ? () => ({ width: 100 }) : () => {}),
@@ -84,7 +98,7 @@ function fsFetch(url) {
 }
 
 const chars = await loadCharacterModels('./models/characters/manifest.json', { fetch: fsFetch });
-const vehTable = await loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch });
+const vehTable = await withSelf(() => loadVehicleModels('./models/vehicles/manifest.json', { fetch: fsFetch }));
 // 工作區（外包環境）可能連 vehicles/manifest.json 都沒有：視為空表（車輛 glb 檢查 SKIP，車輛走程式建模退路）
 const vManifestFile = path.join(PUBLIC, 'models/vehicles/manifest.json');
 const vManifest = fs.existsSync(vManifestFile) ? JSON.parse(fs.readFileSync(vManifestFile, 'utf8')) : { vehicles: [] };
@@ -96,12 +110,12 @@ const spawn = computeSpawn();
 const parked = computeParkedVehicles(spawn);
 const q = {};
 
-// ======================= 1. vehicle-model：真 glb 五種車 =======================
+// ======================= 1. vehicle-model：真 glb 六種車（含垃圾車）=======================
 // 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此段標 SKIP 不計入（宿主有 glb 時照常檢查）
 const vehGlbPresent = vManifest.vehicles.length > 0 && vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
 if (!vehGlbPresent) console.log('SKIP  vehicle-model 真 glb 檢查（工作區缺 public/models/vehicles/*.glb）');
 else {
-  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2 };
+  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2, garbage_truck: 4 };
   let nodesOk = true;
   let specOk = true;
   const det = [];
@@ -129,7 +143,7 @@ else {
     if (!sOk) specOk = false;
     det.push(`${e.id}:${m.root.userData.wheels.length}輪/${e.mass}kg`);
   }
-  check('vehicle-model：五種車 glb 節點 body + 輪子節點 / 輪數 / 前輪數 / 輪位 / paint 預設色與 manifest 一致', nodesOk && vehTable.size === 5, det.join(' '));
+  check(`vehicle-model：manifest 全部 ${vManifest.vehicles.length} 種車 glb 節點 body + 輪子節點 / 輪數 / 前輪數 / 輪位 / paint 預設色與 manifest 一致`, nodesOk && vehTable.size === vManifest.vehicles.length && vehTable.size === Object.keys(want).length, det.join(' '));
   check('vehicle-model：spec（長寬高 / 軸距 / 輪距 / 輪徑 / 質量 / 座位點）取自 manifest', specOk);
   const red = createVehicleModel('sedan', '#ff0000');
   let redPaint = null;

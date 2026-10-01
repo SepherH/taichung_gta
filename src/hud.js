@@ -10,7 +10,9 @@
 //       mission-start / mission-dest / dest 貼在邊緣並畫朝外箭頭指出方向，其餘超出者不畫
 //     route：[{ x, z }] 或 null（navigator.route()），在小地圖畫亮青色 3 px 路線，只畫落在小地圖範圍內的段
 //   hud.setMoney(money, delta) / hud.setHealth(hp, hpMax) / hud.setPrompt(text | null)
-//   hud.setInteractPrompt(text | null)              // 互動提示（任務 / 打卡 / 小吃）：同 setPrompt，另控制觸控「互動」鈕 tb-interact 顯示
+//   hud.setInteractPrompt(text | null)              // 互動提示（任務 / 打卡 / 外送取餐 / 倒垃圾 / 小吃）：同 setPrompt，另控制觸控「互動」鈕 tb-interact 顯示（步行 / 駕駛皆可）
+//   hud.setPrompts(vehicleText, interactText)       // 兩者同時存在：同一膠囊並列（車輛在前），「上車」鈕 ready / tb-interact 各自依自己的提示；
+//                                                   //   setPrompt / setInteractPrompt 各自會清掉另一則（單一膠囊），只有一種提示時呼叫對應那個即可
 //                                                   //   與 setPrompt 共用同一個膠囊：每幀依仲裁結果二擇一呼叫（後呼叫者生效）
 //   hud.showHint(id, text)                          // 同 id 只出現一次（localStorage 'tcgta.hints.seen'）；回傳是否排入
 //   hud.setHintsEnabled(settings.get('showHints')) / hud.resetHints()
@@ -24,13 +26,14 @@
 //   state.radio（radio.getState()：{ on, playing, index, name }）→ 駕駛面板車名上方的台名：駕駛中且 playing 時常駐；
 //     駕駛中換台（index / on 改變）時以強調樣式顯示 RADIO_FLASH_SEC 秒（含「關閉」）；步行不顯示
 //   觸控換台鈕 tb-radio（top2，駕駛專屬；沿用 touch.js 按鈕樣式 / pointer 處理，送虛擬鍵 KeyQ = core/actions radioNext）
-//   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）著色且超出半徑時貼邊
+//   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）與 'event-truck'（垃圾車，會移動）著色且超出半徑時貼邊
 //   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
 import { isTouch } from './mobile.js';
 import { setTouchMode, setTouchButtonVisible, registerTouchButton } from './touch.js';
+import { MARKER_COLORS as BASE_MARKER_COLORS, CAR_MARKER_COLOR } from './map/marker-colors.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
@@ -51,20 +54,11 @@ const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
 // 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
 export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
 const MONEY_REASON_LABEL = { event: '外送 ' };
-// 小地圖標記顏色（契約 §17 kind）；無 kind = 可駕駛車輛
-export const MARKER_COLORS = {
-  car: '#4fc3ff',
-  'mission-start': '#ffd400',
-  'mission-dest': '#ff8a1f',
-  dest: '#27e8ff',
-  checkin: '#b36bff',
-  food: '#ff7eb9',
-  ammo: '#a8a8a8',
-  'event-start': '#8dff3a',
-  'event-dest': '#2ee86a',
-};
+const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空白）
+// 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
+export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
@@ -86,11 +80,10 @@ export function formatMoney(n) {
   return `${v < 0 ? '−' : ''}NT$ ${s}`;
 }
 
-// 觸控版提示文字：「按 F 上車（…）」→「點「上車」鈕 上車（…）」（駕駛中指向「下車」鈕）；步行時「按 E …」→「點「互動」鈕 …」
+// 觸控版提示文字：「按 F 上車（…）」→「點「上車」鈕 上車（…）」（駕駛中指向「下車」鈕）；「按 E …」→「點「互動」鈕 …」（步行 / 駕駛皆同）
 export function touchPromptText(text, driving) {
-  let t = text.replace(/按\s*F\s*/g, `點「${TOUCH_BTN_LABEL[driving ? 'drive' : 'walk']}」鈕 `);
-  if (!driving) t = t.replace(/按\s*E\s*/g, `點「${TOUCH_INTERACT_LABEL}」鈕 `);
-  return t;
+  const t = text.replace(/按\s*F\s*/g, `點「${TOUCH_BTN_LABEL[driving ? 'drive' : 'walk']}」鈕 `);
+  return t.replace(/按\s*E\s*/g, `點「${TOUCH_INTERACT_LABEL}」鈕 `); // tb-interact 步行 / 駕駛都顯示
 }
 
 // 點 (px, pz) 到線段 a–b 的距離平方（小地圖路線裁切用，不配置物件）
@@ -137,8 +130,8 @@ export class HUD {
     this._lastDriving = null;
     this._lastLocation = '';
     this._lastPrompt = null;
-    this._rawPrompt = null;
-    this._promptInteract = false; // 目前膠囊是否為互動提示（setInteractPrompt）
+    this._rawPrompt = null; // 車輛提示原文（setPrompt / setPrompts）
+    this._rawInteract = null; // 互動提示原文（setInteractPrompt / setPrompts）
     this._interactShown = null; // tb-interact 目前顯示狀態（null = 尚未同步）
     this._toastTimer = 0;
     this._pendingPlace = null; // 待判斷的進場地名 toast（等本幀 pill 更新後再決定）
@@ -341,27 +334,33 @@ export class HUD {
   }
 
   // ---------- 互動提示膠囊 ----------
-  // 上車 / 搶車等提示（觸控時「上車」鈕加 .ready）
+  // 上車 / 搶車等提示（觸控時「上車」鈕加 .ready）；同時清掉互動提示（單一膠囊）
   setPrompt(text) {
-    this._setPrompt(text, false);
+    this._setPrompt(text, null);
   }
 
-  // 互動提示（接委託 / 打卡 / 收集小吃）：觸控時顯示「互動」鈕，提示消失即隱藏
+  // 互動提示（接委託 / 打卡 / 收集小吃）：觸控時顯示「互動」鈕，提示消失即隱藏；同時清掉車輛提示（單一膠囊）
   setInteractPrompt(text) {
-    this._setPrompt(text, true);
+    this._setPrompt(null, text);
   }
 
-  _setPrompt(text, interact) {
-    const raw = text || null;
+  // 車輛提示與互動提示同時存在：同一膠囊並列（車輛在前），「上車」鈕 ready 與 tb-interact 各依自己的提示，互不覆蓋
+  setPrompts(vehicleText, interactText) {
+    this._setPrompt(vehicleText, interactText);
+  }
+
+  _setPrompt(vehicleText, interactText) {
+    const veh = vehicleText || null;
+    const inter = interactText || null;
     // 每幀重複呼叫同樣內容：不重算文字（不配置新字串）
-    if (raw === this._rawPrompt && interact === this._promptInteract && this._lastPrompt !== undefined) return;
-    this._rawPrompt = raw;
-    this._promptInteract = interact;
-    let shown = raw;
+    if (veh === this._rawPrompt && inter === this._rawInteract && this._lastPrompt !== undefined) return;
+    this._rawPrompt = veh;
+    this._rawInteract = inter;
+    let shown = veh && inter ? `${veh}${PROMPT_SEP}${inter}` : veh || inter;
     if (this.touch && shown) shown = touchPromptText(shown, !!this._lastDriving);
     if (this.touch) {
       if (!this.enterBtn) this.enterBtn = document.getElementById('tb-enter');
-      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!raw && !interact && !this._lastDriving);
+      if (this.enterBtn) this.enterBtn.classList.toggle('ready', !!veh && !this._lastDriving);
     }
     this._syncInteractBtn();
     if (shown === this._lastPrompt) return;
@@ -374,9 +373,9 @@ export class HUD {
     }
   }
 
-  // tb-interact：觸控、步行、目前膠囊為互動提示時才顯示（駕駛中另由 CSS data-show 隱藏）
+  // tb-interact：觸控、目前有互動提示時才顯示（步行 / 駕駛皆同；駕駛中可取外送餐 / 倒垃圾等，與桌機按 E 同路徑）
   _syncInteractBtn() {
-    const on = this.touch && !!this._rawPrompt && this._promptInteract && !this._lastDriving;
+    const on = this.touch && !!this._rawInteract;
     if (on === this._interactShown) return;
     this._interactShown = on;
     setTouchButtonVisible(INTERACT_BTN_ID, on);
@@ -570,7 +569,7 @@ export class HUD {
       // 觸控提示文字依模式指向「上車 / 下車」鈕：以原文重算
       if (this.touch) {
         this._lastPrompt = undefined;
-        this._setPrompt(this._rawPrompt, this._promptInteract);
+        this._setPrompt(this._rawPrompt, this._rawInteract);
       }
     }
     if (state.location !== undefined && state.location !== this._lastLocation) {

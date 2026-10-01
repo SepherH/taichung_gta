@@ -153,8 +153,8 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
     ['音效：createAudio、pointerdown / keydown / touchend unlock、每幀 update（rpm01 / skid01 / twoWheeler / nearJunction / walkSpeed / grounded / paused）', [
       'createAudio({ bus, settings })', "['pointerdown', 'keydown', 'touchend']", 'audio.unlock()', 'audio.update(dt, st)', 'st.rpm01', 'st.skid01', 'st.twoWheeler', 'st.nearJunction', 'st.walkSpeed', 'st.grounded', 'st.paused',
       /createFrameLoop\(\{[\s\S]*?\bupdateAudio,[\s\S]*?\}\);/]], // 每幀呼叫在 core/loop.js tick（見下方「暫停時世界停止更新」）
-    ['委託：createMissions（landmarks / addMoney / fetchJson / now / heightAt）、update ctx、speedScale → player、onPlayerKo、onVehicleImpact', [
-      /createMissions\(\{[\s\S]*?landmarks: landmarkPts,[\s\S]*?addMoney:[\s\S]*?fetchJson,[\s\S]*?now: \(\) => gameTime,[\s\S]*?heightAt,[\s\S]*?\}\);/, 'missions.update(dt, missionCtx)', 'player.speedScale = missions.speedScale()', 'missions.onPlayerKo()', 'missions.onVehicleImpact(impactArg)']],
+    ['委託：createMissions（landmarks / addMoney / fetchJson / now / heightAt）、update ctx（simDt）、speedScale → player、onPlayerKo、onVehicleImpact', [
+      /createMissions\(\{[\s\S]*?landmarks: landmarkPts,[\s\S]*?addMoney:[\s\S]*?fetchJson,[\s\S]*?now: \(\) => gameTime,[\s\S]*?heightAt,[\s\S]*?\}\);/, 'missions.update(worldStep.simDt, missionCtx)', 'player.speedScale = missions.speedScale()', 'missions.onPlayerKo()', 'missions.onVehicleImpact(impactArg)']],
     ['導航 / 大地圖：buildRoadGraph(surfaceRoads)、createNavigator、nav.update、hud route、M → bigMap.open、onPick → setDestination', [
       'buildRoadGraph(surfaceRoads)', 'createNavigator({ bus, graph, scene, heightAt })', 'nav.update(dt, focus)', 'route: nav.route()', 'bigMap.open()', "nav.setDestination(x, z, '地圖標記', 'map', focus)", 'getRoute: () => nav.route()', 'landmarks: landmarkPts']],
     ['打卡 / 圖鑑：createCheckins / createFoodGuide、food.update、ui:openGuide 與 KeyG 兩個入口、createMenu onOpenGuide', [

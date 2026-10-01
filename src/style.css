@@ -1259,6 +1259,27 @@ body.touch-drive .tbtn.slot-sec3 {
   right: calc(16px + env(safe-area-inset-right));
 }
 
+/* 駕駛中的互動鈕（tb-interact，有互動提示才顯示，例：車上取外送餐）：
+   橫向 = 下車 / 手煞那一列、下車鈕（右 104–164）左側：右 176–232、上 134–190，與下車鈕 / 踏板（上緣 202px）間距 12px，
+   橫向寬 ≥ 568 時仍在右半區內（左緣距中線 ≥ 52px）；時間 · 金錢（76–126）在其上方 8px（與下車 / 手煞同） */
+body.touch-drive .tbtn.slot-interact {
+  top: calc(134px + env(safe-area-inset-top));
+  bottom: auto;
+  right: calc(176px + env(safe-area-inset-right));
+  width: 56px;
+  height: 56px;
+}
+
+/* 直向右半只有 180–215px 寬，放不下第三顆：改放左半、時速錶群組（底 40–128）上方與搖桿靜止底座（底 226–354）下方之間：
+   底 148–204、中線左側 12–68px；與時速錶 20px、搖桿底座 22px、踏板（中線右側 12px 起）24px */
+@media (orientation: portrait) {
+  body.touch-drive .tbtn.slot-interact {
+    top: auto;
+    right: calc(50% + 12px);
+    bottom: calc(148px + env(safe-area-inset-bottom));
+  }
+}
+
 /* 駕駛踏板：右半區兩大塊（左煞車、右油門），步行隱藏；駕駛時隱藏視角區。
    上緣 202px：讓出右上小鈕（到 68px）、時間 · 金錢列（76–126px）與下車 / 手煞那一列（134–194px） */
 #touch-pedals {

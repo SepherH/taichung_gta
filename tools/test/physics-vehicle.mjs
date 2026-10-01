@@ -19,6 +19,8 @@ export async function load(url, context, next) {
   return next(url, context);
 }`;
 register(`data:text/javascript,${encodeURIComponent(JSON_HOOK)}`, import.meta.url);
+// GLTFLoader 解析內嵌貼圖的 glb（例：垃圾車 decal）會用到 self（瀏覽器全域）；node 端補上，否則 parse 失敗
+globalThis.self ??= globalThis;
 const ctx2d = new Proxy({}, {
   get: (_, k) => (k === 'measureText' ? () => ({ width: 100 }) : () => {}),
   set: () => true,

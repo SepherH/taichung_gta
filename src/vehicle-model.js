@@ -1,11 +1,11 @@
 // 車輛模型：依 public/models/vehicles/manifest.json（美術線交付）載入車輛 glb；缺檔時回傳空表，呼叫端退回 vehicle.js 的程序化網格。
 //
-// manifest 格式：{ convention, vehicles: [ { id（對應 VEHICLE_TYPES：sedan / taxi / suv / bus / scooter）, file（相對 manifest 目錄）,
+// manifest 格式：{ convention, vehicles: [ { id（對應 VEHICLE_TYPES：sedan / taxi / suv / bus / scooter / garbage_truck）, file（相對 manifest 目錄）,
 //   length, width（含後照鏡）, height, wheelbase, track（機車 0）, wheelRadius, mass（kg）, seat [x, y, z]（駕駛 H 點）,
 //   paint（預設車色）, wheels { 節點名: [x, y, z] }, notes } ] }；座標皆為 glTF（x 左右、y 上、z 前）
 // glb 契約：原點 = 地面、外接盒中心正下方，+Y 上、面向 +Z（與 vehicle.js 本地座標相同，不旋轉）；
 //   節點 body（車身）、wheel_fl / wheel_fr / wheel_rl / wheel_rr（機車 wheel_f / wheel_r），輪子原點在輪心、繞本地 X 滾動、繞本地 Y 轉向；
-//   材質 paint = 車身主色（執行期換色）、headlight / taillight（計程車另有 taxisign）帶 emission
+//   材質 paint = 車身主色（執行期換色）、headlight / taillight（計程車另有 taxisign、垃圾車另有 beacon）帶 emission
 // 輪子旋轉順序設為 'YXZ'：rotation.x 滾動、rotation.y 轉向可同時設在同一節點；
 //   root.userData.wheels / frontWheels 與 vehicle.js 的 animate() 相容
 // 座位：manifest seat 為角色 drive 動作的 Hips 位置，角色原點 = seat − (0, SEAT_HIPS_HEIGHT, 0)（manifest convention）
@@ -19,8 +19,8 @@ const CAR_WHEELS = { fl: 'wheel_fl', fr: 'wheel_fr', rl: 'wheel_rl', rr: 'wheel_
 const BIKE_WHEELS = { f: 'wheel_f', r: 'wheel_r' };
 const FRONT_KEYS = new Set(['fl', 'fr', 'f']);
 const PAINT_MATERIAL = 'paint';
-// 夜間發光的材質名稱（vehicle.js 依此登記 daynight）
-export const EMISSIVE_MATERIALS = ['headlight', 'taillight', 'taxisign'];
+// 夜間發光的材質名稱（vehicle.js 依此登記 daynight；beacon = 垃圾車琥珀色警示燈，夜間依 glb 原 emissiveIntensity 為上限發光）
+export const EMISSIVE_MATERIALS = ['headlight', 'taillight', 'taxisign', 'beacon'];
 // drive 動作 Hips 高於角色原點的量（m，manifest convention 與角色 manifest poses.driveHips）
 export const SEAT_HIPS_HEIGHT = 0.3;
 // 車門側：+1 = +X（左）、−1 = −X（右）；manifest notes 註明公車車門在右側（−X），其餘車型由駕駛座側（seat x 正負）上下車

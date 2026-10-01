@@ -23,6 +23,12 @@
 //   車上電台 createRadio（getAudio = audio.getOutput、駕駛中 Q = radioNext → radio.next()、觸控 tb-radio 由 hud.js 註冊）；
 //   時段事件（夜市外送）：missions 注入 getGameHour / routeLength、event:* 提示、HUD / 大地圖 event-start / event-dest 標記（顏色 / 圖例由 hud.js / big-map.js 定義）、
 //   存檔 missions.events、完成 / 失敗計入 missionsDone / missionsFailed（trackMissionStats）
+// 垃圾車事件 / 夜市攤車（docs/dev/interfaces.md §22）：
+//   createMissions 注入 routeFor = garbageTruckRoute（玩家附近 150–300 m 的道路點 → 更遠的道路點，findRoute 折線）；
+//   垃圾車車體 = createVehicleModel('garbage_truck') 純視覺（無剛體、不可上車 / 劫車、不進 traffic），每幀依 missions.truckState() 擺位、null 隱藏，
+//   beacon 等發光材質 registerNight；音效 state.garbageTruckDist（無車 Infinity）→ audio LOOPS.garbage_truck；小地圖 / 大地圖標記 kind event-truck；
+//   missions.update 吃 worldStep.simDt（§20：暫停 / 面板開啟不推進、卡頓丟棄的時間不算）；
+//   夜市攤車 = loadPropModels → createPropModel('night_market_stall')，placeProp 擺在夜市外送取餐點旁人行側、+Z 面向道路（各畫質皆擺）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -36,9 +42,10 @@ import { buildQiuhonggu } from './qiuhonggu.js';
 import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles, tigerCity } from './places.js';
-import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, nearestNamedRoad, surfaceFootways, surfaceRoads } from './citymodel.js';
+import { ATTRIBUTION, buildingAt, getTerrain, heightAt, inBounds, inWater, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
 import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
-import { loadVehicleModels } from './vehicle-model.js';
+import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
+import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp } from './prop-model.js';
 import { CombatSystem, pedKnockdownPayload } from './combat.js';
 import { Player, PLAYER_RADIUS } from './player.js';
 import { VehicleManager, VEHICLE_TYPES, driveControls } from './vehicle.js';
@@ -48,7 +55,7 @@ import { createCarjack } from './carjack.js';
 import { DAMAGE_EXP, DAMAGE_MIN_SPEED, createVehicleDamage, impactDamage } from './vehicle-damage.js';
 import { CameraRig } from './camera.js';
 import { HUD } from './hud.js';
-import { DayNight } from './daynight.js';
+import { DayNight, nightMaterials, registerNight } from './daynight.js';
 import { createWeather, WEATHER_KINDS } from './weather.js';
 import { createEnvironment } from './environment.js';
 import { nextFrame } from './utils.js';
@@ -76,7 +83,8 @@ import { createBloodFx } from './blood-fx.js';
 import { createAudio } from './audio/index.js';
 import { createRadio } from './audio/radio.js';
 import { IMPACT_MIN as MISSION_IMPACT_MIN, createMissions, trackMissionStats } from './missions/index.js';
-import { buildRoadGraph, createNavigator, findRoute } from './navigation.js';
+import { NIGHT_MARKET_DELIVERY } from './missions/events.js';
+import { buildRoadGraph, createNavigator, findRoute, projectToGraph } from './navigation.js';
 import { createBigMap } from './map/big-map.js';
 import { createCheckins } from './collect/checkins.js';
 import { createFoodGuide } from './collect/food-guide.js';
@@ -101,6 +109,13 @@ const SAVE_POS_SHRINK = 0.85; // 存檔位置重疊查詢用的膠囊半徑比�
 const AIM_CANDIDATE_RANGE = 40; // 觸控瞄準輔助的候選行人半徑（m，契約 §13）
 const JUNCTION_SCAN_SEC = 0.5; // 音效「最近路口距離」的查詢間隔（s）
 const SKID_REF = 8; // 側滑速度（m/s）達此值時 skid01 = 1（附錄 B 音效）
+const TRUCK_NEAR_MIN = 150; // 垃圾車路線起點：玩家附近這個距離帶（m）內的道路點（garbage-truck.js routeFor 約定）
+const TRUCK_NEAR_MAX = 300;
+const TRUCK_FAR_MIN = 250; // 路線終點：沿同方向再往外這麼遠（m）的道路點
+const TRUCK_FAR_MAX = 450;
+const TRUCK_ROUTE_TRIES = 4; // 每次 routeFor 最多試幾個方向（都失敗 → 回 null，garbage-truck.js 隔 2 s 再問）
+const TRUCK_MIN_ROUTE_M = 100; // 太短的路線不用（垃圾車在折線上 ping-pong）
+const STALL_CURB_GAP = 1.2; // 夜市攤車離路緣（m）
 const BASE_URL = import.meta.env.BASE_URL ?? './';
 const WEATHER_PREFS = ['auto', ...WEATHER_KINDS]; // 設定 weather 的合法值（'auto' = 自動切換）
 
@@ -261,6 +276,81 @@ async function fetchJson(url) {
   }
 }
 
+// 垃圾車路線（missions routeFor）：p = 玩家位置（garbage-truck.js 尚未拿到位置時為 null → 呼叫端代入 focus）；
+// 隨機方向取 TRUCK_NEAR_MIN–MAX 公尺外的點投影到路網（起點），同方向 ±45° 再往外 TRUCK_FAR_MIN–MAX 公尺投影（終點），findRoute 折線；
+// 起點離玩家太近 / 太遠（投影跑掉）或路線過短 → 換方向重試；全部失敗回 null
+function garbageTruckRoute(graph, p, rng) {
+  if (!graph || !p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return null;
+  for (let i = 0; i < TRUCK_ROUTE_TRIES; i++) {
+    const a = rng() * Math.PI * 2;
+    const r = TRUCK_NEAR_MIN + rng() * (TRUCK_NEAR_MAX - TRUCK_NEAR_MIN);
+    const near = projectToGraph(graph, p.x + Math.sin(a) * r, p.z + Math.cos(a) * r, {});
+    if (!near) continue;
+    const dn = Math.hypot(near.x - p.x, near.z - p.z);
+    if (dn < TRUCK_NEAR_MIN * 0.5 || dn > TRUCK_NEAR_MAX * 1.5) continue;
+    const b = a + (rng() - 0.5) * (Math.PI / 2);
+    const rf = r + TRUCK_FAR_MIN + rng() * (TRUCK_FAR_MAX - TRUCK_FAR_MIN);
+    const far = projectToGraph(graph, p.x + Math.sin(b) * rf, p.z + Math.cos(b) * rf, {});
+    if (!far) continue;
+    const route = findRoute(graph, near, far);
+    if (route && route.points && route.points.length >= 2 && route.lengthM >= TRUCK_MIN_ROUTE_M) return route.points;
+  }
+  return null;
+}
+
+// 最近的地面車道中心線點：{ x, z, hw（半寬）} 或 null（啟動時呼叫一次，逐段掃描）
+function nearestRoadPoint(px, pz) {
+  let best = null;
+  let bestD = Infinity;
+  for (const r of surfaceRoads) {
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const a = r.pts[i];
+      const b = r.pts[i + 1];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const L2 = dx * dx + dz * dz;
+      let t = L2 > 1e-12 ? ((px - a.x) * dx + (pz - a.z) * dz) / L2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const x = a.x + dx * t;
+      const z = a.z + dz * t;
+      const d = (x - px) ** 2 + (z - pz) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = { x, z, hw: r.hw, dx, dz };
+      }
+    }
+  }
+  return best;
+}
+
+// 夜市攤車擺位：取餐點（惠來路道路中心點，events.js pickup）最近的車道 → 垂直方向路緣外 STALL_CURB_GAP + 半個攤車深的人行側
+// （兩側擇一：不在車道上、不在建築內；都不行退回第一側），正面（+Z）朝向該道路點；回傳 placeProp 的 opts（y 由呼叫端取地面高）
+function stallPlacement(pickup, depth) {
+  const road = nearestRoadPoint(pickup.x, pickup.z);
+  if (!road) return { x: pickup.x, z: pickup.z, yaw: 0 };
+  const len = Math.hypot(road.dx, road.dz) || 1;
+  const nx = -road.dz / len;
+  const nz = road.dx / len;
+  const off = road.hw + STALL_CURB_GAP + depth / 2;
+  let pick = null;
+  for (const s of [1, -1]) {
+    const x = road.x + nx * off * s;
+    const z = road.z + nz * off * s;
+    if (!pick) pick = { x, z };
+    if (!onRoadSurface(x, z, 0.3, false) && !buildingAt(x, z, 0.5)) {
+      pick = { x, z };
+      break;
+    }
+  }
+  return { x: pick.x, z: pick.z, faceX: road.x, faceZ: road.z };
+}
+
+// 夜間發光登記（daynight registerNight）；同一共用材質只登記一次（與 vehicle.js registerModelNight 同上限：glb 原 emissiveIntensity）
+function registerNightOnce(m) {
+  if (!m || nightMaterials.some((e) => e.material === m)) return;
+  registerNight(m, m.emissiveIntensity || 1);
+}
+
 const loading = new LoadingScreen(TRIVIA);
 
 async function init() {
@@ -339,7 +429,16 @@ async function init() {
   const landmarkPts = landmarkPoints((await fetchJson('models/manifest.json')) ?? [], projectLatLon);
 
   await progress('載入角色與車輛模型…');
-  await Promise.all([loadCharacterModels(), loadVehicleModels()]);
+  await Promise.all([loadCharacterModels(), loadVehicleModels(), loadPropModels()]);
+  // 夜市攤車（prop-model.js）：夜市外送取餐點旁人行側、正面朝道路；各畫質（含 low）都擺；glb 缺檔 → createPropModel null，不擺
+  const stall = createPropModel('night_market_stall');
+  if (stall) {
+    const info = propInfo('night_market_stall');
+    const spot = stallPlacement(NIGHT_MARKET_DELIVERY.pickup, info ? info.depth : 1.5);
+    placeProp(stall, { ...spot, y: heightAt(spot.x, spot.z) });
+    scene.add(stall);
+    for (const m of propEmissiveMaterials('night_market_stall')) registerNightOnce(m);
+  }
 
   await progress('依 OSM 輪廓擠出七期建築…');
   const buildings = buildBuildings(scene, { anisotropy, landmarks });
@@ -633,8 +732,36 @@ async function init() {
     // 時段事件（夜市外送）：遊戲時刻取 dayNight.hour；路線長度走路網（graph 在下面才建，閉包取用時已存在）
     getGameHour: () => dayNight.hour,
     routeLength: (a, b) => findRoute(graph, a, b)?.lengthM,
+    // 垃圾車事件（garbage-truck.js）：路線 = 玩家附近道路點 → 更遠道路點的 findRoute 折線（graph 同樣閉包取用）；玩家位置未知時用 focus
+    routeFor: (p, rng) => garbageTruckRoute(graph, p || focus, rng),
   });
   const graph = buildRoadGraph(surfaceRoads);
+  // 垃圾車車體：manifest garbage_truck 經 createVehicleModel 建立的純視覺模型（不建剛體、不進 VehicleManager / traffic → 不可上車 / 劫車、不進車流）；
+  // 每幀 syncGarbageTruck 依 missions.truckState() 擺位 / 朝向，null 隱藏；beacon 等發光材質沿用 registerNight（夜間發光）；glb 缺檔 → 無車體（事件照常）
+  const truckModel = createVehicleModel('garbage_truck');
+  const truckMesh = truckModel ? truckModel.root : null;
+  if (truckMesh) {
+    truckMesh.visible = false;
+    truckMesh.rotation.order = 'YXZ';
+    truckMesh.name = 'garbage-truck-event';
+    scene.add(truckMesh);
+    for (const m of vehicleTemplateMaterials('garbage_truck')) if (EMISSIVE_MATERIALS.includes(m.name)) registerNightOnce(m);
+  }
+  const truckWheelR = truckModel ? truckModel.spec.wheelRadius || 0.46 : 0.46;
+  // simDt：與 missions 推進車體的時間相同（輪子滾動角 = 行駛距離 / 輪徑）
+  const syncGarbageTruck = (simDt) => {
+    if (!truckMesh) return;
+    const tk = missions.truckState();
+    if (!tk) {
+      if (truckMesh.visible) truckMesh.visible = false;
+      return;
+    }
+    truckMesh.visible = true;
+    truckMesh.position.set(tk.x, heightAt(tk.x, tk.z), tk.z);
+    truckMesh.rotation.y = tk.heading;
+    const roll = ((tk.speed || 0) * simDt) / truckWheelR;
+    if (roll) for (const w of truckMesh.userData.wheels) w.rotation.x += roll;
+  };
   const nav = createNavigator({ bus, graph, scene, heightAt });
   const checkins = createCheckins({ bus, landmarks: landmarkPts, addMoney: (n, reason) => economy.add(n, reason), root: document.body });
   const food = createFoodGuide({ bus, scene, root: document.body, fetchJson, addMoney: (n, reason) => economy.add(n, reason) });
@@ -681,13 +808,16 @@ async function init() {
     interCands[3] = walking ? pickups.nearest(pos) : null;
     return pickInteractable(interCands);
   };
-  // 互動提示：hud.setInteractPrompt（I4b 新增）存在時與上車提示分開；否則共用 setPrompt（上車 / 扶起提示優先）
+  // 互動提示與車輛提示互不覆蓋（hud 為單一膠囊，setPrompt / setInteractPrompt 各自會清掉另一則）：
+  //   兩者都有 → hud.setPrompts 並列（「上車」鈕 ready 與 tb-interact 各自顯示）；只有一種 → 只呼叫對應那個；都沒有 → setPrompt(null) 清空
+  //   hud 無 setPrompts / setInteractPrompt（舊版）時退回共用 setPrompt（車輛提示優先）
   const setPrompts = (vehicleText, inter) => {
     const text = inter ? inter.text : null;
-    if (hud.setInteractPrompt) {
-      hud.setPrompt(vehicleText);
-      hud.setInteractPrompt(text);
-    } else hud.setPrompt(vehicleText || text);
+    if (vehicleText && text) {
+      if (hud.setPrompts) hud.setPrompts(vehicleText, text);
+      else hud.setPrompt(vehicleText);
+    } else if (text && hud.setInteractPrompt) hud.setInteractPrompt(text);
+    else hud.setPrompt(vehicleText || text);
   };
   // 全螢幕面板：接單 / 結算（missions）、大地圖、圖鑑；開啟中世界與輸入暫停
   const panelOpen = () => missions.isModalOpen() || bigMap.isOpen() || food.isOpen();
@@ -1088,11 +1218,18 @@ async function init() {
   // 時段事件（missions/events.js）：開放 / 時段結束提示；取餐 / 送達 / 失敗的字幕由 missions 自己顯示，入帳 reason 'event' 由 hud.setMoney 標示
   bus.on('event:available', (e) => {
     if (!state.started || !e || !e.title) return;
+    // 垃圾車（kind 'truck'）：字幕由 missions 顯示，這裡只補簡短 toast（目標會移動，看小地圖 event-truck 標記）
+    if (e.kind === 'truck') {
+      hud.toast(`🚛 ${e.title}：看小地圖紅點追上它`, 4);
+      return;
+    }
     const def = missions.events ? missions.events.defs().find((d) => d.id === e.id) : null;
     const where = def && def.pickup && def.pickup.name ? `：到${def.pickup.name}取餐` : '';
     hud.toast(`🌙 ${e.title}開放中${where}`, 5);
   });
-  bus.on('event:closed', () => {
+  bus.on('event:closed', (e) => {
+    // 垃圾車收走（未追車逾時 / 委託開始）不提示「夜市外送時段結束」
+    if (e && e.id === 'garbage-truck') return;
     // 取餐開始也會發 closed（此時事件已進行中）：只在真正關閉（時段結束 / 冷卻）時提示
     if (state.started && !missions.eventActive()) hud.toast('夜市外送時段結束', 3);
   });
@@ -1165,7 +1302,7 @@ async function init() {
   // 音效每幀狀態（重用）：聆聽點 = 鏡頭；rpm01 = |速度| / 最高速、skid01 = 側滑速度 / SKID_REF、nearJunction = 最近號誌路口距離
   const audioState = {
     x: 0, z: 0, yaw: 0, driving: false, speedKmh: 0, rpm01: 0, throttle: 0, skid01: 0, twoWheeler: false,
-    walkSpeed: 0, grounded: true, nearJunction: null, paused: false, rain: 0,
+    walkSpeed: 0, grounded: true, nearJunction: null, paused: false, rain: 0, garbageTruckDist: Infinity,
   };
   let junctionT = JUNCTION_SCAN_SEC;
   let junctionDist = null;
@@ -1204,6 +1341,9 @@ async function init() {
     st.grounded = player.onGround;
     st.nearJunction = state.started ? nearestJunction(dt, focus.x, focus.z) : null;
     st.rain = weather.getState().rain; // 雨聲（Phase 5）：state.rain > 0.01 時 audio 開 LOOPS.rain
+    // 垃圾車音樂：玩家到垃圾車距離（missions.truckState().distM；無車 / 未知 = Infinity）；< 220 m 時 audio 開 LOOPS.garbage_truck（music 群組）
+    const tk = state.started ? missions.truckState() : null;
+    st.garbageTruckDist = tk && Number.isFinite(tk.distM) ? tk.distM : Infinity;
     audio.update(dt, st);
     // 電台：駕駛中且未暫停才播（暫停 / 面板 / 開始畫面淡出）；暫停中也每幀呼叫
     radioCtx.inVehicle = driving;
@@ -1321,7 +1461,9 @@ async function init() {
     missionCtx.x = focus.x;
     missionCtx.z = focus.z;
     missionCtx.driving = driving;
-    missions.update(dt, missionCtx);
+    // 委託 / 外送 / 垃圾車屬模擬時間（§20）：吃本幀實際推進的 simDt（stepWorld 之後才讀得到；暫停 / 面板開啟時 updateGame 不跑）
+    missions.update(worldStep.simDt, missionCtx);
+    syncGarbageTruck(worldStep.simDt);
     nav.update(dt, focus);
     food.update(dt, player.pos, camera);
     blood.update(dt, camera);
@@ -1580,6 +1722,7 @@ async function init() {
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
     missions.restore(save.missions);
+    syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
     nav.clear('map');
@@ -1705,7 +1848,7 @@ async function init() {
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
-      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud,
+      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall,
       // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
       weather, env, radio,
       // 補手槍備彈（回實際加入數，上限 120）

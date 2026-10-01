@@ -15,11 +15,17 @@
 // 委託統計（存檔 stats.missionsDone / missionsFailed）：trackMissionStats(bus, stats) 依 MISSION_STAT_EVENTS 累加——
 //   委託 mission:complete / mission:fail 與事件 event:complete / event:fail 各計一次（兩邊互不轉發，不重複計數）；
 //   放棄比照委託：abandon 走 fail（reason 'abandon'）→ 計入 missionsFailed；讀檔作廢進行中的委託 / 事件不發 fail、不計
+// 垃圾車事件（garbage-truck.js，規則見該檔頭）：建構時注入 routeFor(player, rng) → 道路折線才會出現（未注入 → 完全不作用，既有行為不變）；
+//   garbageTruck（定義物件；false 關閉）；委託 / 外送進行中不出現（未追車時遇到即收走），追車中（truck.isEngaged()）不開放委託 / 外送互動、
+//   隱藏委託起點光柱；nearest() 車尾投入口優先；markers() 附加 kind 'event-truck'；目標列在無委託 / 外送時顯示追車倒數；
+//   bus 事件與外送共用 event:*（id 'garbage-truck'），統計同樣經 trackMissionStats；serialize() 的 events 欄位合併兩者（id 不重複）
+//   整合層：missions.truckState() → { x, z, heading, … } 或 null（每幀擺垃圾車模型）、missions.truck（完整 API）
 import './missions.css';
 import { loadCatalog, CARGO_BASE } from './catalog.js';
 import { createBeaconPool } from './light-pillar.js';
 import { createMissionUi, formatClock, CONDITION_LABELS } from './ui.js';
 import { createTimedEvents, DEFAULT_EVENTS } from './events.js';
+import { createGarbageTruck, GARBAGE_TRUCK_EVENT } from './garbage-truck.js';
 
 export const OPEN_SLOTS = 3;
 export const COOLDOWN_SEC = 120;
@@ -107,6 +113,8 @@ export function createMissions({
   getGameHour = null,
   routeLength = null,
   events = DEFAULT_EVENTS,
+  routeFor = null,
+  garbageTruck = GARBAGE_TRUCK_EVENT,
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -123,6 +131,15 @@ export function createMissions({
   const evBeacons = new Map(); // 'start:<id>' / 'dest:<id>' → beacon
   let evWasActive = false;
   const evActive = () => !!(timed && timed.active());
+  const truckBus = { emit: (name, payload) => {
+    onTruckEvent(name, payload);
+    emit(name, payload);
+  } };
+  const truck = garbageTruck === false || typeof routeFor !== 'function' ? null : createGarbageTruck({
+    def: garbageTruck && typeof garbageTruck === 'object' ? garbageTruck : GARBAGE_TRUCK_EVENT,
+    getGameHour, routeFor, isBusy: () => !!run || evActive(), addMoney, bus: truckBus, now, rng,
+  });
+  const truckEngaged = () => !!(truck && truck.isEngaged());
 
   let catalog = [];
   const bySlug = new Map();
@@ -172,7 +189,7 @@ export function createMissions({
       beacon: beacons.acquire('start', m.from.x, m.from.z, m.slug),
       inter: { id: `mission:${m.slug}`, text: `按 E 接委託：${m.title}`, dist: 0, priority: PRIORITY, act: () => openCard(off) },
     };
-    off.beacon.group.visible = !run && !evActive();
+    off.beacon.group.visible = !run && !evActive() && !truckEngaged();
     offers.push(off);
     emit('mission:available', { id: m.slug, title: m.title, x: m.from.x, z: m.from.z });
     return off;
@@ -433,6 +450,10 @@ export function createMissions({
       timed.update(run ? 0 : step, ctx);
       syncEventBeacons();
     }
+    if (truck) {
+      truck.update(step, ctx);
+      syncTruckBeacons();
+    }
     refreshT += step;
     if (refreshT >= 1) {
       refreshT = 0;
@@ -448,6 +469,7 @@ export function createMissions({
         }
         ui.setObjective(pm.retryText || (pm.retryText = `回到${pm.from.name}重接委託`), '', objDist, '');
       } else if (evActive()) eventObjectiveRow();
+      else if (truckEngaged()) eventObjectiveRow(truck.objective());
       else ui.setObjective(null);
       return;
     }
@@ -486,6 +508,9 @@ export function createMissions({
     const x = pos.x;
     const z = pos.z;
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    // 垃圾車投入口：追車中只認它；未追車時靠近車尾也可直接倒（同為 priority 3，投入口優先）
+    const tk = truck ? truck.nearest(pos) : null;
+    if (tk || truckEngaged()) return tk;
     if (evActive()) return null;
     let bestOff = null;
     let bestD = Infinity;
@@ -516,6 +541,7 @@ export function createMissions({
       return markerList;
     }
     if (evActive()) return pushEventMarkers();
+    if (truckEngaged()) return pushTruckMarkers();
     for (let i = 0; i < offers.length && i < markerPool.length; i++) {
       const mk = markerPool[i];
       const m = offers[i].m;
@@ -525,7 +551,14 @@ export function createMissions({
       mk.label = m.title;
       markerList.push(mk);
     }
-    return timed ? pushEventMarkers() : markerList;
+    if (timed) pushEventMarkers();
+    return truck ? pushTruckMarkers() : markerList;
+  }
+
+  function pushTruckMarkers() {
+    const list = truck.markers();
+    for (let i = 0; i < list.length; i++) markerList.push(list[i]);
+    return markerList;
   }
 
   function pushEventMarkers() {
@@ -569,6 +602,7 @@ export function createMissions({
 
   function abandon() {
     if (!run && evActive()) timed.abandon();
+    else if (!run && truckEngaged()) truck.abandon();
     else fail('abandon');
   }
 
@@ -580,6 +614,32 @@ export function createMissions({
       ui.subtitle(`取餐完成！${formatClock(p.limitSec)} 內把餐點送到${p.toName}（路程約 ${p.routeM} m）`);
     } else if (name === 'event:complete') ui.subtitle(`外送送達！入帳 NT$${p.reward}`);
     else if (name === 'event:fail') ui.subtitle(p.reason === 'timeout' ? '外送逾時，客人取消了訂單（不扣錢）。' : '外送取消了（不扣錢）。');
+  }
+
+  const TRUCK_FAIL_TEXT = {
+    timeout: '垃圾車收完這一區開走了……（不扣錢）',
+    lost: '跟丟垃圾車了（不扣錢）。',
+    abandon: '你放棄追垃圾車了（不扣錢）。',
+  };
+
+  function onTruckEvent(name, p) {
+    if (name === 'event:available') ui.subtitle('🎵 垃圾車來了！追上它，到車尾按 E 倒垃圾');
+    else if (name === 'event:start') {
+      objKeyT = -1;
+      objKeyD = -1;
+      ui.subtitle(`追上垃圾車！${formatClock(p.leftSec)} 內到車尾投入口按 E 倒垃圾`);
+    } else if (name === 'event:complete') ui.subtitle(`垃圾倒好了！入帳 NT$${p.reward}`);
+    else if (name === 'event:fail') ui.subtitle(TRUCK_FAIL_TEXT[p.reason] || '垃圾車開走了（不扣錢）。');
+  }
+
+  // 追車狀態切換時一併切換委託起點 / 外送取餐點光柱
+  let truckWasEngaged = false;
+  function syncTruckBeacons() {
+    const on = truckEngaged();
+    if (on === truckWasEngaged) return;
+    truckWasEngaged = on;
+    if (!run && !evActive()) setStartBeaconsVisible(!on);
+    for (const [key, b] of evBeacons) if (key.startsWith('start:')) b.group.visible = !on && !run;
   }
 
   function evBeacon(key, kind, x, z, owner) {
@@ -607,7 +667,7 @@ export function createMissions({
       const defs = timed.defs();
       for (let i = 0; i < defs.length; i++) {
         const d = defs[i];
-        if (timed.isOpen(d.id)) evBeacon(`start:${d.id}`, 'start', d.pickup.x, d.pickup.z, d.id).group.visible = !run;
+        if (timed.isOpen(d.id)) evBeacon(`start:${d.id}`, 'start', d.pickup.x, d.pickup.z, d.id).group.visible = !run && !truckEngaged();
       }
     }
     const on = !!act;
@@ -617,8 +677,8 @@ export function createMissions({
     }
   }
 
-  function eventObjectiveRow() {
-    const o = timed.objective();
+  function eventObjectiveRow(src) {
+    const o = src || timed.objective();
     const tk = Math.ceil(o.timerSec);
     if (tk !== objKeyT) {
       objKeyT = tk;
@@ -644,6 +704,14 @@ export function createMissions({
     if (timed) {
       const ev = timed.serialize();
       if (Object.keys(ev.completed).length || Object.keys(ev.cooldowns).length) out.events = ev;
+    }
+    if (truck) {
+      const tv = truck.serialize();
+      if (Object.keys(tv.completed).length || Object.keys(tv.cooldowns).length) {
+        const ev = out.events || (out.events = { completed: {}, cooldowns: {} });
+        Object.assign(ev.completed, tv.completed);
+        Object.assign(ev.cooldowns, tv.cooldowns);
+      }
     }
     return out;
   }
@@ -679,6 +747,10 @@ export function createMissions({
       timed.restore(src.events);
       syncEventBeacons();
     }
+    if (truck) {
+      truck.restore(src.events);
+      syncTruckBeacons();
+    }
     refreshOffers();
   }
 
@@ -695,6 +767,7 @@ export function createMissions({
     if (disposed) return;
     if (run) endRun();
     if (timed) timed.dispose();
+    if (truck) truck.dispose();
     evBeacons.clear();
     disposed = true;
     offers.length = 0;
@@ -734,6 +807,8 @@ export function createMissions({
     eventObjective: () => (timed ? timed.objective() : null),
     eventActive: () => (timed ? timed.active() : null),
     events: timed,
+    truck,
+    truckState: () => (truck ? truck.truck() : null),
     // 除錯 / 測試
     catalog: () => catalog,
     source: () => source,

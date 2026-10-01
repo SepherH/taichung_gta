@@ -435,6 +435,18 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
     && validateSave(JSON.parse(JSON.stringify({ version: 2, weapons: { ammo: { pistol: { mag: 3, reserve: Infinity } } } }))).weapons.ammo.pistol.reserve === 36);
 }
 
+// 垃圾車事件（missions/garbage-truck.js）與夜市外送共用 missions.events：id 'garbage-truck' 的完成次數 / 冷卻要能讀回，不被清洗丟掉
+{
+  const ev = { completed: { 'night-market-delivery': 2, 'garbage-truck': 3 }, cooldowns: { 'garbage-truck': 120 } };
+  const v = validateSave({ ...defaultSave(), missions: { ...defaultSave().missions, events: ev } });
+  const e = v.missions.events;
+  check('missions.events：garbage-truck 完成次數 / 冷卻與夜市外送並存保留', !!e && e.completed['garbage-truck'] === 3 && e.completed['night-market-delivery'] === 2 && e.cooldowns['garbage-truck'] === 120, JSON.stringify(e));
+  const store = createSaveStore({ storage: fakeStorage() });
+  store.save({ ...defaultSave(), missions: { ...defaultSave().missions, events: { completed: { 'garbage-truck': 1 }, cooldowns: {} } } });
+  const r = store.load();
+  check('missions.events：只有 garbage-truck 完成次數時存檔往返保留', r.status === 'ok' && r.data.missions.events && r.data.missions.events.completed['garbage-truck'] === 1, JSON.stringify(r.data && r.data.missions && r.data.missions.events));
+}
+
 const total = passed + failed;
 console.log(`\nsave.mjs：${passed} 通過 / ${failed} 失敗`);
 console.log(failed ? `FAIL ${failed}/${total}` : `PASS ${passed}/${total}`);

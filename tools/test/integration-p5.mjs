@@ -91,10 +91,12 @@ for (const [name, list] of GROUPS) {
 }
 // hud.js / menu.js / audio 原始碼關鍵點
 {
-  const hudSrc = read('src/hud.js');
-  check('hud.js：天氣圖示（sun / rain / fog）、台名、tb-radio（KeyQ、drive、top2）、事件標記色', [
+  // 標記色表已搬到 src/map/marker-colors.js（hud.js / big-map.js 共用）：以 hud.js + marker-colors.js 合併內容檢查，項目不變
+  const hudSrc = `${read('src/hud.js')}\n${read('src/map/marker-colors.js')}`;
+  const hudWant = [
     'WEATHER_ICONS', '_updateWeather(state.weatherIcon)', '_updateRadio(dt, state.radio', "registerTouchButton({ id: RADIO_BTN_ID, label: '電台', code: 'KeyQ', mode: 'tap', slot: 'top2', showWhen: 'drive' })",
-    "'event-start':", "'event-dest':", "'event-start', 'event-dest'"].every((s) => hudSrc.includes(s)));
+    "'event-start':", "'event-dest':", "'event-start', 'event-dest'"];
+  check('hud.js（+ map/marker-colors.js）：天氣圖示（sun / rain / fog）、台名、tb-radio（KeyQ、drive、top2）、事件標記色', hudWant.every((s) => hudSrc.includes(s)) && /from '\.\/map\/marker-colors\.js'/.test(hudSrc), hudWant.filter((s) => !hudSrc.includes(s)).join(' | '));
   const touchSrc = read('src/touch.js');
   const defaults = touchSrc.slice(touchSrc.indexOf('const DEFAULT_BUTTONS'), touchSrc.indexOf('];', touchSrc.indexOf('const DEFAULT_BUTTONS')));
   const drives = [...defaults.matchAll(/slot: '(\w+)', showWhen: '(drive|always)'/g)].map((m) => m[1]);

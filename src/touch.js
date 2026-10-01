@@ -11,7 +11,7 @@
 //   不寫入鍵碼的功能鈕改給 onTap(input)（= onPress，按下時呼叫一次），此時可省略 code；hidden: true = 建立但不顯示
 //   同 id 重新註冊 = 取代（放開舊按鈕並重建）；setTouchButtonVisible(id, on) 動態顯示 / 隱藏（例：tb-interact 有提示才顯示）
 // slot：main（右下主鈕）/ sec1（主鈕左側）/ sec2（主鈕上方）/ sec3（主鈕左上）/ attack（大號紅色攻擊鈕）/
-//   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊）/
+//   interact（攻擊鈕左側，互動鈕；不與武器鈕欄 wp-tb-* 重疊；駕駛時橫向移到下車鈕左側、直向移到時速錶上方）/
 //   top1、top2、top3（右上小鈕，由右往左）/ tl1、tl2、tl3（左上小鈕：暫停、地圖、圖鑑，由左往右，排在小地圖右側；
 //   隱藏的手機鈕仍佔 tl3，日後啟用須另排位置）
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
@@ -39,8 +39,8 @@ const DEFAULT_BUTTONS = [
   { id: 'tb-enter', label: '上車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'walk' },
   // hold：按下當幀 pressed（拳 / 棒單擊）、按住期間 down（手槍連發）
   { id: ATTACK_ID, label: '攻擊', code: 'Mouse0', mode: 'hold', slot: 'attack', showWhen: 'walk' },
-  // 互動（接委託 / 打卡 / 收集小吃）：預設隱藏，hud.setInteractPrompt 有提示時才顯示
-  { id: 'tb-interact', label: '互動', code: 'KeyE', mode: 'tap', slot: 'interact', showWhen: 'walk', hidden: true },
+  // 互動（接委託 / 打卡 / 外送取餐 / 收集小吃）：預設隱藏，hud.setInteractPrompt 有提示時才顯示；步行與駕駛都可用（駕駛位置見 style.css）
+  { id: 'tb-interact', label: '互動', code: 'KeyE', mode: 'tap', slot: 'interact', showWhen: 'always', hidden: true },
   // 駕駛（油門 / 煞車改為踏板）
   { id: 'tb-exit', label: '下車', code: 'KeyF', mode: 'tap', slot: 'sec2', showWhen: 'drive' },
   { id: 'tb-handbrake', label: '手煞', code: 'Space', mode: 'hold', slot: 'sec3', showWhen: 'drive' },

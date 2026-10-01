@@ -78,7 +78,7 @@ export const KEYMAP_HELP = [
       { keys: '2', action: 'slot2', desc: '切換：球棒' },
       { keys: '3', action: 'slot3', desc: '切換：手槍' },
       { keys: 'R', action: 'reload', desc: '裝填' },
-      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 收集小吃 / 撿彈藥）' },
+      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 倒垃圾 / 收集小吃 / 撿彈藥）' },
       { keys: 'F', action: 'enterExit', desc: '上車 / 搶車' },
       { keys: '滑鼠移動', action: null, desc: '轉動視角（點畫面鎖定滑鼠，Esc 解除）' },
       { keys: '滾輪', action: null, desc: '拉近 / 拉遠鏡頭（瞄準中不縮放）' },
@@ -93,7 +93,7 @@ export const KEYMAP_HELP = [
       { keys: 'H', action: 'horn', desc: '喇叭' },
       { keys: 'C', action: 'lookBack', desc: '回頭看（按住）' },
       { keys: 'Q', action: null, desc: '換電台（只在車上；循環含關閉）' }, // radioNext 屬 CONTEXT_ACTIONS（說明列 action 只收 ACTIONS 鍵）
-      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐）' },
+      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 倒垃圾）' },
       { keys: 'F', action: 'enterExit', desc: '下車 / 扶起翻覆車' },
     ],
   },
@@ -104,6 +104,8 @@ export const KEYMAP_HELP = [
       { keys: 'M', action: 'map', desc: '開 / 關大地圖' },
       { keys: 'Esc / P', action: 'pause', desc: '暫停選單（暫停中按 P 繼續）' },
       { keys: 'N', action: 'timeSkip', desc: '時間快轉' },
+      // 時段事件說明（無對應鍵位）：垃圾車 missions/garbage-truck.js（16–18 時）；夜市外送見上方 E 互動
+      { keys: '傍晚垃圾車', action: null, desc: '16–18 時出現（小地圖紅點、聽《給愛麗絲》），3 分鐘內追上車尾按 E 倒垃圾（步行 / 駕駛皆可）' },
     ],
   },
 ];
@@ -142,6 +144,7 @@ export const TOUCH_HELP = [
       { keys: '左上「暫停」', action: 'pause', desc: '暫停選單' },
       { keys: '左上「地圖」', action: 'map', desc: '開 / 關大地圖' },
       { keys: '左上「圖鑑」', action: null, desc: '開 / 關小吃圖鑑（步行時顯示）' }, // tb-guide 無對應鍵位（onTap 開圖鑑）
+      { keys: '傍晚垃圾車', action: null, desc: '16–18 時出現（小地圖紅點），3 分鐘內追上車尾點「互動」鈕倒垃圾（步行 / 駕駛皆可）' },
     ],
   },
 ];

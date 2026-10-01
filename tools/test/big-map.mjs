@@ -4,7 +4,7 @@
 // 項目：開關 / toggle / aria、root 掛載、dirty 旗標（靜止不重繪）、點擊 → onPick 座標轉換、拖曳不觸發 onPick、
 //   雙指捏合（以中點為錨、不觸發 onPick）、滾輪縮放以指標為錨、縮放範圍 clamp、地圖外點擊忽略、
 //   清除目的地（bus nav:clear / onClear）、關閉鈕與 onClose、授權標示、圖例、標記 kind 顏色、路線、地標缺省退回、按鈕 ≥ 44 px、
-//   時段事件標記（event-start / event-dest 顏色 / 圖例 / 圖釘）、main.js 不改寫 MARKER_COLORS（靜態）
+//   時段事件標記（event-start / event-dest 顏色 / 圖例 / 圖釘）、main.js 不改寫 MARKER_COLORS（靜態）、色表與小地圖同源（map/marker-colors.js）
 import { register } from 'node:module';
 
 const HOOK = `
@@ -197,6 +197,11 @@ check('draw() 標記後重繪一次', map.stats().renders === r0 + 1);
 
 // ---------- 時段事件標記（正式定義於 big-map.js）----------
 check('事件標記 event-start / event-dest 有正式顏色（色碼字串、與其他 kind 不重複）', ['event-start', 'event-dest'].every((k) => /^#[0-9a-f]{6}$/i.test(MARKER_COLORS[k] || '')) && new Set(Object.values(MARKER_COLORS)).size === Object.keys(MARKER_COLORS).length);
+{
+  const shared = await import('../../src/map/marker-colors.js');
+  const bmSrc = fs.readFileSync(path.join(ROOT, 'src/map/big-map.js'), 'utf8');
+  check('MARKER_COLORS 來自 map/marker-colors.js（同一物件、big-map.js 不寫死色碼）', MARKER_COLORS === shared.MARKER_COLORS && /from '\.\/marker-colors\.js'/.test(bmSrc) && !/'mission-start':\s*'#/.test(bmSrc));
+}
 check('MARKER_COLORS / MARKER_LABELS 同一份 kind 清單（每個 kind 都有圖例文字）', Object.keys(MARKER_COLORS).join() === Object.keys(MARKER_LABELS).join() && Object.values(MARKER_LABELS).every((t) => typeof t === 'string' && t.length > 0));
 check('圖釘樣式：event-dest 與 dest / mission-dest 同為圖釘、event-start 為圓點', PIN_KINDS.has('event-dest') && PIN_KINDS.has('dest') && PIN_KINDS.has('mission-dest') && !PIN_KINDS.has('event-start'));
 {

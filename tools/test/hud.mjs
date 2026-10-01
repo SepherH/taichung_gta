@@ -2,6 +2,8 @@
 // HUD API 無頭驗證（假 DOM）：契約方法齊全且可呼叫、金錢 +/− 跳動、血條、時速錶 / 路牌 / 車名、FPS、介面縮放 CSS 變數、
 // 新手提示卡（同 id 只出一次、localStorage 'tcgta.hints.seen' 跨實例、關閉鈕、停用 / 重設、觸控駕駛中延後）、
 // setControlsHint 由 KEYMAP_HELP / TOUCH_HELP 產生且 hud.js / index.html 不含寫死鍵位；另驗老虎城深色玻璃覆寫（landmarks/index.js）
+// 色碼同源：小地圖 MARKER_COLORS 來自 src/map/marker-colors.js（與大地圖同值，含垃圾車 event-truck 貼邊）；觸控駕駛中有互動提示也顯示 tb-interact；
+// setPrompts（車輛 + 互動提示並列、互不覆蓋）
 // I4b 增補：小地圖 state.route 路線繪製（亮青 3 px、只畫範圍內的段）、markers kind 著色與貼邊方向標記、setInteractPrompt / tb-interact、
 //   每幀路徑不配置新物件（同內容重複呼叫不重算）
 // 用法：node tools/test/hud.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
@@ -334,6 +336,7 @@ check('觸控：提示膠囊改指向按鈕', $('prompt-text').textContent === '
   check('桌機：setInteractPrompt 顯示膠囊原文', !hidden('prompt') && $('prompt-text').textContent === '按 E 接委託：鮮奶茶外送' && !touchMod.isTouchButtonVisible('tb-interact'));
   h.setInteractPrompt(null);
   check('setInteractPrompt(null) 隱藏膠囊', hidden('prompt'));
+  check('觸控文字：駕駛「按 E」也指向「互動」鈕', touchPromptText('按 E 取餐', true) === '點「互動」鈕 取餐' && touchPromptText('翻車了！按 F 扶起，按 E 取餐', true) === '翻車了！點「下車」鈕 扶起，點「互動」鈕 取餐');
   check('觸控文字：步行「按 E」指向「互動」鈕', touchPromptText('按 E 打卡', false) === '點「互動」鈕 打卡' && touchPromptText('按 F 上車，按 E 打卡', false) === '點「上車」鈕 上車，點「互動」鈕 打卡');
 
   const t = new HUD({ storage: memStorage() });
@@ -349,7 +352,14 @@ check('觸控：提示膠囊改指向按鈕', $('prompt-text').textContent === '
   check('同內容每幀重複呼叫不重寫 DOM（不重算字串）', $('prompt-text').textContent === 'SENTINEL');
   $('prompt-text').textContent = before;
   t.update(1 / 60, walkState({ driving: true }));
-  check('觸控上車 → tb-interact 隱藏', !touchMod.isTouchButtonVisible('tb-interact'));
+  check('觸控駕駛中有互動提示 → tb-interact 顯示、膠囊指向「互動」鈕', touchMod.isTouchButtonVisible('tb-interact') && $('prompt-text').textContent === '點「互動」鈕 打卡：臺中國家歌劇院', $('prompt-text').textContent);
+  t.setInteractPrompt(null);
+  check('觸控駕駛中無互動提示 → tb-interact 隱藏', !touchMod.isTouchButtonVisible('tb-interact') && hidden('prompt'));
+  t.setInteractPrompt('按 E 取餐：夜市外送');
+  check('觸控駕駛中再出現互動提示（取餐）→ 顯示', touchMod.isTouchButtonVisible('tb-interact') && $('prompt-text').textContent === '點「互動」鈕 取餐：夜市外送', $('prompt-text').textContent);
+  t.setPrompt('翻車了！按 F 扶起');
+  check('觸控駕駛中改為車輛提示 → tb-interact 隱藏、「上車」鈕不 ready', !touchMod.isTouchButtonVisible('tb-interact') && !enter.classList.contains('ready'));
+  t.setInteractPrompt('按 E 打卡：臺中國家歌劇院');
   t.update(1 / 60, walkState());
   check('下車且提示仍在 → tb-interact 恢復顯示', touchMod.isTouchButtonVisible('tb-interact'));
   t.setPrompt('按 F 上車（計程車）');
@@ -357,6 +367,30 @@ check('觸控：提示膠囊改指向按鈕', $('prompt-text').textContent === '
   t.setInteractPrompt('按 E 收集：太陽餅');
   t.setInteractPrompt(null);
   check('互動提示清除 → tb-interact 隱藏、膠囊隱藏', !touchMod.isTouchButtonVisible('tb-interact') && hidden('prompt'));
+
+  // setPrompts：車輛提示與互動提示同時存在 → 同一膠囊並列、互不覆蓋（main.js setPrompts 兩者都有時呼叫；修「按 F 上車」被 setInteractPrompt(null) 蓋掉）
+  check('setPrompts 方法存在', typeof t.setPrompts === 'function');
+  t.update(1 / 60, walkState());
+  t.setPrompts('按 F 上車（計程車）', '按 E 倒垃圾');
+  check('觸控步行 setPrompts：車輛 + 互動提示並列（各自指向按鈕）、「上車」鈕 ready、tb-interact 顯示',
+    $('prompt-text').textContent === '點「上車」鈕 上車（計程車）　點「互動」鈕 倒垃圾' && enter.classList.contains('ready') && touchMod.isTouchButtonVisible('tb-interact'), $('prompt-text').textContent);
+  t.setPrompt('按 F 上車（計程車）');
+  check('只剩車輛提示 → setPrompt：上車提示仍在、tb-interact 隱藏', $('prompt-text').textContent === '點「上車」鈕 上車（計程車）' && !hidden('prompt') && enter.classList.contains('ready') && !touchMod.isTouchButtonVisible('tb-interact'), $('prompt-text').textContent);
+  t.setInteractPrompt('按 E 倒垃圾');
+  check('只剩互動提示 → setInteractPrompt：「上車」鈕不 ready、tb-interact 顯示', $('prompt-text').textContent === '點「互動」鈕 倒垃圾' && !enter.classList.contains('ready') && touchMod.isTouchButtonVisible('tb-interact'), $('prompt-text').textContent);
+  t.update(1 / 60, walkState({ driving: true }));
+  t.setPrompts('翻車了！按 F 扶起', '按 E 倒垃圾');
+  check('觸控駕駛 setPrompts：兩則並列、tb-interact 顯示、「上車」鈕不 ready', $('prompt-text').textContent === '翻車了！點「下車」鈕 扶起　點「互動」鈕 倒垃圾' && touchMod.isTouchButtonVisible('tb-interact') && !enter.classList.contains('ready'), $('prompt-text').textContent);
+  t.setPrompt(null);
+  check('setPrompt(null) 同時清掉兩則 → 膠囊隱藏、tb-interact 隱藏', hidden('prompt') && !touchMod.isTouchButtonVisible('tb-interact'));
+  const d = new HUD({ storage: memStorage() });
+  d.update(1 / 60, walkState());
+  d.setPrompts('按 F 上車（機車）', '按 E 打卡：臺中國家歌劇院');
+  check('桌機 setPrompts：膠囊原文並列（車輛在前）', !hidden('prompt') && $('prompt-text').textContent === '按 F 上車（機車）　按 E 打卡：臺中國家歌劇院', $('prompt-text').textContent);
+  d.setPrompts('按 F 上車（機車）', null);
+  check('桌機 setPrompts(車輛, null) = 只顯示車輛提示', $('prompt-text').textContent === '按 F 上車（機車）');
+  d.setPrompts(null, null);
+  check('桌機 setPrompts(null, null) 隱藏膠囊', hidden('prompt'));
 }
 
 // ---------- 小地圖：route 與 markers kind ----------
@@ -421,7 +455,13 @@ check('觸控：提示膠囊改指向按鈕', $('prompt-text').textContent === '
   const got = kinds.map((kind, i) => colorAt(R + (10 + i * 5) * k, R - 20 * k));
   const want = kinds.map((kind) => MARKER_COLORS[kind]);
   check('markers：kind 依契約著色（任務起點黃 / 終點橘 / 目的地青 / 打卡紫 / 小吃粉 / 彈藥灰）', JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
-  check('MARKER_COLORS 色系正確', MARKER_COLORS['mission-start'] === '#ffd400' && MARKER_COLORS['mission-dest'] === '#ff8a1f' && MARKER_COLORS.dest === '#27e8ff' && MARKER_COLORS.checkin === '#b36bff' && MARKER_COLORS.food === '#ff7eb9' && MARKER_COLORS.ammo === '#a8a8a8');
+  check('MARKER_COLORS 色系正確（與大地圖同值）', MARKER_COLORS['mission-start'] === '#ffd23f' && MARKER_COLORS['mission-dest'] === '#ff8c1a' && MARKER_COLORS.dest === '#2fe0e0' && MARKER_COLORS.checkin === '#b36bff' && MARKER_COLORS.food === '#ff7ab8' && MARKER_COLORS.ammo === '#9aa0a6' && MARKER_COLORS.car === '#4fc3ff');
+  {
+    const shared = await import('../../src/map/marker-colors.js');
+    const kinds2 = Object.keys(shared.MARKER_COLORS);
+    check('小地圖色碼與 map/marker-colors.js 同源（每個 kind 同值、另加車色 car）', kinds2.length >= 8 && kinds2.every((k) => MARKER_COLORS[k] === shared.MARKER_COLORS[k]) && MARKER_COLORS.car === shared.CAR_MARKER_COLOR && Object.keys(MARKER_COLORS).length === kinds2.length + 1);
+    check('靜態：hud.js 不再寫死事件 / 任務標記色碼', /from '\.\/map\/marker-colors\.js'/.test(hudSrc) && !/'mission-start':\s*'#/.test(hudSrc));
+  }
   check('markers：無 kind（可駕駛車輛）維持藍色', colorAt(R - 30 * k, R + 10 * k) === '#4fc3ff');
   check('markers：畫了 7 個圓點', arcs.length >= 1 && log.filter((c) => c[0] === 'arc').length >= 7 && fills.length >= 7);
 
@@ -448,6 +488,13 @@ check('觸控：提示膠囊改指向按鈕', $('prompt-text').textContent === '
   check('超出半徑的任務起點：貼右緣畫三角形、尖端朝東', !!east && inside(east) && east[0][0] > R + 80 && Math.abs(east[0][1] - R) < 1e-6 && east[0][0] > east[1][0], JSON.stringify(east));
   check('超出半徑的目的地：貼上緣、尖端朝北', !!north && inside(north) && north[0][1] < R - 80 && Math.abs(north[0][0] - R) < 1e-6 && north[0][1] < north[1][1], JSON.stringify(north));
   const farArcs = log.filter((c) => c[0] === 'arc' && c[1][2] < 10);
+  {
+    // 垃圾車 event-truck（會移動的事件目標）：超出半徑同樣貼邊畫三角形（正西）
+    log = draw({ ...P, markers: [{ x: P.x - 1000, z: P.z, kind: 'event-truck' }] });
+    const west = tri(MARKER_COLORS['event-truck']);
+    check('超出半徑的垃圾車（event-truck）：有專屬色、貼左緣、尖端朝西', /^#[0-9a-f]{6}$/i.test(MARKER_COLORS['event-truck'] || '') && !!west && inside(west) && west[0][0] < R - 80 && west[0][0] < west[1][0], JSON.stringify(west));
+    log = draw({ ...P, markers: far });
+  }
   check('超出半徑的打卡 / 小吃 / 彈藥 / 車不畫', farArcs.length === 0 && ![MARKER_COLORS.checkin, MARKER_COLORS.food, MARKER_COLORS.ammo, MARKER_COLORS.car].some((c) => log.some((x) => x[0] === 'fill' && x[2] === c)));
   log = draw({ ...P, markers: [{ x: NaN, z: 0, kind: 'dest' }, null, { x: P.x, z: P.z, kind: 'nope' }] });
   check('非法 marker 略過、未知 kind 以車色畫', log.filter((c) => c[0] === 'arc' && c[1][2] < 10).length === 1);

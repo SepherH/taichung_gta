@@ -275,7 +275,107 @@ export const LOOPS = {
       },
     };
   },
+  // 垃圾車音樂：見下方 GARBAGE_TRUCK_TUNE；每次 set 把 [排程游標, now + TRUCK_LOOKAHEAD) 內的音符交給 toneHit，已結束的振盪器自 v.sources 移除
+  garbage_truck(v) {
+    const ctx = v.ctx;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const level = ctx.createGain();
+    level.gain.value = 0;
+    level.connect(gain);
+    const tune = GARBAGE_TRUCK_TUNE;
+    const nv = { ctx, out: level, sources: [] }; // toneHit 推進 nv.sources，再轉記到 v.sources（stopLoop 整批停）
+    const ends = []; // 與 v.sources 對齊的結束時間上限
+    let idx = 0;
+    let at = -1; // 下一個音符的開始時間（ctx 秒）
+    let lastL = -1;
+    let played = 0;
+    return {
+      gain,
+      level,
+      notesPlayed: () => played,
+      set(s, now) {
+        const l = garbageTruckLevel(s && s.garbageTruckDist);
+        if (Math.abs(l - lastL) > 0.003) {
+          lastL = l;
+          level.gain.setTargetAtTime(l, now, 0.25);
+        }
+        if (at < now) at = now + 0.05; // 首次 / 卡頓過久：從現在接著排
+        while (at < now + TRUCK_LOOKAHEAD) {
+          const n = tune.notes[idx];
+          const len = n[1] * tune.stepSec;
+          if (n[0] !== null) {
+            const f = midiHz(n[0]);
+            const d = Math.max(0.12, len * 2.2);
+            toneHit(nv, at, { type: 'triangle', freq: f, gain: 0.32, a: 0.004, d });
+            toneHit(nv, at, { type: 'sine', freq: f * 2, gain: 0.08, a: 0.002, d: d * 0.5 });
+            played++;
+          }
+          at += len;
+          idx = (idx + 1) % tune.notes.length;
+        }
+        for (let i = 0; i < nv.sources.length; i++) {
+          v.sources.push(nv.sources[i]);
+          ends.push(at + 2);
+        }
+        nv.sources.length = 0;
+        let w = 0;
+        for (let i = 0; i < v.sources.length; i++) {
+          if (ends[i] > now) {
+            v.sources[w] = v.sources[i];
+            ends[w++] = ends[i];
+          }
+        }
+        v.sources.length = w;
+        ends.length = w;
+      },
+    };
+  },
 };
+
+// 垃圾車音樂（時段事件 missions/garbage-truck.js）：貝多芬《給愛麗絲》（Für Elise，1810，公版）開頭 A 段主旋律，
+//   音符序列逐音寫死（MIDI 音高 / 十六分音符步數），以 toneHit 三角波 + 高八度正弦泛音合成「音樂盒」音色，整段循環；不讀任何音檔
+// LOOPS.garbage_truck 的 set(s, now)：s.garbageTruckDist（玩家到垃圾車的距離 m；null / 非數 = 聽不到）→ garbageTruckLevel → 內部 level 增益，
+//   並以 lookahead 排程下一小段音符；外層 gain 仍由呼叫端控制（建議 music 群組、paused 時 0；距離 ≥ GARBAGE_TRUCK_FAR_M 可關掉 loop）
+export const GARBAGE_TRUCK_TUNE = {
+  title: '給愛麗絲',
+  composer: 'Beethoven',
+  stepSec: 0.17, // 十六分音符長（3/8 拍，約 ♪. = 59）
+  // [MIDI 音高（null = 休止）, 十六分音符步數]
+  notes: [
+    [76, 1], [75, 1],
+    [76, 1], [75, 1], [76, 1], [71, 1], [74, 1], [72, 1],
+    [69, 2], [null, 1], [60, 1], [64, 1], [69, 1],
+    [71, 2], [null, 1], [64, 1], [68, 1], [71, 1],
+    [72, 2], [null, 1], [64, 1], [76, 1], [75, 1],
+    [76, 1], [75, 1], [76, 1], [71, 1], [74, 1], [72, 1],
+    [69, 2], [null, 1], [60, 1], [64, 1], [69, 1],
+    [71, 2], [null, 1], [64, 1], [72, 1], [71, 1],
+    [69, 3], [null, 3],
+  ],
+};
+export const GARBAGE_TRUCK_NEAR_M = 12; // 此距離內滿音量
+export const GARBAGE_TRUCK_FAR_M = 220; // 此距離外靜音
+const TRUCK_LOOKAHEAD = 0.35; // 排程前看秒數（set 每幀呼叫，卡頓 < 此值不斷音）
+
+export const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+// 距離 m → 垃圾車音樂音量 0–1（≤ NEAR 為 1、≥ FAR 為 0，之間單調遞減；null / 非數 → 0）
+export function garbageTruckLevel(distM, near = GARBAGE_TRUCK_NEAR_M, far = GARBAGE_TRUCK_FAR_M) {
+  if (distM === null || distM === undefined) return 0;
+  const d = Number(distM);
+  if (!Number.isFinite(d)) return 0;
+  if (d <= near) return 1;
+  if (d >= far) return 0;
+  return Math.pow((far - d) / (far - near), 1.6);
+}
+
+// 旋律一輪的總長（秒）
+export function garbageTruckLoopSec(tune = GARBAGE_TRUCK_TUNE) {
+  let steps = 0;
+  for (const n of tune.notes) steps += n[1];
+  return steps * tune.stepSec;
+}
 
 // 雨勢 0–1 → 雨聲音量（0 → 0；單調遞增，小雨即可聽見）
 export function rainLevel(rain01) {
