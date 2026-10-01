@@ -17,7 +17,9 @@ export async function initPhysics() {
   return RAPIER;
 }
 
-// 固定步累加器（純邏輯）
+// 固定步累加器（純邏輯）；時間步契約見 docs/dev/interfaces.md「時間步契約」：
+// 模擬狀態只在 onStep 子步內以 step 推進；渲染幀要知道「本幀實際推進的模擬秒數」用 advance 回傳的 simDt，
+// 在 advance 之前（同一幀、累加器未變）要用則呼叫 preview(frameDt)，兩者相同
 export class FixedStepper {
   constructor(step = DEFAULT_STEP, maxSubSteps = DEFAULT_MAX_SUBSTEPS) {
     this.step = step;
@@ -26,9 +28,9 @@ export class FixedStepper {
     this.dropped = 0; // 累計丟棄的時間（s），除錯用
   }
 
-  // 前進 frameDt，每個子步呼叫 onStep(step)；回傳 { steps, alpha }
+  // 前進 frameDt，每個子步呼叫 onStep(step)；回傳 { steps, alpha, simDt = steps × step }
   advance(frameDt, onStep) {
-    if (!(frameDt > 0)) return { steps: 0, alpha: this.acc / this.step };
+    if (!(frameDt > 0)) return { steps: 0, alpha: this.acc / this.step, simDt: 0 };
     this.acc += frameDt;
     let steps = 0;
     // 1e-9：吸收浮點誤差（例：0.1 / (1/60) 應為 6 步整）
@@ -43,7 +45,19 @@ export class FixedStepper {
       this.acc = 0;
     }
     if (this.acc < 0) this.acc = 0;
-    return { steps, alpha: Math.min(this.acc / this.step, 1 - 1e-6) };
+    return { steps, alpha: Math.min(this.acc / this.step, 1 - 1e-6), simDt: steps * this.step };
+  }
+
+  // advance(frameDt) 會跑幾個子步（不改狀態；與 advance 同一套判斷）
+  preview(frameDt) {
+    if (!(frameDt > 0)) return 0;
+    let acc = this.acc + frameDt;
+    let steps = 0;
+    while (acc + 1e-9 >= this.step && steps < this.maxSubSteps) {
+      acc -= this.step;
+      steps++;
+    }
+    return steps;
   }
 
   reset() {
@@ -161,9 +175,14 @@ export class PhysicsWorld {
     for (const cb of this.afterStep) cb(dt);
   }
 
-  // 每個渲染幀呼叫一次；回傳 { steps, alpha }
+  // step(frameDt) 將推進的模擬秒數（暫停中 0）：物理 step 之前就要推進的模擬計時（號誌、KO 倒數）用這個值，不用 frameDt
+  simTimeFor(frameDt) {
+    return this.paused ? 0 : this.stepper.preview(frameDt) * this.stepper.step;
+  }
+
+  // 每個渲染幀呼叫一次；回傳 { steps, alpha, simDt }
   step(frameDt) {
-    if (this.paused) return { steps: 0, alpha: this.alpha };
+    if (this.paused) return { steps: 0, alpha: this.alpha, simDt: 0 };
     this.eventQueue.clear();
     const res = this.stepper.advance(frameDt, (dt) => this.stepOnce(dt));
     this.alpha = res.alpha;

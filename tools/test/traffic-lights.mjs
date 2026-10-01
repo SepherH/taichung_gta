@@ -273,6 +273,25 @@ function atColor(inst, s, axis, color, minRemaining = 0) {
   check('update + updateVisuals 每幀 < 0.5 ms', ms < 0.5, `${ms.toFixed(4)} ms`);
 }
 
+// 時間步契約（p5-d1）：step(h) 每個物理子步推進模擬時間；update() 不帶 dt 只刷新相位不推進；update(dt) = step(dt) + 刷新
+{
+  const a = createTrafficLights();
+  const b = createTrafficLights();
+  const s = a.signals.find((x) => x.axes.length === 2) || a.signals[0];
+  for (let i = 0; i < 1800; i++) {
+    a.step(1 / 60);
+    if (i % 3 === 2) a.update(); // 高更新率：有的幀沒有子步，刷新照做
+    b.update(1 / 60);
+  }
+  a.update();
+  const t0 = a.time;
+  a.update();
+  a.step(0);
+  a.step(-1);
+  check('step(h) 推進模擬時間、update() 只刷新不推進、相位與 update(dt) 一致', Math.abs(t0 - b.time) < 1e-9 && a.time === t0 && a.signals[s.id].phase === b.signals[s.id].phase,
+    `time ${t0.toFixed(4)} / ${b.time.toFixed(4)}`);
+}
+
 const total = passed + failed;
 console.log(failed ? `FAIL ${failed}/${total}` : `PASS ${passed}/${total}`);
 process.exit(failed ? 1 : 0);

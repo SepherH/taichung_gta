@@ -54,6 +54,10 @@ const isFn = (f) => typeof f === 'function';
 
 const mainSrc = read('src/main.js');
 const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
+// p5-c1 起每幀排程（tick / runFrames / 暫停分支）在 src/core/loop.js，main.js 以 createFrameLoop 注入 updateGame / updateAttract / updateAudio / render
+const loopCode = read('src/core/loop.js').replace(/\/\/[^\n]*/g, '');
+const frameLoopSrc = (code.match(/createFrameLoop\(\{([\s\S]*?)\n {2}\}\);/) || [])[1] || '';
+const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n, dt)\\) => \\{([\\s\\S]*?)\\n {2}\\};`)) || [])[1] || '';
 
 // ======================= 1. import 圖完整 =======================
 {
@@ -146,7 +150,8 @@ const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
       "combat.on('hit', (e) => bus.emit('combat:hit', e))", "bus.on('combat:hit', (e) => blood.onHit(e))", "bus.on('ped:knockdown', (e) => blood.onKnockdown(e))", "e.cause !== 'bat' && e.cause !== 'bullet'", "'loot')", 'pedKnockdownPayload(e)']],
     ['戰鬥：機車摔落改用 combat.knockdownActor（不再直接改 entries）', ['combat.knockdownActor(player.actor', /^(?![\s\S]*combat\.entries)/]],
     ['音效：createAudio、pointerdown / keydown / touchend unlock、每幀 update（rpm01 / skid01 / twoWheeler / nearJunction / walkSpeed / grounded / paused）', [
-      'createAudio({ bus, settings })', "['pointerdown', 'keydown', 'touchend']", 'audio.unlock()', 'audio.update(dt, st)', 'st.rpm01', 'st.skid01', 'st.twoWheeler', 'st.nearJunction', 'st.walkSpeed', 'st.grounded', 'st.paused', 'updateAudio(dt)']],
+      'createAudio({ bus, settings })', "['pointerdown', 'keydown', 'touchend']", 'audio.unlock()', 'audio.update(dt, st)', 'st.rpm01', 'st.skid01', 'st.twoWheeler', 'st.nearJunction', 'st.walkSpeed', 'st.grounded', 'st.paused',
+      /createFrameLoop\(\{[\s\S]*?\bupdateAudio,[\s\S]*?\}\);/]], // 每幀呼叫在 core/loop.js tick（見下方「暫停時世界停止更新」）
     ['委託：createMissions（landmarks / addMoney / fetchJson / now / heightAt）、update ctx、speedScale → player、onPlayerKo、onVehicleImpact', [
       /createMissions\(\{[\s\S]*?landmarks: landmarkPts,[\s\S]*?addMoney:[\s\S]*?fetchJson,[\s\S]*?now: \(\) => gameTime,[\s\S]*?heightAt,[\s\S]*?\}\);/, 'missions.update(dt, missionCtx)', 'player.speedScale = missions.speedScale()', 'missions.onPlayerKo()', 'missions.onVehicleImpact(impactArg)']],
     ['導航 / 大地圖：buildRoadGraph(surfaceRoads)、createNavigator、nav.update、hud route、M → bigMap.open、onPick → setDestination', [
@@ -186,8 +191,11 @@ const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
     && code.indexOf('const openGuide = ') < code.indexOf("registerTouchButton({ id: 'tb-guide'"));
   // FX3-4：__game.stepFrames 手動推幀也呼叫音效 update（同 tick）
   {
+    // stepFrames → loop.runFrames（core/loop.js）：每幀 updateWorld（暫停即略過）後緊接 d.updateAudio(dt)
     const sf = (code.match(/stepFrames\(n = 1, dt = 1 \/ 60\) \{([\s\S]*?)\n {6}\},/) || [])[1] || '';
-    check('main.js：__game.stepFrames 每幀呼叫 updateAudio(dt)（暫停中也呼叫，同 tick）', /if \(!state\.paused\) \{[\s\S]*?\}\s*updateAudio\(dt\);/.test(sf));
+    const rf = loopFn('runFrames');
+    check('main.js + core/loop.js：__game.stepFrames 每幀呼叫 updateAudio(dt)（暫停中也呼叫，同 tick）',
+      /loop\.runFrames\(n, dt\)/.test(sf) && /for \(let i = 0; i < n; i\+\+\) \{[\s\S]*?updateWorld\(dt\);\s*d\.updateAudio\(dt\);/.test(rf));
   }
   // FX3-2：易碎貨物 = 玩家駕駛車輛的每次碰撞（≥ 4 m/s）；不經 vehicle:crash（只在 ≥ 8 m/s 發出）
   check('main.js：易碎碰撞接線（contacts relSpeed 先於耐久計算回報、vehicle:damaged delta 反推、門檻 IMPACT_MIN、不經 vehicle:crash）',
@@ -195,8 +203,11 @@ const code = mainSrc.replace(/\/\/[^\n]*/g, ''); // 去掉註解再比對
     && /if \(mine\) reportImpact\(relSpeed\);\s*dmg\.onImpact\(/.test(code)
     && /bus\.on\('vehicle:damaged', \(\{ vehicle, delta \}\) => \{[\s\S]*?byPlayer\(vehicle\)[\s\S]*?reportImpact\(impactSpeedFromDamage\(vehicle, delta\)\)/.test(code)
     && !/bus\.on\('vehicle:crash'[^\n]*onVehicleImpact/.test(code));
-  check('main.js：暫停時世界停止更新但照常渲染（tick 結構保留）、音效暫停中也 update',
-    /if \(!state\.paused\) \{\s*if \(state\.started\) updateGame\(dt\);\s*else updateAttract\(dt\);\s*\}\s*updateAudio\(dt\);/.test(code));
+  check('main.js + core/loop.js：暫停時世界停止更新但照常渲染（tick 結構保留）、音效暫停中也 update',
+    /^\s*if \(d\.isPaused\(\)\) return;\s*if \(d\.isStarted\(\)\) d\.updateGame\(dt\);\s*else d\.updateAttract\(dt\);\s*$/.test(loopFn('updateWorld'))
+    && /updateWorld\(dt\);\s*d\.updateAudio\(dt\);[\s\S]*d\.render\(\);/.test(loopFn('tick'))
+    && ['isPaused: () => state.paused', 'isStarted: () => state.started', 'updateGame,', 'updateAttract,', 'updateAudio,', 'render,'].every((x) => frameLoopSrc.includes(x))
+    && /\bloop\.frame\(\);/.test(code));
   // 每幀路徑不配置新物件：Phase 4 每幀函式內不出現物件 / 陣列字面值或 new（事件 payload 除外）
   const bodyOf = (name) => (code.match(new RegExp(`const ${name} = \\([^)]*\\) => \\{([\\s\\S]*?)\\n {2}\\};`)) || [])[1] || null;
   const perFrame = ['fillAim', 'handleWeaponInput', 'updateWeaponPose', 'collectMarkers', 'nearestInteractable', 'setPrompts', 'updateAudio', 'nearestJunction', 'raycast', 'sweep', 'muzzleWorld'];

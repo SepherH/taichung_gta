@@ -11,7 +11,9 @@
 //
 // 接線說明（給 traffic.js / main.js）：
 // 1. 建立：main.js `const lights = createTrafficLights()`；`lights.buildMeshes(scene, { heightAt })`；以 `new Traffic(scene, { ..., lights })` 注入
-// 2. 每幀：`lights.update(dt)`（與遊戲時間同步，暫停時不呼叫）、`lights.updateVisuals(camX, camZ)`（鏡頭焦點）
+// 2. 時相時間屬模擬時間（docs/dev/interfaces.md「時間步契約」）：`pw.onBeforeStep((h) => lights.step(h))` 每個固定子步推進
+//    （須在 new Traffic 之前登記，同一子步內車流讀到的已是本子步時刻）；每幀物理 step 之後 `lights.update()` 刷新相位 / 燈色、
+//    `lights.updateVisuals(camX, camZ)`（鏡頭焦點）。`update(dt)` 帶 dt 時 = step(dt) + 刷新（無物理的測試 / 舊接線用）
 // 3. 車（traffic.js _driveCar，在前車 check 迴圈之後、算 accel 之前）：
 //    const ns = this.lights && this.lights.nextStop(car.road, car.dir, car.s, 80);
 //    if (ns && !this.lights.carMayProceed(ns.stop.signal, v.pos.x, v.pos.z, ns.distToStop - v.spec.length / 2, car.speed)) {
@@ -327,8 +329,14 @@ export function createTrafficLights({ seed = CITY_SEED } = {}) {
     return { walk: true, on: Math.floor(w.remaining * PED_BLINK_HZ) % 2 === 0 };
   }
 
-  function update(dt) {
-    time += dt;
+  // 模擬時間推進（每個物理子步；暫停時不呼叫）
+  function step(dt) {
+    if (dt > 0) time += dt;
+  }
+
+  // 依目前時間刷新各路口相位與燈色（每幀一次）；dt > 0 時先 step(dt)
+  function update(dt = 0) {
+    step(dt);
     for (const s of signals) {
       const ph = phaseIndex(s, time);
       let blink = false;
@@ -595,6 +603,7 @@ export function createTrafficLights({ seed = CITY_SEED } = {}) {
     get time() {
       return time;
     },
+    step,
     update,
     signalAt,
     approachState,

@@ -28,7 +28,7 @@
     "test:feel": "node tools/test/player-feel.mjs",
     "test:flow": "node tools/test/traffic-flow.mjs",
     "test:p3": "node tools/test/integration-p3.mjs",
-    "test:all": "npm run test:city && npm run test:terrain && npm run test:placement && npm run test:touch && npm run test:physics && npm run test:vehicle && npm run test:physinteg && npm run test:detail && npm run test:chars && npm run test:combat && npm run test:combatinteg && npm run test:core && npm run test:menu && npm run test:save && npm run test:lights && npm run test:crowdlod && npm run test:carjack && npm run test:feel && npm run test:flow && npm run test:p3"
+    "test:all": "node tools/test/run-all.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

@@ -306,12 +306,30 @@ const flat = (help) => help.flatMap((g) => g.items);
   check('main.js：每幀讀 input.snapshot()，攻擊 / 上下車 / 暫停 / 地圖 / 鏡頭段 / 回頭看 / 快轉走 action', /input\.snapshot\(\)/.test(code) && ['pressed.attack', 'pressed.enterExit', 'pressed.pause', 'pressed.map', 'pressed.camera', 'down.lookBack', 'pressed.timeSkip'].every((s) => code.includes(s)));
   check('main.js：不覆寫 camera.fov（rig 自行管理）', !/camera\.fov\s*=[^=]/.test(code));
   const need = ["bus.on('game:start'", "bus.on('game:pause'", "bus.on('game:quitToMenu'", 'createSaveStore', 'createAutosave', 'createEconomy', 'createMenu', 'createMapView', 'createTrafficLights', 'createCarjack', 'createVehicleDamage', 'traffic.setBudget', 'pedKnockdownPayload', "'player:ko'", 'setGameActive', 'requestPointerLock', 'pointerlockchange', 'visibilitychange', 'pagehide', '--tg-ui-scale', '--ui-scale', 'onVehicleHitWorld', 'onVehicleHitVehicle', 'onVehicleHitPedestrian', 'rig.shake', 'honk()', 'upright()', 'findOverturned', 'carjackCandidates', 'lights.update(', 'lights.updateVisuals(', 'dmg.update('];
-  const lack = need.filter((s) => !code.includes(s));
-  check('main.js：選單 / 存檔 / 經濟 / 號誌 / 搶車 / 耐久 / 手機 / 滑鼠鎖定接線都在', lack.length === 0, lack.join(','));
+  // p5-c1 起每幀排程與物理一幀在 src/core/loop.js（main.js 以 createWorldStep / createFrameLoop 注入依賴）：接線字串比對 main.js + loop.js 合併內容，
+  // 另驗 main.js 確實把 lights / dmg 交給 createWorldStep 並在遊戲中 / 開始畫面呼叫 stepWorld；號誌相位 / 耐久去重時鐘在子步推進（p5-d1）
+  const loopCode = read('src/core/loop.js').replace(/\/\/[^\n]*/g, '');
+  const wired = code + '\n' + loopCode;
+  const lack = need.filter((s) => !wired.includes(s));
+  check('main.js + core/loop.js：選單 / 存檔 / 經濟 / 號誌 / 搶車 / 耐久 / 手機 / 滑鼠鎖定接線都在', lack.length === 0, lack.join(','));
+  const stepSrc = (loopCode.match(/const step = \(dt, center\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
+  check('物理一幀接線：loop.js step 內 pw.step → lights.update / updateVisuals → dmg.update；main.js createWorldStep 注入 lights / dmg、updateGame / updateAttract 呼叫 stepWorld',
+    /pw\.step\(dt\);[\s\S]*lights\.update\(\);\s*lights\.updateVisuals\(camera\.position\.x, camera\.position\.z\);[\s\S]*dmg\.update\(dt, center\.x, center\.z, 0\);/.test(stepSrc)
+    && /createWorldStep\(\{[^}]*\blights,[^}]*\bdmg,/.test(code) && /const stepWorld = worldStep\.step;/.test(code) && (code.match(/stepWorld\(dt, /g) || []).length >= 2);
+  check('子步接線：pw.onBeforeStep → lights.step（在 new Traffic 之前）、pw.onAfterStep → dmg.step（在 router.drain 之後）',
+    code.indexOf('pw.onBeforeStep((h) => lights.step(h));') > 0 && code.indexOf('pw.onBeforeStep((h) => lights.step(h));') < code.indexOf('new Traffic(')
+    && code.indexOf('pw.onAfterStep((dt) => router.drain(dt));') > 0 && code.indexOf('pw.onAfterStep((dt) => router.drain(dt));') < code.indexOf('pw.onAfterStep((h) => dmg.step(h));'));
   check('main.js：dev 掛鉤 __game 含 bus / settings / economy / saveStore / menu / lights / damage / carjack / quality / setQuality / stepFrames / perf', /import\.meta\.env\.DEV/.test(code) && ['bus,', 'settings,', 'get economy()', 'saveStore:', 'menu,', 'lights,', 'damage:', 'carjack:', 'get quality()', 'setQuality(', 'stepFrames(', 'perf,'].every((s) => code.includes(s)));
-  // 暫停時世界停止更新：tick 內 updateGame / updateAttract 都包在 !state.paused 之下
-  const tickSrc = (code.match(/const tick = \(dt\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
-  check('main.js：暫停時世界停止更新但照常渲染', /if \(!state\.paused\) \{\s*if \(state\.started\) updateGame\(dt\);\s*else updateAttract\(dt\);\s*\}/.test(tickSrc) && /render\(\);/.test(tickSrc));
+  // 暫停時世界停止更新：tick 在 core/loop.js（createFrameLoop）——updateWorld 暫停即 return（updateGame / updateAttract 都在其下），
+  // tick 呼叫 updateWorld 後照常 render；main.js 注入 isPaused = state.paused / isStarted = state.started / updateGame / updateAttract / render 並啟動 loop.frame()
+  const worldSrc = (loopCode.match(/const updateWorld = \(dt\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
+  const tickSrc = (loopCode.match(/const tick = \(dt\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
+  const frameLoopSrc = (code.match(/createFrameLoop\(\{([\s\S]*?)\n {2}\}\);/) || [])[1] || '';
+  check('main.js + core/loop.js：暫停時世界停止更新但照常渲染',
+    /^\s*if \(d\.isPaused\(\)\) return;\s*if \(d\.isStarted\(\)\) d\.updateGame\(dt\);\s*else d\.updateAttract\(dt\);\s*$/.test(worldSrc)
+    && /updateWorld\(dt\);[\s\S]*d\.render\(\);/.test(tickSrc)
+    && ['world: worldStep', 'isPaused: () => state.paused', 'isStarted: () => state.started', 'updateGame,', 'updateAttract,', 'render,'].every((x) => frameLoopSrc.includes(x))
+    && /\bloop\.frame\(\);/.test(code));
   const resumeSrc = (code.match(/const resumeGame = \(\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
   check('main.js：「繼續」（game:pause paused:false）同步 requestPointerLock', /requestLock\(\)/.test(resumeSrc) && /input\.enabled = true/.test(resumeSrc));
   const placeSrc = (code.match(/const placePlayer = \(save\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
@@ -333,8 +351,15 @@ const flat = (help) => help.flatMap((g) => g.items);
   const all = pkg.scripts['test:all'] || '';
   const tests = ['core', 'menu', 'save', 'traffic-lights', 'crowd-lod', 'carjack', 'player-feel', 'traffic-flow', 'integration-p3'];
   const scripts = Object.entries(pkg.scripts);
-  const lackTests = tests.filter((t) => !scripts.some(([k, v]) => v === `node tools/test/${t}.mjs` && all.includes(`npm run ${k}`)));
-  check('package.json：test:all 含 Phase 3 測試（core / menu / save / traffic-lights / crowd-lod / carjack / player-feel / traffic-flow / integration-p3）', lackTests.length === 0, lackTests.join(','));
+  // test:all = node tools/test/run-all.mjs：逐支執行 tools/test/*.mjs（只排除自身、任一失敗 exit 1）；
+  // 各 Phase 3 測試仍有 node tools/test/<名>.mjs 的 script（= 位於 tools/test、會被 run-all 收進來）
+  const runAll = read('tools/test/run-all.mjs').replace(/\/\/[^\n]*/g, '');
+  const runAllOk = all === 'node tools/test/run-all.mjs'
+    && /readdirSync\(testDir\)\s*\.filter\(\(f\) => f\.endsWith\('\.mjs'\) && f !== self\)/.test(runAll) && /const self = 'run-all\.mjs';/.test(runAll)
+    && /spawnSync\(process\.execPath, \[join\(testDir, f\)\]/.test(runAll) && /process\.exit\(failed\.length > 0 \? 1 : 0\)/.test(runAll);
+  const lackTests = tests.filter((t) => !scripts.some(([k, v]) => k !== 'test:all' && v === `node tools/test/${t}.mjs`));
+  check('package.json：test:all（run-all.mjs 逐支跑 tools/test/*.mjs）涵蓋 Phase 3 測試（core / menu / save / traffic-lights / crowd-lod / carjack / player-feel / traffic-flow / integration-p3）',
+    runAllOk && lackTests.length === 0, (runAllOk ? '' : `test:all=${all}；`) + lackTests.join(','));
 }
 
 const total = passed + failed;

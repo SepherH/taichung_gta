@@ -1,6 +1,7 @@
 // 車輛耐久與冒煙（C3）：碰撞扣耐久 → 門檻冒白煙 / 黑灰煙降功率 / 歸零熄火（不爆炸、不起火）
 // 用法：const dmg = createVehicleDamage({ bus, THREE, scene, isNight })；dmg.attach(vehicle) 後由整合把 contacts router 的撞擊餵給 onImpact，
-//   每幀 dmg.update(dt, camX, camZ) 推進去重時鐘與煙霧粒子
+//   去重時鐘屬模擬時間（docs/dev/interfaces.md「時間步契約」）：每個物理子步 dmg.step(h)（pw.onAfterStep，登記在 contacts router.drain 之後），
+//   每幀 dmg.update(dt, camX, camZ, simDt) 以渲染 dt 推進煙霧粒子、以 simDt 推進去重時鐘（已在子步推進者傳 0；省略 simDt = dt，無物理的測試用）
 // 傷害：relSpeed < 4 m/s 不扣；以上 = K × (relSpeed − 4)^1.6 × 質量係數 × 對象係數（撞行人 ×0.2）× 機車 ×0.7
 //   K 讓 1400 kg 轎車 30 km/h 撞牆約 61、60 km/h 約 340（目標區間 60–90 / 250–350）
 // 事件（注入的 bus）：vehicle:damaged { vehicle, health, delta }、vehicle:crash { vehicle, relSpeed }（玩家駕駛且 ≥ 8 m/s，撞行人不算）、
@@ -242,8 +243,13 @@ export function createVehicleDamage({ bus, THREE, scene, isNight = null } = {}) 
       return e ? e.health : null;
     },
 
-    update(dt, camX = 0, camZ = 0) {
-      now += dt;
+    // 模擬時間推進去重時鐘（每個物理子步一次）
+    step(dt) {
+      if (dt > 0) now += dt;
+    },
+
+    update(dt, camX = 0, camZ = 0, simDt = dt) {
+      if (simDt > 0) now += simDt;
       const r2 = SMOKE_RADIUS * SMOKE_RADIUS;
       for (const [v, e] of entries) {
         if (e.stage === 0 || !v.pos) continue;

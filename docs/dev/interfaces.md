@@ -462,6 +462,25 @@ stats 增：missionsDone: 0, missionsFailed: 0, shotsFired: 0
 
 render + 物理 + 更新 < 8 ms（`__game.perf()`）；血跡 ≤ 16、血滴 ≤ 32、同時音源 ≤ 12；大地圖開啟時暫停 3D 渲染或降頻；各模組 update 不得每幀配置新物件（重用暫存）
 
+## 20. 時間步契約（p5-c1；`src/physics/world.js` FixedStepper、`src/core/loop.js`）
+
+兩種時間，不得混用：
+
+| 名稱 | 來源 | 用途 |
+|---|---|---|
+| 模擬時間（固定子步 `step` = 1/60 s） | `PhysicsWorld.step(frameDt)` 內 FixedStepper 每個子步呼叫 `onBeforeStep(dt)` / `onAfterStep(dt)`，`dt` 恆為 `step` | 會影響遊戲結果的狀態 |
+| 本幀模擬秒數 `simDt` | `pw.step()` 回傳的 `simDt`（= 子步數 × step）；物理 step **之前**要用時取 `pw.simTimeFor(frameDt)`（純查詢，同一幀內與實際推進值相同；暫停中 0） | 每幀呼叫、但推進的是模擬狀態的地方 |
+| 渲染時間 `dt` | rAF 幀間隔，`core/loop.js` 夾到 `MAX_FRAME_DT` = 0.1 s | 只做插值、動畫 mixer、相機、UI / HUD、音效、特效粒子 |
+
+- **屬模擬時間**（只在固定子步推進，或每幀以 `simDt` 推進）：剛體 / 角色膠囊 / 車輛控制器（子步內）；車流車道邏輯與行人位置、擊退（traffic `_step` / traffic-peds `stepPeds`、`afterStepPeds`）；mid 級與替身行人的降頻走路、行人大腦 `brain.update` 的累積秒數（`thinkPeds(simDt)`，`simDt` 由 traffic `_step` 在子步內累加、`sync` 取走）；自建 combat 時鐘與密度管理計時（traffic.sync）；遊戲對抗時鐘 `gameTime` 與 `combat.update`、號誌相位 `lights.update`、玩家 KO 倒數、搶來 / 報廢車回收計時（main.js / loop.js）
+- **屬渲染時間**：`InterpolatedBody.interpolate(alpha)` 擺網格、`anim.update` / 輪子 `animate`、`rig.update`、`hud` / `whud`、`audio.update`、`blood.update`、煙霧粒子、FPS、自適應解析度
+- **遊戲時鐘（目前用渲染 dt，可接受）**：日夜 `dayNight.update`、任務 elapsed、自動存檔、遊玩 / 步行秒數、導航重算、補給重生；不影響物理狀態，差異只在累加器餘量（< 1 子步）與卡頓丟棄的時間
+- **速度一律 = 推進距離 ÷ 實際推進的模擬秒數**：例 行人動畫速度 = `moveD / moveT`（`moveT` 只在子步或降頻走路時累加）；某幀沒有推進（`moveT` = 0）就沿用上次速度。禁止「當幀位移 ÷ 渲染幀時間」——高於 60 Hz 時約半數幀沒有子步，會得到 0 / 加倍的速度
+- **上限**：渲染 `dt` ≤ `MAX_FRAME_DT` 0.1 s；單幀子步 ≤ `DEFAULT_MAX_SUBSTEPS` 5（= 0.083 s 模擬時間），超過即丟棄累加器餘量（`stepper.dropped` 累計）——卡頓時模擬時間會少於渲染時間，所以模擬計時必須吃 `simDt` 而不是 `dt`
+- **60 Hz 等價**：`dt` 恰為 1/60 時每幀恰 1 子步，`simDt === dt`；本契約不改 60 Hz 下的結果
+- **更新順序**（`core/loop.js`）：tick = 自適應解析度 → 世界更新（暫停時略過；遊戲中 `updateGame`、開始畫面 `updateAttract`）→ 音效 → 渲染 → 效能統計 → FPS → `input.endFrame()`；物理一幀 `createWorldStep().step(dt, center)` = 車流外部狀態（blockers / context / view）→ `lights.update(simDt)` / `updateVisuals` → `pw.step(dt)` → `gameTime += simDt` → `combat.update(simDt)` → `player.syncPhysics(dt)`（非駕駛）→ `vehicles.sync()` → `traffic.sync(dt, center)` → `dmg.update(dt)` → 車輛 `setActiveByDistance(ACTIVE_RADIUS)` → 回收（`simDt`）
+- 回歸：`node tools/test/framerate-invariance.mjs`（60 / 120 / 144 Hz 推進相同模擬時間，行人位置、動畫速度、walk ↔ idle 切換次數一致）
+
 ---
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）

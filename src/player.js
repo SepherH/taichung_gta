@@ -37,7 +37,13 @@ const MIN_WALK_NY = Math.cos((MAX_WALK_SLOPE * Math.PI) / 180);
 const MAX_RISE_PER_M = Math.tan((MAX_WALK_SLOPE * Math.PI) / 180);
 const STEP_UP = 0.35; // 可直接跨上的不連續高差（m）：湖上甲板高出步道 0.3 m（terrain.js DECK_RISE，推測）
 const SNAP_DROP = 0.5; // 下坡落差小於此值直接貼地，超過才進入落下狀態（m）
-const TURN_RATE = 12; // 朝向追上移動方向的速率（1/s）
+const TURN_RATE = 12; // 朝向追上移動方向的速率（1/s；60 Hz 每幀追上剩餘角度的 TURN_RATE / 60 = 20%）
+// 與幀率無關的追向（渲染 dt 下以指數衰減累乘，60 / 120 / 144 Hz 同一段時間轉過的角度相同）：每次追上 1 − exp(−TURN_DECAY · dt)；
+// TURN_DECAY 取 60 Hz 時與舊公式 min(1, TURN_RATE · dt) 相同（60 Hz 手感不變）
+export const TURN_DECAY = -60 * Math.log(1 - TURN_RATE / 60);
+export function turnBlend(dt, decay = TURN_DECAY) {
+  return dt > 0 ? 1 - Math.exp(-decay * dt) : 0;
+}
 const EXIT_SIDE_GAP = 0.8; // 下車點：車身側面再往外多少（m）
 const EXIT_SEARCH_RADIUS = 3; // 下車點附近找空位的半徑（m）
 const RESPAWN_SEARCH_RADIUS = 6; // 退回步道重生時，步道點附近找空位的半徑（m）
@@ -427,7 +433,7 @@ export class Player {
     const it = this._intent;
     if (this._assist) this._turnToAssist(dt);
     else if (Math.hypot(it.moveX, it.moveZ) > 1e-3) {
-      this.yaw += angleDelta(this.yaw, Math.atan2(it.moveX, it.moveZ)) * Math.min(1, TURN_RATE * dt);
+      this.yaw += angleDelta(this.yaw, Math.atan2(it.moveX, it.moveZ)) * turnBlend(dt);
     }
     this.anim.update(dt, { speed: r.speed, grounded: this.onGround });
     this.weaponLayer.update(dt);

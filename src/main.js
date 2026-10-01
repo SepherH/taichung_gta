@@ -1,8 +1,9 @@
 // 臺中GTA 進入點（Phase 3 整合）：建立場景、分步載入、選單流程、存檔經濟、主迴圈（世界依真實 OSM 資料生成）
 // 地形一律取 terrain（唯一高度場）：querySurface 注入給 player / vehicle / traffic / camera；秋紅谷與下沉廣場細節網格由 qiuhonggu.js 產生
 // 物理（Rapier，src/physics/**）：世界碰撞體取真實 terrain（heightfield / walkable / 湖面）與 buildings.js 的建築 colliders；
-// 主迴圈 = 每幀讀輸入快照（input.snapshot）→ 號誌 → PhysicsWorld.step(dt)（固定 1/60 s 子步：子步前角色 move / 車輛 preStep / 車流 kinematic pose，
-// 子步後 contacts router.drain 與停放 / wrecked / 倒地狀態）→ combat.update → 以插值結果同步網格 → 車輛耐久 / 煙 → 鏡頭 / HUD → 渲染
+// 主迴圈 = 每幀讀輸入快照（input.snapshot）→ PhysicsWorld.step(dt)（固定 1/60 s 子步：子步前號誌相位 / 角色 move / 車輛 preStep / 車流 kinematic pose，
+// 子步後 contacts router.drain / 耐久去重時鐘與停放 / wrecked / 倒地狀態）→ 號誌燈色 → combat.update → 以插值結果同步網格 → 車輛耐久 / 煙 → 鏡頭 / HUD → 渲染
+//   每幀排程與物理一幀的順序在 core/loop.js；模擬計時（號誌、對抗時鐘、KO、回收）吃物理實際推進的秒數（docs/dev/interfaces.md「時間步契約」）
 // 核心樞紐（docs/dev/interfaces.md）：bus（core/events 單例）串起選單 / 經濟 / 耐久 / 搶車 / 喇叭；settings（core/settings 單例）驅動
 //   靈敏度、反轉 Y、畫質（人車數即時 traffic.setBudget，DPR / 陰影 / 視距即時重套）、介面大小、FPS 顯示、新手提示
 // 選單流程：載入完成 → 開始畫面（背景環繞鏡頭）→ game:start（繼續 = 還原存檔）→ 遊戲；Esc / P / 觸控暫停鈕 / pointer lock 被解除 → 暫停選單
@@ -57,7 +58,8 @@ import { buildWorldColliders, osmWithBuildings } from './physics/colliders.js';
 import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as G_NPC_CAR, PEDESTRIAN as G_PED, DEBRIS as G_DEBRIS } from './physics/groups.js';
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
-import { setActiveByDistance, ACTIVE_RADIUS } from './physics/npc-bodies.js';
+import { ACTIVE_RADIUS } from './physics/npc-bodies.js';
+import { createWorldStep, createFrameLoop } from './core/loop.js';
 import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS } from './weapons/index.js';
 import { makeBatSegment } from './weapons/models.js';
 import { createWeaponHud } from './weapons/hud.js';
@@ -71,7 +73,6 @@ import { createCheckins } from './collect/checkins.js';
 import { createFoodGuide } from './collect/food-guide.js';
 import { landmarkPoints } from './core/landmark-points.js';
 
-const MAX_FRAME_DT = 0.1; // 單幀時間上限（s）；物理另有子步上限（world.js DEFAULT_MAX_SUBSTEPS）
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
 const PLAYER_KO_SEC = 3; // 玩家 hp 歸零倒地後多久起身（原地 3 m 內空位優先，player.recoverAfterKnockout）
@@ -348,9 +349,11 @@ async function init() {
   // 熄火黑煙夜間提亮：dayNight.night（0–1）
   const dmg = createVehicleDamage({ bus, THREE, scene, isNight: () => dayNight.night });
   for (const v of vehicles.vehicles) dmg.attach(v);
+  pw.onAfterStep((h) => dmg.step(h)); // 去重時鐘 = 模擬時間；在 router.drain 之後（同一子步的撞擊看到的是推進前的時刻）
   const adopted = new Set(); // 搶車 adopt 出來的車（玩家離開後遠了就回收）
   const lights = createTrafficLights();
   lights.buildMeshes(scene, { heightAt });
+  pw.onBeforeStep((h) => lights.step(h)); // 相位 = 模擬時間；須在 new Traffic 之前登記（同一子步車流讀到本子步時刻）
 
   // 對抗計時用遊戲時鐘（暫停 / 切背景時不前進）；玩家駕駛的車撞人 → 駕駛 = 玩家（byPlayer）
   let gameTime = 0;
@@ -857,7 +860,7 @@ async function init() {
   });
   const updateKnockout = (dt) => {
     if (state.koTimer <= 0) return;
-    state.koTimer -= dt;
+    state.koTimer -= pw.simTimeFor(dt); // 模擬計時：本幀物理將推進的秒數（物理 step 前呼叫，累加器尚未變）
     if (state.koTimer > 0) return;
     player.recoverAfterKnockout(terrain);
     combat.revive(player.actor);
@@ -901,8 +904,8 @@ async function init() {
 
   // 回收：玩家已離開的搶來車（遠了）與熄火報廢車（遠了）
   let cleanupT = 0;
-  const cleanupVehicles = (dt, center) => {
-    cleanupT += dt;
+  const cleanupVehicles = (simDt, center) => {
+    cleanupT += simDt;
     if (cleanupT < CLEANUP_SEC) return;
     cleanupT = 0;
     for (const v of vehicles.vehicles.slice()) {
@@ -953,29 +956,22 @@ async function init() {
     traffic.setView(camera.position.x, camera.position.z, viewDir.x / h, viewDir.z / h, halfH);
   };
 
-  // 物理一幀：號誌 → step（內含固定子步）→ 對抗 → 插值同步 → 耐久 / 煙 → 車輛遠距簡化（ACTIVE_RADIUS）
-  // 行人剛體由 traffic.sync 依分層計畫的 physicsRadius（traffic.physicsRadius）自行啟用 / 休眠
-  const entities = [];
-  let physMs = 0;
-  const stepWorld = (dt, center) => {
-    traffic.setBlockers(collectBlockers());
-    updateTrafficContext();
-    updateTrafficView();
-    lights.update(dt);
-    lights.updateVisuals(camera.position.x, camera.position.z);
-    const t0 = performance.now();
-    pw.step(dt);
-    physMs += performance.now() - t0;
-    gameTime += dt;
-    combat.update(dt);
-    if (state.mode !== 'drive') player.syncPhysics(dt);
-    vehicles.sync();
-    traffic.sync(dt, center);
-    dmg.update(dt, center.x, center.z);
-    entities.length = 0;
-    setActiveByDistance(traffic.bodies(vehicles.bodies(entities)), center.x, center.z, ACTIVE_RADIUS);
-    cleanupVehicles(dt, center);
-  };
+  // 物理一幀（順序見 core/loop.js createWorldStep）：step（內含固定子步；號誌相位 / 耐久去重時鐘在子步內推進）→ 號誌燈色 → 對抗 → 插值同步 → 耐久 / 煙 → 車輛遠距簡化（ACTIVE_RADIUS）
+  const worldStep = createWorldStep({
+    pw, lights, camera, combat, player, vehicles, traffic, dmg,
+    activeRadius: ACTIVE_RADIUS,
+    isDriving: () => state.mode === 'drive',
+    prepareTraffic: () => {
+      traffic.setBlockers(collectBlockers());
+      updateTrafficContext();
+      updateTrafficView();
+    },
+    advanceClock: (simDt) => {
+      gameTime += simDt;
+    },
+    cleanup: cleanupVehicles,
+  });
+  const stepWorld = worldStep.step;
 
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
@@ -1101,7 +1097,7 @@ async function init() {
       if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
     } else if (state.started && !state.paused) {
       input.enabled = true;
-      lastTime = performance.now();
+      loop.resetClock();
     }
     return open;
   };
@@ -1377,30 +1373,22 @@ async function init() {
     drawCalls = renderer.info.render.calls;
   };
 
-  // 一幀：暫停時世界（物理、時間、AI、號誌）都不更新，但照常渲染
-  const tick = (dt) => {
-    if (adaptive) adapt.tick(dt);
-    physMs = 0;
-    const t0 = performance.now();
-    if (!state.paused) {
-      if (state.started) updateGame(dt);
-      else updateAttract(dt);
-    }
-    updateAudio(dt); // 暫停中也呼叫（paused: true → 持續音源靜音）
-    const t1 = performance.now();
-    render();
-    recordPerf(performance.now() - t1, physMs, t1 - t0 - physMs);
-    updateFps(dt);
-    input.endFrame();
-  };
-  let lastTime = performance.now();
-  const frame = () => {
-    requestAnimationFrame(frame);
-    const now = performance.now();
-    const dt = Math.min((now - lastTime) / 1000, MAX_FRAME_DT);
-    lastTime = now;
-    tick(dt);
-  };
+  // 每幀排程（core/loop.js）：世界更新 → 音效 → 渲染 → 效能統計 → 輸入收尾
+  const loop = createFrameLoop({
+    world: worldStep,
+    isPaused: () => state.paused,
+    isStarted: () => state.started,
+    updateGame,
+    updateAttract,
+    updateAudio,
+    render,
+    recordPerf,
+    updateFps,
+    endFrame: () => input.endFrame(),
+    adaptTick: (dt) => {
+      if (adaptive) adapt.tick(dt);
+    },
+  });
 
   // ---------- 選單流程 ----------
   const mapView = createMapView({ getPlayer: () => ({ x: focus.x, z: focus.z, yaw: state.mode === 'drive' && state.vehicle ? state.vehicle.yaw : player.yaw }) });
@@ -1557,7 +1545,7 @@ async function init() {
     mobileStart();
     setGameActive(true);
     requestLock();
-    lastTime = performance.now();
+    loop.resetClock();
     if (!continued) autosave.flush('newGame'); // 讓「繼續」立刻反映新局
     // 存檔狀態提示（備份還原 / 損毀重設 / 版本較新）優先於歡迎詞，只提示一次
     if (saveNotice) hud.toast(saveNotice, 5);
@@ -1583,7 +1571,7 @@ async function init() {
     input.enabled = true;
     setGameActive(true);
     requestLock();
-    lastTime = performance.now();
+    loop.resetClock();
   };
 
   const quitToMenu = () => {
@@ -1615,14 +1603,14 @@ async function init() {
       if (state.started) autosave.flush('hidden');
     } else {
       pw.resume();
-      lastTime = performance.now();
+      loop.resetClock();
     }
   });
   window.addEventListener('pagehide', () => {
     if (state.started) autosave.flush('pagehide');
   });
 
-  frame();
+  loop.frame();
   // 載入完成：loading 只負責進度，之後交給選單的開始畫面
   loading.ready();
   input.enabled = false;
@@ -1719,22 +1707,7 @@ async function init() {
       },
       // 手動推 n 幀（每幀 dt 秒，暫停中世界不動），推完渲染一次；回傳 perf()
       stepFrames(n = 1, dt = 1 / 60) {
-        withPhysics(() => {
-          for (let i = 0; i < n; i++) {
-            physMs = 0;
-            const t0 = performance.now();
-            if (!state.paused) {
-              if (state.started) updateGame(dt);
-              else updateAttract(dt);
-            }
-            updateAudio(dt); // 同 tick：暫停中也呼叫
-            const t1 = performance.now();
-            const last = i === n - 1;
-            if (last) render();
-            recordPerf(last ? performance.now() - t1 : null, physMs, t1 - t0 - physMs);
-            input.endFrame();
-          }
-        });
+        withPhysics(() => loop.runFrames(n, dt));
         return perf();
       },
       perf,

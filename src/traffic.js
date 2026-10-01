@@ -49,7 +49,7 @@
 // 7. 行人數 HUD / 除錯：traffic.citizens.length（全部）、traffic.peds.length（骨架）、traffic.impostors.count（替身）
 import * as THREE from 'three';
 import { TRAFFIC_BUDGET_FALLBACK, CITY_SEED, SURFACE_OFFSET } from './data/city.js';
-import { surfaceRoads, TRAFFIC_TYPES, nodeRoads, nodeKey, inBounds, buildingAt, inWater } from './citymodel.js';
+import { surfaceRoads, TRAFFIC_TYPES, nodeRoads, nodeKey, inBounds, buildingAt } from './citymodel.js';
 import { samplePolyline, closestOnSegment, SpatialGrid } from './geom.js';
 import { Vehicle, meshOrigin } from './vehicle.js';
 import { pedestrianRoutes } from './places.js';
@@ -58,6 +58,7 @@ import { CombatSystem } from './combat.js';
 import { NpcBrain, wireCombatToBrains } from './npc-ai.js';
 import { mulberry32, angleDelta, randPick } from './utils.js';
 import { createNpcCar, createPedestrianBody, setActiveByDistance, PED_RADIUS } from './physics/npc-bodies.js';
+import { PED_KNOCKBACK_DECAY, pathPoint, walkPed, returnPed, pedBlocked, pedMove, reactPed, startReturn, syncActor, updatePed, stepPeds, afterStepPeds, thinkPeds, animatePed } from './traffic-peds.js';
 import { yawOf } from './physics/vehicle-body.js';
 import { crowdPlan, createCrowdLod, createStagger, swapPolicy, createCrowdImpostors } from './crowd.js';
 
@@ -69,12 +70,9 @@ const HAIRS = ['#1b1b1b', '#3b2a20', '#5a4a3a', '#9a9a9a'];
 
 const CRUISE = { primary: 13, secondary: 11, tertiary: 9 };
 const REALIGN_MAX_DIST = 30; // wrecked 恢復時離原道路超過此距離（m）就改找最近的車流道路
-const PED_ARRIVE = 0.05; // 起身後走回人行道：距人行道點小於此值（m）視為回到路線
 const PED_VARIANTS = ['pedestrian', 'pedestrian_f', 'pedestrian_heavy']; // 角色 manifest 的三種 variant
 const PED_HEAVY = 'pedestrian_heavy'; // 壯碩體型：大腦還手比例較高
 const PED_HP = 100;
-const PED_RUN_SPEED = 4.5; // 逃跑 / 追擊跑速（m/s，推測：一般成人慢跑到快跑之間）
-const PED_TURN_RATE = 10; // react 狀態轉向速率（1/s）：還手時要很快對準目標
 // 密度管理（距離以 sync 的 center 計；半徑 / 人數 / 骨架池讀 crowdPlan）
 const CROWD_SLACK = 0.1; // radius 內超過目標此比例才回收多出來的人（視野外、near 外、漫步中者）
 // 市民總數（骨架 + 替身，含 radius 外、尚未到回收半徑者）上限 = floor(目標 × 此值)：實測 1.25 時 low 檔總數 46–50 > budget.peds 40，
@@ -97,12 +95,8 @@ const CROWD_INNER_MIN_CAP = 60;
 const IMPOSTOR_SPARE = 8; // 替身 slot 在市民上限外的餘量（被拖出的司機等臨時加人）
 const SWAP_PER_FRAME = 6; // 每幀最多取 / 還幾個骨架（near 級不受限）：畫質切換或高速移動時分攤到多幀
 const CREATE_PER_FRAME = 2; // 每幀最多新建幾個骨架（複製 glb 較貴；near 級不受限）
-const ANIM_RESUME_MAX = 0.5; // 凍結 / 降頻的 mixer 恢復時，單次推進的 dt 上限（s）
 const VIEW_MARGIN = 0.2; // 視錐半角外加的邊距（rad）：畫面邊緣剛好出現的人也算看得到
 const LOS_STEP = 5; // 視線被建築遮擋的取樣間距（m）
-const PED_KNOCKBACK_DECAY = 12; // 擊退速度的指數衰減率（1/s）：位移總和 = 初速 / 衰減率，約 0.25 s 內推完
-const PED_BLOCK_PAD = PED_RADIUS; // 行人自由移動（react / 擊退）時與建築 / 水域保持的距離（m）
-const PED_BOUNDS_MARGIN = 3;
 const RETURN_SEARCH = 40; // 回 wander 時找路線的搜尋半徑（m）
 const MAX_BUSES = 2; // 公車數量上限（計入 budget.cars）
 // 公車行駛的主幹道：OSM primary（臺灣大道）與 secondary（文心路、黎明路等市區幹道；出生點附近沒有 primary）
@@ -283,6 +277,7 @@ export class Traffic {
     this.view = null; // setView：鏡頭位置與水平朝向（null = 全部視為視野外）
     this.frame = 0;
     this._crowdT = 0;
+    this._simAcc = 0; // 本幀物理子步已推進的模擬秒數（_step 累加、sync 取走）
     this._spawnSeq = 0;
     this._spotQ = [];
     this._carQ = [];
@@ -829,11 +824,7 @@ export class Traffic {
   }
 
   _syncActor(p) {
-    const a = p.actor;
-    a.pos.x = p.x;
-    a.pos.y = p.y;
-    a.pos.z = p.z;
-    a.yaw = p.yaw;
+    syncActor(p);
   }
 
   // 車輛實體（VehicleBody / NPC 車）→ 固定的參考物件：combat 以它去重、npc-ai 讀 pos 當事發點
@@ -1139,83 +1130,30 @@ export class Traffic {
     v.settle(this.terrain, dt, snap);
   }
 
-  // ---------- 行人移動 ----------
+  // ---------- 行人移動（實作在 traffic-peds.js；保留方法名供既有呼叫端 / 測試 wrap）----------
 
-  // 人行道上 s 處的點（寫入 out.x / out.z），回傳前進方向 yaw
   _pathPoint(p, out) {
-    const tmp = this._tmp;
-    samplePolyline(p.road, p.s, tmp);
-    out.x = tmp.x - tmp.dz * p.off;
-    out.z = tmp.z + tmp.dx * p.off;
-    return Math.atan2(tmp.dx * p.dir, tmp.dz * p.dir);
+    return pathPoint(this, p, out);
   }
 
-  // 沿路線可行走區段 [s0, s1] 來回走：更新 p.x / p.y / p.z / p.yaw（骨架行人與替身市民共用）；回傳本次沿路線走的距離（m）
-  // 走過端點的部分折返（不丟掉那段時間，掉頭時步速不掉）
   _walkPed(p, dt, snap = false) {
-    const d = p.speed * dt;
-    p.s += p.dir * d;
-    if (p.s > p.s1) {
-      p.s = Math.max(p.s0, 2 * p.s1 - p.s);
-      p.dir = -1;
-    } else if (p.s < p.s0) {
-      p.s = Math.min(p.s1, 2 * p.s0 - p.s);
-      p.dir = 1;
-    }
-    const want = this._pathPoint(p, p);
-    // yHint = 上一步腳底高（初始 Infinity 取最上層可行走面）；只轉 yaw，坡上保持直立
-    p.y = this.terrain.querySurface(p.x, p.z, p.y, this._q).y;
-    if (snap) p.yaw = want;
-    else p.yaw += angleDelta(p.yaw, want) * Math.min(1, 8 * dt);
-    return d;
+    return walkPed(this, p, dt, snap);
   }
 
-  // 起身後走回人行道上最近的點（s 固定），到達後恢復來回走
   _returnPed(p, dt) {
-    const t = this._ret || (this._ret = { x: 0, z: 0 });
-    this._pathPoint(p, t);
-    const dx = t.x - p.x;
-    const dz = t.z - p.z;
-    const d = Math.hypot(dx, dz);
-    const stepLen = Math.min(d, p.speed * dt);
-    if (d > 1e-6) {
-      p.x += (dx / d) * stepLen;
-      p.z += (dz / d) * stepLen;
-      p.yaw += angleDelta(p.yaw, Math.atan2(dx, dz)) * Math.min(1, 8 * dt);
-    }
-    p.y = this.terrain.querySurface(p.x, p.z, p.y, this._q).y;
-    if (d - stepLen < PED_ARRIVE) p.state = 'walk';
+    returnPed(this, p, dt);
   }
 
-  // 自由移動（react 意圖 / 擊退）的阻擋：建築、水域、世界邊界（2D 檢查，與 places.js 路線檢查同一套資料）
   _pedBlocked(x, z) {
-    return !inBounds(x, z, PED_BOUNDS_MARGIN) || !!buildingAt(x, z, PED_BLOCK_PAD) || !!inWater(x, z, PED_BLOCK_PAD);
+    return pedBlocked(x, z);
   }
 
-  // 位移 (dx, dz)：整步被擋就沿 x / z 單軸滑動（貼著牆走），都不行就停住；回傳是否有移動
   _pedMove(p, dx, dz) {
-    if (Math.abs(dx) + Math.abs(dz) < 1e-9) return false;
-    if (!this._pedBlocked(p.x + dx, p.z + dz)) {
-      p.x += dx;
-      p.z += dz;
-    } else if (Math.abs(dx) > 1e-9 && !this._pedBlocked(p.x + dx, p.z)) {
-      p.x += dx;
-    } else if (Math.abs(dz) > 1e-9 && !this._pedBlocked(p.x, p.z + dz)) {
-      p.z += dz;
-    } else return false;
-    return true;
+    return pedMove(p, dx, dz);
   }
 
-  // react：套用大腦意圖（受擊硬直中不移動）；faceYaw 優先，否則面向移動方向
   _reactPed(p, dt) {
-    const it = p.intent;
-    const stunned = this.combat.stateOf(p.actor) === 'hit';
-    const sp = stunned ? 0 : it.run ? PED_RUN_SPEED : p.speed;
-    const moving = sp > 0 && Math.hypot(it.moveX, it.moveZ) > 1e-6;
-    if (moving) this._pedMove(p, it.moveX * sp * dt, it.moveZ * sp * dt);
-    // 受擊硬直中維持面向攻擊者（'hit' 事件已轉身），硬直結束才照意圖轉向
-    const face = stunned ? null : it.faceYaw ?? (moving ? Math.atan2(it.moveX, it.moveZ) : null);
-    if (face !== null) p.yaw += angleDelta(p.yaw, face) * Math.min(1, PED_TURN_RATE * dt);
+    reactPed(this, p, dt);
   }
 
   // 最近的行人路線區段（RETURN_SEARCH 內生成點所屬；找不到就擴大搜尋）：回傳 { route, s, d } 或 null
@@ -1237,103 +1175,17 @@ export class Traffic {
     return best;
   }
 
-  // 回 wander：投影回附近最近的路線區段，以 return 走過去再繼續來回走；附近沒有就回原路線
   _startReturn(p) {
-    const best = this._nearestRoute(p.x, p.z, p.route);
-    const r = best.route;
-    p.route = r;
-    p.road = r.road;
-    p.off = r.off;
-    p.s0 = r.s0;
-    p.s1 = r.s1;
-    p.s = best.s;
-    p.state = 'return';
+    startReturn(this, p);
   }
 
-  // 每個物理子步：依 ped.state 更新位置（wander = 原人行道邏輯、react = 大腦意圖），再疊加擊退；
-  // 回傳本子步走過的水平距離（m，動畫速度用：漫步取沿路線距離，其餘取位移）
   _updatePed(p, dt) {
-    const x0 = p.x;
-    const z0 = p.z;
-    let walked = 0;
-    if (p.state === 'return') this._returnPed(p, dt);
-    else if (p.state === 'walk') walked = this._walkPed(p, dt);
-    else if (p.state === 'react') this._reactPed(p, dt);
-    if (p.kbx !== 0 || p.kbz !== 0) {
-      if (!this._pedMove(p, p.kbx * dt, p.kbz * dt)) {
-        p.kbx = 0;
-        p.kbz = 0;
-      }
-      const k = Math.exp(-PED_KNOCKBACK_DECAY * dt);
-      p.kbx *= k;
-      p.kbz *= k;
-      if (Math.hypot(p.kbx, p.kbz) < 0.05) {
-        p.kbx = 0;
-        p.kbz = 0;
-      }
-    }
-    if (p.state === 'react' || p.state === 'getup' || p.kbx !== 0) p.y = this.terrain.querySurface(p.x, p.z, p.y, this._q).y;
-    this._syncActor(p);
-    return Math.max(walked, Math.hypot(p.x - x0, p.z - z0));
+    return updatePed(this, p, dt);
   }
 
-  // 每幀：大腦決策 → ped.state 轉換（wander ↔ react、getup 結束）；意圖留給下一幀的物理子步套用
-  // 大腦間隔 = lod.aiEvery(level)（stagger 錯開、累積 dt）；mid 級、剛體停用中、漫步中的骨架不跑物理子步，改在此以累積 dt 走路；
-  // 替身市民沒有大腦，同一間隔以累積 dt 走路線
-  _thinkPeds(dt) {
-    const ctx = this.context;
-    const st = this.stagger;
-    const lod = this.lod;
-    const frame = this.frame;
-    for (const p of this.peds) {
-      const level = p.citizen.level;
-      p.aiAcc += dt;
-      p.fine = level === 'near' || p.body.active || p.state !== 'walk';
-      if (p.fine) p.walkAcc = 0;
-      else p.walkAcc += dt;
-      if (!st.shouldTick(p.slot, frame, lod.aiEvery(level))) continue;
-      const brain = p.brain;
-      // 被拖出的司機：起身後才把「被攻擊」交給大腦（倒地中大腦只會記成逃跑）→ 依性格還手或逃跑
-      if (p.pendingFrom && !this.combat.isDown(p.actor)) {
-        const who = p.pendingAttacker;
-        brain.onAttacked(who ? { attacker: who } : { vehicle: p.pendingFrom });
-        p.pendingAttacker = null;
-        p.pendingFrom = null;
-      }
-      const it = brain.update(p.aiAcc, ctx);
-      p.aiAcc = 0;
-      p.intent.moveX = it.moveX;
-      p.intent.moveZ = it.moveZ;
-      p.intent.run = it.run;
-      p.intent.faceYaw = it.faceYaw;
-      if (it.jump) p.anim.trigger('jump');
-      if (p.state === 'down') continue;
-      if (p.state === 'getup') {
-        if (this.combat.isDown(p.actor)) continue;
-        if (it.mode === 'wander') this._startReturn(p);
-        else p.state = 'react';
-      } else if (it.mode === 'wander') {
-        if (p.state === 'react') this._startReturn(p);
-      } else if (it.mode !== 'down') {
-        p.state = 'react';
-      }
-      if (!p.fine && p.state === 'walk' && p.walkAcc > 0) {
-        p.moveD += this._walkPed(p, p.walkAcc);
-        p.moveT += p.walkAcc;
-        p.walkAcc = 0;
-        this._syncActor(p);
-        p.body.setPose(p.x, p.y, p.z, p.yaw);
-      }
-    }
-    const farEvery = lod.aiEvery('far');
-    for (const c of this.citizens) {
-      if (c.rep !== 'impostor') continue;
-      c.walkAcc += dt;
-      if (!st.shouldTick(c.slot, frame, farEvery)) continue;
-      this._walkPed(c, c.walkAcc);
-      c.walkAcc = 0;
-      c.moved = true;
-    }
+  // simDt：本幀物理實際推進的模擬秒數（sync 由 _step 累加的 _simAcc 取得）
+  _thinkPeds(simDt) {
+    thinkPeds(this, simDt);
   }
 
   // wrecked 恢復：以目前位置投影回道路（太遠就找最近的車流道路），行進方向取與車頭較一致的一側；
@@ -1370,18 +1222,14 @@ export class Traffic {
 
   // 物理子步前：車道 / 人行道邏輯 → kinematic 目標 pose（wrecked / 倒地者、mid 級漫步中的骨架跳過）
   _step(dt) {
+    this._simAcc += dt; // 本幀已推進的模擬秒數（sync 取走後歸零）
     for (const car of this.cars) {
       if (car.body.isWrecked) continue;
       this._driveCar(car, dt, this.blockers);
       const v = car.v;
       car.body.setTargetPose(v.pos.x, v.pos.y, v.pos.z, v.yaw, dt);
     }
-    for (const p of this.peds) {
-      if (p.state === 'down' || !p.fine) continue;
-      p.moveD += this._updatePed(p, dt);
-      p.moveT += dt;
-      p.body.setPose(p.x, p.y, p.z, p.yaw);
-    }
+    stepPeds(this, dt);
   }
 
   // 物理子步後：wrecked 計時與恢復、倒地行人的落穩檢查（起身由 combat 決定）
@@ -1394,17 +1242,7 @@ export class Traffic {
       car.v.pos.set(pose.x, pose.y, pose.z);
       if (b.canRecover && b.recover()) this._realign(car);
     }
-    for (const p of this.peds) {
-      if (p.state !== 'down') continue;
-      p.settle = p.body.settleCheck(dt);
-      const t = p.body.getPosition();
-      p.moveD += Math.hypot(t.x - p.x, t.z - p.z);
-      p.moveT += dt;
-      p.x = t.x;
-      p.y = t.y - p.body.centerY;
-      p.z = t.z;
-      this._syncActor(p);
-    }
+    afterStepPeds(this, dt);
   }
 
   // 車道邏輯（每個物理子步一次）：前方有東西就停、號誌停車、沿道路前進、到端點換路或掉頭、出界掉頭
@@ -1630,12 +1468,16 @@ export class Traffic {
 
   // 每幀（物理 step 之後）：自建的 combat 推進 → 密度管理 → 分層 → 大腦決策 → 網格依插值姿態擺放、輪子 / 角色動畫 / 替身
   // → 行人剛體依 plan.physicsRadius 啟用 / 休眠；center：玩家 / 鏡頭焦點（密度管理與分層的中心），省略時用出生點
+  // 時間步契約：dt = 渲染幀時間，只用於插值 / 輪子與角色動畫；模擬狀態（自建 combat 時鐘、密度管理計時、大腦、降頻走路）
+  // 用 simDt = 本幀物理子步實際推進的秒數（_step 累加），60Hz 每幀 1 子步時兩者相同
   sync(dt, center = this.center) {
     const alpha = this.pw.alpha;
-    this.clock += dt;
+    const simDt = this._simAcc;
+    this._simAcc = 0;
+    this.clock += simDt;
     this.frame++;
-    if (this.ownsCombat) this.combat.update(dt);
-    this._crowdT += dt;
+    if (this.ownsCombat) this.combat.update(simDt);
+    this._crowdT += simDt;
     if (this._crowdT >= CROWD_TICK) {
       this._crowdT = 0;
       this._manageCrowd(center);
@@ -1643,7 +1485,7 @@ export class Traffic {
       this._trimPool();
     }
     this._updateLod(center);
-    this._thinkPeds(dt);
+    this._thinkPeds(simDt);
     for (const car of this.cars) {
       const v = car.v;
       const b = car.body;
@@ -1666,24 +1508,10 @@ export class Traffic {
       v.mesh.rotation.set(-v.pitch, yawOf({ x: o.qx, y: o.qy, z: o.qz, w: o.qw }), v.roll + v.lean);
     }
 
-    const st = this.stagger;
     for (const p of this.peds) {
       const b = p.body;
-      const c = p.citizen;
-      // 動畫：間隔 = lod.mixerEvery（near 每幀、mid 每 3 幀、mid 視野外凍結），累積 dt（恢復時上限 ANIM_RESUME_MAX）；
-      // 速度 = 上次取樣以來走過的距離 moveD / 位置實際推進的模擬秒數 moveT（位置只在 1/60 子步或 AI 間隔推進，
-      // 不能除以渲染幀時間：高於 60Hz 時約半數幀沒有子步，會得到 0 / 加倍的速度而在 walk ↔ idle 間來回切）；
-      // 本次沒有推進（moveT 0）就沿用上次速度
-      p.animAcc += dt;
-      if (st.shouldTick(p.slot, this.frame, this.lod.mixerEvery(c.level, c.inView))) {
-        if (p.moveT > 0) {
-          p.animSpeed = p.moveD / p.moveT;
-          p.moveD = 0;
-          p.moveT = 0;
-        }
-        p.anim.update(Math.min(p.animAcc, ANIM_RESUME_MAX), { speed: p.animSpeed });
-        p.animAcc = 0;
-      }
+      // 動畫：渲染 dt 推 mixer、速度 = moveD / moveT（實際推進的模擬秒數），見 traffic-peds.js animatePed
+      animatePed(this, p, dt);
       if (!b.active) {
         p.mesh.position.set(p.x, p.y + SURFACE_OFFSET, p.z);
         p.mesh.rotation.set(0, p.yaw, 0);

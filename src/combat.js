@@ -30,6 +30,11 @@
 //     取代直接改 entries；emit 預設 false（不發 'knockdown'，同舊做法）；impulse 省略時不呼叫 body.knockdown
 //   'hit' 的 side：目標面向 ·（攻擊者 → 目標方向）> 0 = 被從背後打 → 'back'，否則 'front'；受擊動畫 anim.trigger('hit', { side })
 //   'knockdown' payload cause 擴充 'bat' | 'bullet'，另帶 weapon
+// 匯流排事件 ped:dead（行人 hp 歸零、判定死亡的當下發一次；recoverOnKo 的拳 / 棒歸零只倒地不算）：
+//   payload { ped, cause: 'punch'|'bat'|'bullet'|'vehicle', weapon, attacker（擊殺來源：出手者 / 駕駛 actor 或 null）, byPlayer, x, z }
+//   bus 由建構參數注入；省略時用 core/events 全域單例（main.js 用的同一個），給 bus: null 則不發
+
+import { bus as globalBus } from './core/events.js';
 
 export const PUNCH_DAMAGE = 20; // 每拳傷害：滿血 100 需 5 拳，但 4 秒內連中 3 拳就先倒地
 export const PUNCH_COOLDOWN = 0.55; // 出拳冷卻（秒）：約等於一拳動畫長度，連按不會變機關槍
@@ -127,9 +132,10 @@ function windowPhase(arg) {
 }
 
 export class CombatSystem {
-  constructor({ now = () => performance.now() / 1000, vehicleDriver = null } = {}) {
+  constructor({ now = () => performance.now() / 1000, vehicleDriver = null, bus = globalBus } = {}) {
     this.now = now;
     this.vehicleDriver = vehicleDriver;
+    this.bus = bus;
     this.entries = new Map(); // actor.id → entry
     this.listeners = { hit: [], knockdown: [], getup: [], dead: [] };
     this.punchSeq = 0;
@@ -274,25 +280,36 @@ export class CombatSystem {
       e.vehicleHits.set(vehicle, t);
     }
     const damage = vehicleDamage(relSpeed);
-    this._damage(e, damage, t, 'vehicle');
+    const attacker = driver || (vehicle && this.vehicleDriver ? this.vehicleDriver(vehicle) || null : null);
+    const died = this._damage(e, damage, t, 'vehicle');
     if (e.state === 'knockdown') {
       // 已倒地又被撞：不重播倒地動畫，只扣血並重新計算落穩時間
       e.stateAt = t;
     } else {
-      const attacker = driver || (vehicle && this.vehicleDriver ? this.vehicleDriver(vehicle) || null : null);
       this._knockdown(e, impulse, t, { cause: 'vehicle', weapon: 'vehicle', attacker, vehicle, relSpeed, damage });
     }
+    if (died) this._emitPedDead(e, 'vehicle', 'vehicle', attacker);
     return true;
   }
 
   // cause：'punch' | 'bat' | 'bullet' | 'vehicle'；recoverOnKo 的角色被拳擊 / 棒擊打到 hp 歸零不進 dying（倒地後照常起身）
+  // 回傳本次是否判定死亡（剛進 dying）：呼叫端在受擊 / 倒地事件之後發 ped:dead
   _damage(e, damage, t, cause) {
     const a = e.actor;
     a.hp = Math.max(0, a.hp - damage);
     if (a.hp <= 0 && !e.dying && !(a.recoverOnKo && (cause === 'punch' || cause === 'bat'))) {
       e.dying = true;
       e.dyingAt = t;
+      return true;
     }
+    return false;
+  }
+
+  // 行人判定死亡 → 匯流排 ped:dead（玩家死亡走整合層的 player:ko，不發）
+  _emitPedDead(e, cause, weapon, attacker) {
+    const a = e.actor;
+    if (!this.bus || a.kind !== 'pedestrian') return;
+    this.bus.emit('ped:dead', { ped: a, cause, weapon, attacker: attacker || null, byPlayer: !!attacker && attacker.kind === 'player', x: a.pos.x, z: a.pos.z });
   }
 
   _knockdown(e, impulse, t, info) {
@@ -345,7 +362,7 @@ export class CombatSystem {
   _hit(att, e, t, a, damage, weapon, dx, dz, impulse, point, swingId) {
     const target = e.actor;
     const cause = WEAPON_CAUSE[weapon];
-    this._damage(e, damage, t, cause);
+    const died = this._damage(e, damage, t, cause);
     const hitTimes = e.hitTimes;
     const kinds = e.hitKinds;
     hitTimes.push(t);
@@ -400,6 +417,7 @@ export class CombatSystem {
       this._hitArg.side = side;
       target.anim.trigger('hit', this._hitArg);
     }
+    if (died) this._emitPedDead(e, cause, weapon, a);
     return knock;
   }
 

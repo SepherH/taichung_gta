@@ -190,7 +190,8 @@ export function createWeaponHud({
 
     on(btnWeapon, 'pointerdown', (e) => {
       prevent(e);
-      if (press) return;
+      // 重疊觸控（快速連點時前一指還沒放開）或前一次 press 卡住：先結算前一次，再開始新的
+      if (press) settleWeapon(e, 'preempt');
       capture(e);
       const r = btnWeapon.getBoundingClientRect ? btnWeapon.getBoundingClientRect() : { left: e.clientX, top: e.clientY, width: 0, height: 0 };
       press = { id: e.pointerId, t0: nowMs(), x0: e.clientX, y0: e.clientY, cx: r.left + r.width / 2, cy: r.top + r.height / 2, moved: 0, timer: null };
@@ -204,21 +205,25 @@ export function createWeaponHud({
       press.moved = Math.max(press.moved, Math.hypot(e.clientX - press.x0, e.clientY - press.y0));
       if (wheelOpen) markSel(wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy));
     });
-    const endWeapon = (e) => {
-      if (!press || e.pointerId !== press.id) return;
-      prevent(e);
+    // 結算目前 press：mode 'up' = 正常放開（短按 cycle、輪盤選格 select）；'cancel' = pointercancel / lostpointercapture
+    //   （只清狀態）；'preempt' = 被下一指搶先（短按仍算一次 cycle，輪盤取消）
+    function settleWeapon(e, mode) {
       clearTimeout(press.timer);
       const kind = wheelOpen ? 'long' : classifyPress(nowMs() - press.t0, press.moved);
       if (kind === 'long') {
-        const s = e.type === 'pointerup' ? wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy) : -1;
+        const s = mode === 'up' ? wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy) : -1;
         if (s >= 0) select(s);
-      } else if (kind === 'tap' && e.type === 'pointerup') cycle();
+      } else if (kind === 'tap' && mode !== 'cancel') cycle();
       press = null;
       setWheel(false);
       toggle(btnWeapon, 'active', false);
+    }
+    const endWeapon = (e) => {
+      if (!press || e.pointerId !== press.id) return;
+      prevent(e);
+      settleWeapon(e, e.type === 'pointerup' ? 'up' : 'cancel');
     };
-    on(btnWeapon, 'pointerup', endWeapon);
-    on(btnWeapon, 'pointercancel', endWeapon);
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) on(btnWeapon, type, endWeapon);
     on(btnWeapon, 'contextmenu', prevent);
 
     on(btnReload, 'pointerdown', (e) => {

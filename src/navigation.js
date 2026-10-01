@@ -542,6 +542,7 @@ export function createNavigator({ bus = null, graph, scene = null, heightAt = nu
     update,
     reroute,
     route: () => (routeRes ? routeRes.points : null),
+    // 路線總長（m，有限數 ≥ 0；起點與目的地重合時為 0）；無路線（無目的地 / 尚未算路 / 不可達 / 非法座標）一律 null，與 route() 同步
     routeLength: () => (routeRes ? routeRes.lengthM : null),
     destination: () => (dest ? { ...dest } : null),
     // 給小地圖 / 大地圖：目的地標記（重用同一陣列與物件）
