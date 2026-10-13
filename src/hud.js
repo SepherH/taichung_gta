@@ -29,6 +29,8 @@
 //   markers kind 'event-start' / 'event-dest'（時段事件取餐點 / 送達點）與 'event-truck'（垃圾車，會移動）著色且超出半徑時貼邊
 //   setMoney(money, delta, reason)：reason 'event'（外送入帳）時跳動文字前加「外送」、'garbage'（垃圾車入帳）加「清運」
 // Phase 6（I6a）：hud.showCamView(index) → 畫面上方短暫顯示「鏡頭：近 / 中 / 遠」1.2 s（src/ui/cam-view-hint.js，倒數吃 update 的渲染 dt）
+// Phase 7（通緝）：state.searchCircle（wanted.searchCircle：{ x, z, r } | null）→ 小地圖以 wanted/ui.js drawSearchCircle 畫搜索圈（藍紅交替）；
+//   state.policeCars（[{ x, z }]，police.cars 的 pos）→ 小地圖紅藍交替閃爍點（每 POLICE_BLINK_SEC 秒換色，超出半徑不畫）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
@@ -36,6 +38,7 @@ import { isTouch } from './mobile.js';
 import { setTouchMode, setTouchButtonVisible, registerTouchButton } from './touch.js';
 import { MARKER_COLORS as BASE_MARKER_COLORS, CAR_MARKER_COLOR } from './map/marker-colors.js';
 import { createCamViewHint } from './ui/cam-view-hint.js';
+import { drawSearchCircle } from './wanted/ui.js';
 
 const MAP_SCALE = 1; // 預先繪製的全圖：1px = 1m
 const MAP_LABEL_AREA = 4000; // 輪廓面積（m²）超過此值的具名建築在小地圖上顯示名稱
@@ -65,6 +68,9 @@ export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
 const EDGE_PAD = 9; // 貼邊標記距外框的內縮（px）
+export const POLICE_DOT_COLORS = ['#ff3b3b', '#3b7bff']; // 小地圖警車點：紅藍交替
+const POLICE_BLINK_SEC = 0.25; // 警車點換色週期（每段秒數）
+const POLICE_DOT_PX = 4.5; // 警車點半徑（螢幕 px）
 
 // localStorage 安全包裝：無痕 / 停用儲存 / node 無 window 時回 null
 function defaultStorage() {
@@ -610,6 +616,7 @@ export class HUD {
       if (this._moneyDeltaTimer <= 0) this.moneyDeltaEl.classList.add('hidden');
     }
     this._camViewHint.update(dt);
+    this._wantedT = (this._wantedT || 0) + (Number.isFinite(dt) ? dt : 0); // 搜索圈 / 警車點閃爍時鐘（渲染 dt）
     this._updateHints(dt);
     if (Number.isFinite(state.x) && Number.isFinite(state.z)) this._drawMinimap(state);
   }
@@ -683,8 +690,20 @@ export class HUD {
     if (state.route && state.route.length > 1) this._drawRoute(ctx, state.route, state.x, state.z, R / k, k);
     ctx.restore();
 
+    // 通緝搜索圈（螢幕座標系，裁在小地圖圓內）
+    const sc = state.searchCircle;
+    if (sc && Number.isFinite(sc.x) && Number.isFinite(sc.z) && sc.r > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(R, R, R - 2, 0, Math.PI * 2);
+      ctx.clip();
+      drawSearchCircle(ctx, { cx: R + (sc.x - state.x) * k, cy: R + (sc.z - state.z) * k, r: sc.r * k, t: this._wantedT });
+      ctx.restore();
+    }
+
     // 標記（螢幕座標系：北朝上、+x 往右、+z 往下，與底圖一致）
     if (state.markers && state.markers.length) this._drawMarkers(ctx, state.markers, state.x, state.z, R, k);
+    if (state.policeCars && state.policeCars.length) this._drawPoliceCars(ctx, state.policeCars, state.x, state.z, R, k);
 
     // 玩家箭頭（北方朝上，箭頭依角色朝向旋轉）
     ctx.save();
@@ -747,6 +766,26 @@ export class HUD {
     ctx.lineWidth = (ROUTE_WIDTH * MAP_SCALE) / k; // 底圖座標系已縮放 k / MAP_SCALE
     ctx.strokeStyle = ROUTE_COLOR;
     ctx.stroke();
+  }
+
+  // 警車：紅藍交替閃爍點（每台錯開一個相位），超出小地圖半徑不畫
+  _drawPoliceCars(ctx, cars, px, pz, R, k) {
+    const inner = R - EDGE_PAD;
+    const phase = Math.floor((this._wantedT || 0) / POLICE_BLINK_SEC);
+    for (let i = 0; i < cars.length; i++) {
+      const c = cars[i];
+      if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.z)) continue;
+      const dx = (c.x - px) * k;
+      const dz = (c.z - pz) * k;
+      if (dx * dx + dz * dz > inner * inner) continue;
+      ctx.beginPath();
+      ctx.arc(R + dx, R + dz, POLICE_DOT_PX, 0, Math.PI * 2);
+      ctx.fillStyle = POLICE_DOT_COLORS[(phase + i) % 2];
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
   }
 
   // 標記依 kind 著色；超出半徑的任務 / 目的地標記貼邊並畫朝外三角形指出方向

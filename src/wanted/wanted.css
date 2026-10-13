@@ -1,0 +1,208 @@
+/* 通緝 UI（src/wanted/ui.js）：前綴 wanted-，z-index 53–54（HUD 模組區間）、全螢幕畫面 95（蓋過任務面板 85）
+   全部 pointer-events none，唯一例外是提示卡關閉鈕；被捕 / 送醫的點擊跳過由 ui.js 在 document 層監聽
+   位置（星星列）對齊 src/style.css 的 #status / #money-delta 與 .tbtn slot、weapons.css 的 .wp-hud / .wp-tb-*：
+   - 桌機：右上 .wp-hud（22 + 60s ～ 30 + 100s）正下方，top 36 + 100s、右 16（s = --hud-scale）
+   - 觸控橫向：金錢 +/− 那一列（76 + 32s ～ 76 + 50s）左側：top 76 + 32s、右 22 + 150s、寬 100 高 20（s = 1 時 y 108–128、右 172–272）；
+     左緣 x = W − 272 ≥ 中線（568 寬時 296 > 284），讓開左半提示膠囊 / 訊息；上方視角鈕到 68、駕駛互動鈕 / 下車列從 134 起，攻擊 / 上車鈕上緣 ≥ 138（高 ≥ 360）
+   - 568×320 這類極矮窄橫向步行：#status 已移到 58–98（右 116）、該列被攻擊鈕（104 起）佔用 →
+     改放裝填鈕（14–66）與上車鈕（98 起）之間、#status 右側：top 70、右 16、寬 92 高 24（x 460–552；與各鄰居間距 4 / 4 / 8）
+   - 觸控直向：右半上方被小鈕 / 下車列 / 提示卡 / 武器面板佔滿 → 改放左下：駕駛面板（底 40、高 88s）上方 8px、搖桿底座（底緣 = 底 226）下方，
+     left 10、bottom 48 + 88s（360×640 時 y 482–504）
+   以上皆加 env(safe-area-inset-*)，與鄰居同基準 */
+
+.wanted-stars {
+  position: fixed;
+  top: calc(36px + 100px * var(--hud-scale, 1) + env(safe-area-inset-top));
+  right: calc(16px + env(safe-area-inset-right));
+  z-index: 53;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  height: 28px;
+  padding: 0 4px;
+  font-size: 24px;
+  line-height: 28px;
+  transform: scale(var(--hud-scale, 1));
+  transform-origin: top right;
+  pointer-events: none;
+  user-select: none;
+}
+
+.wanted-stars[hidden],
+.wanted-hint[hidden] {
+  display: none !important;
+}
+
+.wanted-star {
+  display: inline-block;
+  width: 1.05em;
+  text-align: center;
+  color: rgba(150, 150, 150, 0.4);
+  -webkit-text-stroke: 1px rgba(0, 0, 0, 0.35);
+}
+
+.wanted-star.wanted-on {
+  color: #ffc928;
+  -webkit-text-stroke: 1.5px #000;
+  text-shadow: 0 0 2px #000, 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+/* 搜尋中：亮星閃爍 */
+.wanted-stars.wanted-flashing .wanted-star.wanted-on {
+  animation: wanted-blink 0.7s steps(2, jump-none) infinite;
+}
+
+@keyframes wanted-blink {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+/* ---------- 被捕 / 送醫 ---------- */
+.wanted-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.15) 0%, rgba(0, 0, 0, 0.6) 100%);
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+  animation: wanted-fade-in 0.8s ease-out both;
+}
+
+.wanted-overlay-title {
+  font-size: clamp(44px, 11vw, 120px);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  line-height: 1.1;
+  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.85);
+  text-shadow: 0 4px 18px rgba(0, 0, 0, 0.85);
+}
+
+.wanted-overlay-sub {
+  max-width: 90vw;
+  font-size: clamp(16px, 3.2vw, 26px);
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.95);
+  animation: wanted-fade-in 0.8s ease-out 0.5s both;
+}
+
+.wanted-busted .wanted-overlay-title {
+  color: #4aa8ff;
+}
+
+.wanted-wasted .wanted-overlay-title {
+  color: #e8322b;
+}
+
+@keyframes wanted-fade-in {
+  0% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ---------- 情境提示卡 ----------
+   桌機：星星列下方（右 16、top 72 + 100s）；觸控沿用 #hint-card 的版位（短暫顯示、可關，與新手提示卡同時出現才會疊） */
+.wanted-hint {
+  position: fixed;
+  top: calc(72px + 100px * var(--hud-scale, 1) + env(safe-area-inset-top));
+  right: calc(16px + env(safe-area-inset-right));
+  z-index: 54;
+  width: 280px;
+  max-height: 140px;
+  overflow: hidden;
+  padding: 10px 44px 10px 14px;
+  background: rgba(10, 15, 36, 0.85);
+  border-left: 4px solid #4aa8ff;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.55;
+  pointer-events: none;
+  animation: wanted-fade-in 0.3s ease-out both;
+}
+
+.wanted-hint-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 44px;
+  cursor: pointer;
+  touch-action: manipulation;
+  pointer-events: auto;
+}
+
+/* ---------- 觸控版面（body.touch） ---------- */
+body.touch .wanted-stars {
+  top: calc(76px + 32px * var(--hud-scale, 1) + env(safe-area-inset-top));
+  right: calc(22px + 150px * var(--hud-scale, 1) + env(safe-area-inset-right));
+  width: 100px;
+  height: 20px;
+  gap: 0;
+  padding: 0;
+  font-size: 17px;
+  line-height: 20px;
+}
+
+body.touch .wanted-hint {
+  top: calc(192px + env(safe-area-inset-top));
+  left: calc(140px + env(safe-area-inset-left));
+  right: calc(50% + 4px);
+  width: auto;
+}
+
+@media (orientation: landscape) and (max-height: 379px) and (max-width: 639px) {
+  body.touch-walk .wanted-stars {
+    top: calc(70px + env(safe-area-inset-top));
+    right: calc(16px + env(safe-area-inset-right));
+    width: 92px;
+    height: 24px;
+    font-size: 16px;
+    line-height: 24px;
+  }
+}
+
+@media (orientation: portrait) {
+  body.touch .wanted-stars {
+    top: auto;
+    bottom: calc(48px + 88px * var(--hud-scale, 1) + env(safe-area-inset-bottom));
+    left: calc(10px + env(safe-area-inset-left));
+    right: auto;
+    justify-content: flex-start;
+    height: 22px;
+    line-height: 22px;
+    transform-origin: bottom left;
+  }
+
+  body.touch .wanted-hint {
+    left: calc(50% + 4px);
+    right: calc(10px + env(safe-area-inset-right));
+    top: calc(132px + env(safe-area-inset-top));
+  }
+}

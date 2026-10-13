@@ -1329,6 +1329,23 @@ export class Traffic {
     return list.map((e) => e.c);
   }
 
+  // 車流路網上的生成點（Phase 7 警車 findSpawnPoint 用）：(cx, cz) 距離 rMin–rMax 內的車道取樣點（路段 15–85%、界內），
+  //   每點取該路允許的第一個行駛方向，位置已套車道偏移；回傳 [{ x, z, heading, road, s, dir }]（不改車流狀態、不耗 rng）
+  spawnSpots(cx, cz, rMin, rMax, out = []) {
+    out.length = 0;
+    const list = this.carSpotGrid.query(cx - rMax, cz - rMax, cx + rMax, cz + rMax, []);
+    const tmp = { x: 0, z: 0, dx: 0, dz: 1, seg: 0 };
+    for (const sp of list) {
+      const d2 = (sp.x - cx) ** 2 + (sp.z - cz) ** 2;
+      if (d2 < rMin * rMin || d2 > rMax * rMax) continue;
+      samplePolyline(sp.road, sp.s, tmp);
+      const dir = allowedDirs(sp.road)[0];
+      const lat = dir * laneOffset(sp.road);
+      out.push({ x: tmp.x - tmp.dz * lat, z: tmp.z + tmp.dx * lat, heading: Math.atan2(tmp.dx * dir, tmp.dz * dir), road: sp.road, s: sp.s, dir });
+    }
+    return out;
+  }
+
   // 把車自車流移除（剛體與網格釋放），回傳交給 vehicles.adopt 的位姿；之後由 _manageCars 在視野外補車
   releaseCar(car) {
     if (!car || this.cars.indexOf(car) < 0) return null;

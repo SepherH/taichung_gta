@@ -34,6 +34,14 @@
 | `ped:knockdown` | `{ ped, cause: 'punch'\|'vehicle', byPlayer: boolean, x, z }` | 整合（由 combat 'knockdown' 轉發） |
 | `player:ko` | `{}` | 整合 |
 | `player:money` | `{ money, delta, reason }` | economy.js |
+| `wanted:change` | `{ stars, prev, heat, reason }`（reason = 犯行名 \| `'evaded'\|'busted'\|'wasted'\|'debug'`） | wanted/wanted.js（§26） |
+| `wanted:state` | `{ state: 'clear'\|'active'\|'searching', prev }` | wanted/wanted.js |
+| `wanted:spotted` | `{ x, z }`（searching 中被警力再次看見） | wanted/wanted.js |
+| `wanted:cleared` | `{ reason: 'evaded'\|'busted'\|'wasted'\|'debug' }` | wanted/wanted.js |
+| `police:bust` | `{ x, z, officer }`（逮捕進度滿，清星前只發一次） | wanted/police.js |
+| `police:shoot` | `{ officer, x, y, z, targetX, targetZ }`（傷害已在 adapters officerAim → combat.applyHit 處理，收到勿再扣血） | wanted/police.js |
+| `player:busted` | `{ fine, x, z }`（fine = 實扣罰鍰 min(150, 餘額)；x, z = 被捕地點；傳送 / 清星之後發） | 整合 |
+| `player:wasted` | `{ fee, x, z }`（fee = economy 在 `player:ko` 實扣的醫藥費 min(100, 餘額)；x, z = 倒地地點） | 整合 |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
 
 表外的新事件名稱必須先加進本表。
@@ -361,7 +369,7 @@ body.touch-drive #touch-look { display: none; }
 | `mission:start` | `{ id, title, cargo }` | missions |
 | `mission:stage` | `{ id, stage: 'pickup'\|'deliver', text, x, z }` | missions |
 | `mission:complete` | `{ id, reward, timeSec, damagePct, bonus }` | missions |
-| `mission:fail` | `{ id, reason: 'timeout'\|'destroyed'\|'ko'\|'abandon' }` | missions |
+| `mission:fail` | `{ id, reason: 'timeout'\|'destroyed'\|'ko'\|'abandon'\|'busted'\|'wasted' }`（busted / wasted 由整合層 `missions.failActive(reason)`，§26） | missions |
 | `nav:destination` | `{ x, z, label, source: 'map'\|'mission'\|'checkin' }` | map / missions |
 | `nav:clear` | `{ source }` | map / navigation（抵達 20 m 內自動清） |
 | `collect:checkin` | `{ landmarkId, slug, name, reward }` | collect |
@@ -762,6 +770,29 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - **減少動態效果**：main.js 注入 `reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches`；為真時改走老虎城固定高度慢速環繞（`REDUCED_OMEGA` 0.03 rad/s、半徑 150 m、高度 max(70 m, 整圈 floor)），偏好中途切換時內插轉場
 - **效能**：每幀只做一次 Catmull-Rom + lookAt 四元數（node 實測 < 1 µs）；建路徑約 30 ms（含取景遮擋檢查，載入時一次）；內插剖面在開始內插時建一次（90 格）；手機 / low 檔同樣生效
 - **回歸**：`node tools/test/p6-m6.mjs`（鏡位、型態秒數、60 Hz 每幀位移 ≤ 1.6 m / 轉角 ≤ 1.5°、全程 ≥ 地形 + 4 m 且不在建築內、循環接縫、handoff / start、進出遊戲整輪掃描〔平滑內插每幀高度變化 ≤ 1.6 m、不低於 floor、> 300 m 一律淡出淡入 ≤ 0.6 s 且只在全黑時切鏡〕、每段看點視線遮擋率 ≤ 10%、市政府推軌離立面 ≥ 90 m、減少動態效果、main.js 接線）
+
+## 26. Phase 7 通緝 / 警力（原規劃 §22，該號已由 G2 使用故順延；接線點在 `src/main.js`，介面以各檔頭為準）
+
+### 26.1 模組介面摘要
+- `src/wanted/wanted.js`：`createWanted({ bus, config? })` → `{ report(crime, { x, z, witnessed = true }), update(dt, { playerX, playerZ, seen }), clear(reason), setStars(n), stars, heat, state, flashing, lastKnown, searchCircle }`；`CRIMES` = assault / assaultPolice / kill / killPolice / gunfire / carjack / vehicleHit / vehicleKill / policeVehicle；heat → 星數（`STAR_HEAT`）、active ↔ searching ↔ clear 狀態機、搜索圈（`searchCircle` 只在 searching 時非 null：`{ x, z, r }`）。witnessed=false（只有路人報案）heat × 0.5、至少 1 星
+- `src/wanted/police.js`：`createPolice({ bus, wanted, adapters, rng?, config? })` → `{ update(dt, { player: { x, z, inVehicle, speed, down } }) → { seen }, witness(x, z) → boolean, dispose(), cars, officers, bustProgress }`；依星數生成 / 回收警車與警員、追捕、開槍（emit `police:shoot`）、逮捕（emit `police:bust`）
+- `src/wanted/adapters.js`：`createPoliceAdapters(deps)` → 契約 B adapters（findSpawnPoint / spawnCar / despawnCar / driveCar / spawnOfficer / despawnOfficer / moveOfficer / officerAim / canSee）+ `update(dt, { stars, listener, paused })`、`isPoliceVehicle(v)`、`stats()`、`dispose()`；deps 見檔頭（vehicles / dmg / traffic / findRoute / combat / characters / physics / scene / heightAt / blocked / audio / settings / bus / getPlayer / isNight / surfaceOffset）。警車 = `vehicles.adopt({ type: 'police' })`（manifest 第 7 種車），警員開槍命中走 `combat.applyHit`；patrol 只開到路線的路網投影點（不進原始目標點），抵達時煞停並設 `car.patrolArrived = true`（police.js 據此換巡邏點）；耐久歸 0 的警車煞停一次並 `v.ai = false`；`vehicles.findNearby` 對 `v.ai` 車速 > 3 m/s 的車不回傳（行駛中警車不可上車）
+- `src/wanted/ui.js`：`createWantedUI({ root, canvas, doc?, hints? })` → `{ setStars(n, { flashing }), showBusted({ fine }) → Promise<{ reason }>, showWasted({ fee }) → Promise<{ reason }>, showHint(key, text) → boolean, dispose(), overlayActive }`；reason = `'done'`（時間到）\| `'skipped'`（點擊跳過）\| `'preempted'`（被新畫面搶占）\| `'disposed'`；畫面期間 doc 層點擊一律 stopPropagation / preventDefault；`hints`（HUD）注入時 `showHint` 委派 `hud.showHint`（`tcgta.hints.seen`，`hud.resetHints()` 一併重置），未注入才用本檔 `tcgta.hints` 退路；`drawSearchCircle(ctx, { cx, cy, r, t })`。本檔不 import css：整合層 `import './wanted/wanted.css'`
+- `src/wanted/places.js`（整合新增）：`POLICE_STATION`（臺中市政府警察局第六分局門口人行道 x 93.3, z 506.9）、`HOSPITAL`（osm-city.json 無醫院 / 診所 → 推測位置：河南路三段老虎城南側人行道 x 106.9, z −55.1，`inferred: true`）、`respawnPlace(kind)`
+
+### 26.2 接線（main.js）
+- 建立：`wanted = createWanted({ bus })`、`policeAdapters = createPoliceAdapters({...})`、`police = createPolice({ bus, wanted, adapters: policeAdapters })`、`wantedUI = createWantedUI({ root: document.body, canvas: renderer.domElement, hints: hud })`
+- 每幀 `updateWanted(dt, phoneOpen)`（updateGame 內 stepWorld / handleFall 之後）：`policeAdapters.update(dt, { stars, listener: camera.position })` → `police.update(dt, { player })` → `wanted.update(dt, { playerX, playerZ, seen })`；暫停 / 全螢幕面板（updateGame 不跑）/ 手機開著時不更新，手機開著與 `updateAudio` 在 paused 時以 `policeAdapters.update(0, { paused: true })` 靜音警笛並凍結警車控制（煞停，不續倒車 / 全油門）
+- 犯行（只算玩家所為；`reportCrime`：`police.witness(x, z)` 為真 → witnessed；否則 35 m 內有行人 → witnessed=false；都沒有不報）：`combat:hit` byPlayer → assault（目標 faction 'police' → assaultPolice）；`ped:dead` byPlayer → kill / killPolice（cause 'vehicle' 的非警員 → vehicleKill）；`ped:knockdown` cause 'vehicle' 且 byPlayer → vehicleHit；`weapon:fire` byPlayer 且非 police、40 m 內有行人或警員 → gunfire；`vehicle:carjacked` → carjack（警車另報 policeVehicle）；路邊上車開走警車（`vehicle:enter` 非 carjack）→ carjack + policeVehicle（每台一次）；玩家車撞警車（contacts onVehicleHitVehicle，relSpeed ≥ 3 m/s 且玩家車較快，同車 2 s 冷卻）→ policeVehicle
+- 被捕（`police:bust`）：取消進行中的搶車 / 上車動畫、鎖輸入、玩家 untargetable → `fine = min(150, 餘額)`、`economy.spend(fine, 'busted')`（不足扣到 0；economy 未匯出 charge）、`wantedUI.showBusted({ fine })`（顯示實扣值）、`missions.failActive('busted')`；畫面結束且 reason 為 done / skipped → 傳送警察局門口、hp 回滿、`wanted.clear('busted')`、emit `player:busted { fine }`（實扣）、解鎖；preempted / disposed 不重生
+- 送醫：玩家 hp 歸零 → 照發 `player:ko`（economy 扣醫藥費 min(100, 餘額)，整合層記實扣值 koFee）→ 倒地 2 s（`WASTED_DELAY_SEC`）→ `showWasted({ fee: koFee })`（不重複扣款）、`missions.failActive('wasted')`；畫面結束（reason done / skipped）→ 傳送醫院門口、hp 回滿、`wanted.clear('wasted')`、emit `player:wasted { fee: koFee }`。取代原 `PLAYER_KO_SEC` 原地起身；`missions.onPlayerKo` 不再由整合層呼叫（fragile 委託也直接以 'wasted' 失敗）
+- `missions.failActive(reason)`：進行中的委託 → `mission:fail`；打工 → `job:fail`；外送 / 追垃圾車 → `event:fail`（同 reason）；無進行中回 false
+- HUD：`wanted:change` / `wanted:state` → `wantedUI.setStars(stars, { flashing })`；首次被通緝 `wantedUI.showHint('wanted', …)` → 委派 `hud.showHint`（settings.showHints 關閉時不出；`hud.resetHints()` 後會再出）；`hud.update` 新欄位 `searchCircle`（`wanted.searchCircle`）→ 小地圖 `drawSearchCircle`、`policeCars`（`police.cars` 的 pos）→ 紅藍交替點
+- 除錯：`window.__game.wanted / police / policeAdapters / wantedUI`（僅 dev）
+- 新局 / 回主選單：`cancelRespawn()` 作廢進行中的被捕 / 送醫並 `wanted.clear('debug')`
+
+### 26.3 回歸
+- `node tools/test/integration-p7.mjs`（靜態接線 + 行為：犯行 → 星數、bust → 扣款 / 傳送 / 清星、wasted 流程、暫停不更新）；`node tools/test/p7-adapters.mjs`
 
 ---
 

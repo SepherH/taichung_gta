@@ -40,7 +40,7 @@
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
-import { TRIVIA } from './data/city.js';
+import { SURFACE_OFFSET, TRIVIA } from './data/city.js';
 import { LoadingScreen } from './loading.js';
 import { Input } from './input.js';
 import { registerTouchButton } from './touch.js';
@@ -51,7 +51,7 @@ import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles } from './places.js';
 import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
-import { loadCharacterModels, getCharacterManifest } from './characters/index.js';
+import { loadCharacterModels, getCharacterManifest, createCharacter, disposeCharacter, CharacterAnimator } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
 import { STALL_BASE_KEY, TAKEOUT_BAG_KEY, TAKEOUT_BAG_LOCAL, VALET_SITES, VALET_STAND_KEY, buildValetStandFallback, createSidewalkNear, runStallSpot, stallRow, valetSpots, valetStandBoxes } from './job-props.js';
@@ -74,7 +74,7 @@ import { settings } from './core/settings.js';
 import { KEYMAP_HELP, TOUCH_HELP } from './core/actions.js';
 import { qualityBudget } from './core/quality.js';
 import { createAutosave, createSaveStore, defaultSave, SAVE_VERSION } from './save.js';
-import { createEconomy, LOOT_MIN, LOOT_MAX } from './economy.js';
+import { createEconomy, HOSPITAL_FEE, LOOT_MIN, LOOT_MAX } from './economy.js';
 import { createMenu } from './ui/menu.js';
 import { createMenuTour } from './ui/menu-tour.js';
 import { createMapView } from './ui/map-view.js';
@@ -103,10 +103,23 @@ import { createBigMap } from './map/big-map.js';
 import { createCheckins } from './collect/checkins.js';
 import { createFoodGuide } from './collect/food-guide.js';
 import { landmarkPoints } from './core/landmark-points.js';
+import './wanted/wanted.css';
+import { createWanted, CRIMES } from './wanted/wanted.js';
+import { createPolice } from './wanted/police.js';
+import { createPoliceAdapters } from './wanted/adapters.js';
+import { createWantedUI } from './wanted/ui.js';
+import { respawnPlace } from './wanted/places.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
-const PLAYER_KO_SEC = 3; // 玩家 hp 歸零倒地後多久起身（原地 3 m 內空位優先，player.recoverAfterKnockout）
+const WASTED_DELAY_SEC = 2; // 玩家 hp 歸零倒地後多久進入送醫（WASTED）流程（Phase 7 取代原地起身）
+const BUSTED_FINE = 150; // 被捕罰鍰（NT$，餘額不足扣到 0）
+const WASTED_FEE = HOSPITAL_FEE; // 送醫醫藥費（NT$100）：economy 已在 player:ko 扣款，WASTED 不重複扣
+const CRIME_GUNFIRE_RANGE = 40; // 玩家開槍時此距離內有行人或警員才算 gunfire（m）
+const CRIME_REPORT_RANGE = 35; // 無警力看見時，此距離內有行人才以路人報案（witnessed=false）回報（m）
+const POLICE_RAM_MIN_SPEED = 3; // 玩家車撞警車：相對速度達此值、且玩家車比警車快才算 policeVehicle（m/s；警車 ram 玩家不算玩家犯行）
+const POLICE_RAM_COOLDOWN = 2; // 同一台警車 policeVehicle 回報的冷卻（s，同一次碰撞的連續接觸只算一次）
+const WANTED_HINT_TEXT = '被通緝了！星星代表警方追緝程度，離開警察視線並躲出小地圖的搜索圈就能擺脫。';
 const AUTOSAVE_SEC = 15; // 自動存檔間隔（s）
 const MAX_STEP_DIST = 30; // 單幀位移超過此值（傳送 / 重生）不計入里程（m）
 const ROAD_NAME_SEC = 0.5; // 駕駛時路名查詢間隔（s）
@@ -529,7 +542,8 @@ async function init() {
     mode: 'walk', // 'walk' | 'entering'（上車動作中）| 'carjack'（搶車中）| 'drive'
     vehicle: null,
     placeId: null,
-    koTimer: 0, // 玩家被打倒後的起身倒數（秒）
+    koTimer: 0, // 玩家 hp 歸零倒地後到送醫（WASTED）的倒數（秒）
+    respawn: null, // 被捕 / 送醫流程進行中：'busted' | 'wasted' | null（輸入鎖定、玩家不受攻擊）
     pendingFall: null, // 物理子步內機車倒地（vehicles.onFall），step 結束後才處理下車
     walkTime: 0, // 本局步行累計秒數（新手提示用）
     playTime: 0, // 本局遊玩秒數（新手提示用）
@@ -968,8 +982,8 @@ async function init() {
   const phoneLink = createPhoneLink({
     phone,
     input,
-    canOpen: () => canOpenPhone({ started: state.started, paused: state.paused, panelOpen: panelOpen(), menuOpen: menu.isOpen(), blocked: isInputBlocked() }),
-    canResume: () => state.started && !state.paused && !panelOpen() && !menu.isOpen(),
+    canOpen: () => !state.respawn && canOpenPhone({ started: state.started, paused: state.paused, panelOpen: panelOpen(), menuOpen: menu.isOpen(), blocked: isInputBlocked() }),
+    canResume: () => state.started && !state.paused && !panelOpen() && !menu.isOpen() && !state.respawn,
     // 開啟：同 syncPanels 的鎖定（放開滑鼠鎖定、清提示、駕駛中手煞）；世界不暫停
     onLock: () => {
       releaseLock();
@@ -1142,7 +1156,7 @@ async function init() {
     facePlayer: (yaw) => {
       player.yaw = yaw;
     },
-    isPlayerDisabled: () => state.koTimer > 0 || combat.isDown(player.actor),
+    isPlayerDisabled: () => state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor),
     onEnter: (v) => enterVehicle(v, true),
   };
   const beginCarjack = (candidate) => {
@@ -1166,23 +1180,241 @@ async function init() {
   };
 
   // ---------- 對抗 / KO ----------
-  // 行人倒地 → 契約事件 ped:knockdown（經濟：打倒掉錢、撞人統計）；玩家 hp 歸零 → player:ko（醫藥費）
+  // 行人倒地 → 契約事件 ped:knockdown（經濟：打倒掉錢、撞人統計）；玩家 hp 歸零 → player:ko（economy 扣醫藥費），
+  // 倒地 WASTED_DELAY_SEC 後走送醫（WASTED，beginRespawn）；任務改在 WASTED 時以 reason 'wasted' 失敗（不再呼叫 missions.onPlayerKo）
+  let koFee = WASTED_FEE; // 最近一次 player:ko 實扣的醫藥費（送醫畫面 / player:wasted 顯示實扣值）
   combat.on('knockdown', (e) => {
     const p = pedKnockdownPayload(e);
     if (p) bus.emit('ped:knockdown', p);
-    if (e.target !== player.actor || player.actor.hp > 0) return;
-    state.koTimer = PLAYER_KO_SEC;
+    if (e.target !== player.actor || player.actor.hp > 0 || state.respawn || state.koTimer > 0) return;
+    state.koTimer = WASTED_DELAY_SEC;
+    const before = economy.money;
     bus.emit('player:ko', {});
-    missions.onPlayerKo();
-    hud.toast('你被打倒了（醫藥費自動扣款）', PLAYER_KO_SEC);
+    koFee = Math.max(0, before - economy.money); // economy 在 player:ko 實扣的醫藥費（餘額不足時 < HOSPITAL_FEE）
   });
   const updateKnockout = (dt) => {
     if (state.koTimer <= 0) return;
     state.koTimer -= pw.simTimeFor(dt); // 模擬計時：本幀物理將推進的秒數（物理 step 前呼叫，累加器尚未變）
     if (state.koTimer > 0) return;
-    player.recoverAfterKnockout(terrain);
-    combat.revive(player.actor);
+    state.koTimer = 0;
+    beginRespawn('wasted');
   };
+
+  // ---------- 通緝（Phase 7）：wanted（星數）/ police（警力大腦）/ policeAdapters（世界轉接）/ wantedUI（星星列、被捕 / 送醫畫面）----------
+  const playerPos = () => (state.mode === 'drive' && state.vehicle ? state.vehicle.pos : player.pos);
+  const wanted = createWanted({ bus });
+  const policeAdapters = createPoliceAdapters({
+    vehicles,
+    dmg,
+    traffic,
+    findRoute: (a, b) => findRoute(graph, a, b),
+    combat,
+    characters: { createCharacter, disposeCharacter, CharacterAnimator, clips: getCharacterManifest()?.clips || [] },
+    physics,
+    scene,
+    heightAt,
+    blocked: (x, z) => !!buildingAt(x, z) || inWater(x, z),
+    audio,
+    settings,
+    bus,
+    getPlayer: () => {
+      const p = playerPos();
+      return { x: p.x, z: p.z, actor: player.actor };
+    },
+    isNight: () => dayNight.night > 0.5,
+    surfaceOffset: SURFACE_OFFSET,
+  });
+  const police = createPolice({ bus, wanted, adapters: policeAdapters });
+  // 掛 document.body（同 weapons hud；#hud 是 z-index 10 的堆疊環境，wanted.css 的 z 53–54 要在 body 層才生效）；回主選單時 cancelRespawn 清星 → 星星列隱藏
+  // hints: hud → 首次通緝提示走 HUD 提示卡與 tcgta.hints.seen（hud.resetHints() 一併重置）
+  const wantedUI = createWantedUI({ root: document.body, canvas: renderer.domElement, hints: hud });
+  // 星星列：wanted:change / wanted:state → setStars（searching 閃爍）；首次被通緝出提示卡（委派 HUD，同 id 只出一次）
+  const syncStars = () => wantedUI.setStars(wanted.stars, { flashing: wanted.flashing });
+  bus.on('wanted:change', (e) => {
+    syncStars();
+    if (e && e.stars > 0 && !(e.prev > 0) && settings.get('showHints')) wantedUI.showHint('wanted', WANTED_HINT_TEXT);
+  });
+  bus.on('wanted:state', () => syncStars());
+
+  // 犯行回報（只算玩家所為）：警力看得見（police.witness）→ 全額；否則 CRIME_REPORT_RANGE 內有行人 → 路人報案（witnessed=false）；都沒有 → 不報
+  const isOfficer = (a) => !!a && (a.faction === 'police' || !!a.officer);
+  const peopleNear = (x, z, r, withOfficers) => {
+    const r2 = r * r;
+    // traffic.citizens 元素：替身時位置在 c.x / c.z，掛骨架後即時位置在 c.ped.x / c.ped.z（同 traffic.js LOD 迴圈的 c.ped || c）
+    for (const c of traffic.citizens) {
+      const o = c.ped || c;
+      if ((o.x - x) ** 2 + (o.z - z) ** 2 <= r2) return true;
+    }
+    if (withOfficers) for (const o of police.officers) if ((o.pos.x - x) ** 2 + (o.pos.z - z) ** 2 <= r2) return true;
+    return false;
+  };
+  const reportCrime = (crime, x, z) => {
+    if (!state.started || state.respawn) return false;
+    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+      const p = playerPos();
+      x = p.x;
+      z = p.z;
+    }
+    const witnessed = police.witness(x, z);
+    if (!witnessed && !peopleNear(x, z, CRIME_REPORT_RANGE, false)) return false;
+    wanted.report(crime, { x, z, witnessed });
+    return true;
+  };
+  bus.on('combat:hit', (e) => {
+    if (!e || !e.byPlayer || !e.target || e.target === player.actor || e.weapon === 'vehicle') return; // 車撞走 ped:knockdown / ped:dead
+    reportCrime(isOfficer(e.target) ? CRIMES.assaultPolice : CRIMES.assault, e.x, e.z);
+  });
+  bus.on('ped:dead', (e) => {
+    if (!e || !e.byPlayer) return;
+    const crime = isOfficer(e.ped) ? CRIMES.killPolice : e.cause === 'vehicle' ? CRIMES.vehicleKill : CRIMES.kill;
+    reportCrime(crime, e.x, e.z);
+  });
+  bus.on('ped:knockdown', (e) => {
+    if (e && e.byPlayer && e.cause === 'vehicle') reportCrime(CRIMES.vehicleHit, e.x, e.z);
+  });
+  bus.on('weapon:fire', (e) => {
+    // 警員開槍（adapters：police true / byPlayer false）不算；玩家開槍要 CRIME_GUNFIRE_RANGE 內有行人或警員
+    if (!e || !e.byPlayer || e.police) return;
+    if (peopleNear(e.x, e.z, CRIME_GUNFIRE_RANGE, true)) reportCrime(CRIMES.gunfire, e.x, e.z);
+  });
+  // 搶警車：每台只算一次 policeVehicle；路邊上車開走警車（警車不走 carjack 流程）比照搶車另報 carjack
+  const stolenPolice = new WeakSet();
+  const reportPoliceTheft = (v) => {
+    if (!v || !policeAdapters.isPoliceVehicle(v) || stolenPolice.has(v)) return;
+    stolenPolice.add(v);
+    reportCrime(CRIMES.policeVehicle, v.pos.x, v.pos.z);
+  };
+  bus.on('vehicle:carjacked', (e) => {
+    const v = e && e.vehicle;
+    const p = v ? v.pos : playerPos();
+    reportCrime(CRIMES.carjack, p.x, p.z);
+    reportPoliceTheft(v);
+  });
+  bus.on('vehicle:enter', (e) => {
+    const v = e && e.vehicle;
+    if (!v || e.carjack || !policeAdapters.isPoliceVehicle(v) || stolenPolice.has(v)) return;
+    reportCrime(CRIMES.carjack, v.pos.x, v.pos.z);
+    reportPoliceTheft(v);
+  });
+  // 玩家駕車撞警車（contacts router 的車對車碰撞，見下方 onVehicleHitVehicle）
+  const policeRamAt = new WeakMap();
+  const onPlayerRam = (mine, other, relSpeed) => {
+    if (!other || !policeAdapters.isPoliceVehicle(other) || stolenPolice.has(other) || !(relSpeed >= POLICE_RAM_MIN_SPEED)) return;
+    if (Math.abs(mine.speed || 0) <= Math.abs(other.speed || 0)) return;
+    const last = policeRamAt.get(other);
+    if (last !== undefined && gameTime - last < POLICE_RAM_COOLDOWN) return;
+    policeRamAt.set(other, gameTime);
+    reportCrime(CRIMES.policeVehicle, mine.pos.x, mine.pos.z);
+  };
+
+  // 每幀（updateGame，暫停 / 全螢幕面板 / 手機開著時不跑）：policeAdapters.update → police.update → wanted.update(seen)
+  const adapterCtx = { stars: 0, listener: null, paused: false };
+  const adapterIdle = { stars: 0, listener: null, paused: true }; // 不更新時以 dt 0 靜音警笛
+  const policeCtx = { player: { x: 0, z: 0, inVehicle: false, speed: 0, down: false } };
+  const wantedCtx = { playerX: 0, playerZ: 0, seen: false };
+  const updateWanted = (dt, skip) => {
+    if (skip) {
+      policeAdapters.update(0, adapterIdle);
+      return;
+    }
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const p = v ? v.pos : player.pos;
+    adapterCtx.stars = wanted.stars;
+    adapterCtx.listener = camera.position;
+    policeAdapters.update(dt, adapterCtx);
+    const pl = policeCtx.player;
+    pl.x = p.x;
+    pl.z = p.z;
+    pl.inVehicle = !!v;
+    pl.speed = v ? Math.abs(v.speed || 0) : 0;
+    pl.down = state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor);
+    const { seen } = police.update(dt, policeCtx);
+    wantedCtx.playerX = p.x;
+    wantedCtx.playerZ = p.z;
+    wantedCtx.seen = seen;
+    wanted.update(dt, wantedCtx);
+  };
+  // 小地圖警車點（police.cars 的 pos，陣列重用）
+  const policeDots = [];
+  const collectPoliceDots = () => {
+    policeDots.length = 0;
+    for (const c of police.cars) policeDots.push(c.pos);
+    return policeDots;
+  };
+
+  // 被捕 / 送醫：鎖輸入、玩家不受攻擊 → 全螢幕畫面（被捕另扣罰鍰；送醫的醫藥費 economy 已在 player:ko 扣）、進行中任務以 kind 失敗；
+  // 畫面結束（自動 3.5 s 或點擊跳過）→ finishRespawn：傳送到警察局 / 醫院門口、hp 回滿、wanted.clear(kind)、emit player:busted / player:wasted、解鎖
+  let respawnSeq = 0;
+  const beginRespawn = (kind) => {
+    if (state.respawn) return;
+    const at = playerPos();
+    const x = at.x;
+    const z = at.z;
+    state.respawn = kind;
+    const seq = ++respawnSeq;
+    // 取消進行中的上車動畫 / 搶車：畫面期間不得完成上車（否則上警車不報、搶車照樣完成）
+    if (cj.active) cj.cancel();
+    if (state.mode === 'entering') cancelEnter();
+    if (state.mode === 'carjack') state.mode = 'walk';
+    input.enabled = false;
+    player.locked = true;
+    player.actor.untargetable = true;
+    if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
+    hud.setPrompt(null);
+    hud.setInteractPrompt?.(null);
+    let shown;
+    let paid; // 實扣金額：畫面與 player:busted / player:wasted payload 一律顯示實扣值
+    if (kind === 'busted') {
+      // economy 對外只有 spend（餘額不足整筆拒扣）：扣 min(罰鍰, 餘額) = 不足扣到 0
+      const fine = Math.min(BUSTED_FINE, economy.money);
+      if (fine > 0) economy.spend(fine, 'busted');
+      paid = fine;
+      shown = wantedUI.showBusted({ fine });
+    } else {
+      paid = koFee;
+      shown = wantedUI.showWasted({ fee: koFee });
+    }
+    missions.failActive(kind);
+    // 只有畫面正常結束（done / skipped）才重生；preempted / disposed 不重複傳送
+    Promise.resolve(shown).then((r) => {
+      if (r && (r.reason === 'done' || r.reason === 'skipped')) finishRespawn(kind, seq, x, z, paid);
+    });
+  };
+  const finishRespawn = (kind, seq, x, z, paid) => {
+    if (seq !== respawnSeq || state.respawn !== kind) return; // 期間已開新局 / 回主選單（cancelRespawn）
+    state.respawn = null;
+    if (cj.active) cj.cancel();
+    if (state.mode === 'drive') exitVehicle(true);
+    state.mode = 'walk';
+    state.vehicle = null;
+    state.koTimer = 0;
+    state.pendingFall = null;
+    const place = respawnPlace(kind);
+    player.placeAt(place.x, place.z, place.yaw, terrain);
+    player.recoverAfterKnockout(terrain); // 門口被車 / 人佔住時就近找空位（原地 3 m 內優先）
+    if (combat.isDown(player.actor)) combat.revive(player.actor);
+    player.actor.hp = player.actor.maxHp;
+    player.locked = false;
+    player.actor.untargetable = false;
+    player.mesh.visible = true;
+    rig.yaw = place.yaw;
+    lastPos.copy(player.pos);
+    focus.copy(player.pos);
+    wanted.clear(kind);
+    if (kind === 'busted') bus.emit('player:busted', { fine: paid, x, z });
+    else bus.emit('player:wasted', { fee: paid, x, z });
+    if (state.started && !state.paused && !panelOpen() && !phone.isOpen()) input.enabled = true;
+  };
+  // 新局 / 回主選單：作廢進行中的被捕 / 送醫流程（畫面自行結束）並清通緝
+  const cancelRespawn = () => {
+    respawnSeq++;
+    state.respawn = null;
+    player.actor.untargetable = state.mode === 'drive';
+    wanted.clear('debug');
+  };
+  bus.on('police:bust', () => {
+    if (state.started) beginRespawn('busted');
+  });
 
   // ---------- 車輛耐久：contacts router → onImpact（以 body.owner 找 Vehicle，未 attach 的車流車由 dmg 忽略）----------
   const byPlayer = (v) => state.mode === 'drive' && state.vehicle === v;
@@ -1210,6 +1442,10 @@ async function init() {
   router.onVehicleHitVehicle(({ a, b, relSpeed }) => {
     impact(a, relSpeed, 'vehicle');
     impact(b, relSpeed, 'vehicle');
+    const va = a && a.owner;
+    const vb = b && b.owner;
+    if (va && byPlayer(va)) onPlayerRam(va, vb, relSpeed);
+    else if (vb && byPlayer(vb)) onPlayerRam(vb, va, relSpeed);
   });
   router.onVehicleHitPedestrian(({ vehicle, relSpeed }) => impact(vehicle, relSpeed, 'ped'));
   bus.on('vehicle:crash', ({ relSpeed }) => rig.shake(Math.min(1, relSpeed / CRASH_SHAKE_SPEED)));
@@ -1445,7 +1681,7 @@ async function init() {
       hud.setInteractPrompt?.(null);
       if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
     } else if (state.started && !state.paused) {
-      input.enabled = true;
+      input.enabled = !state.respawn; // 被捕 / 送醫畫面中維持鎖定（finishRespawn 解鎖）
       loop.resetClock();
     }
     return open;
@@ -1513,6 +1749,8 @@ async function init() {
     const tk = state.started ? missions.truckState() : null;
     st.garbageTruckDist = tk && Number.isFinite(tk.distM) ? tk.distM : Infinity;
     audio.update(dt, st);
+    // 警笛：暫停 / 全螢幕面板 / 開始畫面時 updateWanted 不跑 → 以 dt 0、paused 靜音（世界不推進）
+    if (st.paused) policeAdapters.update(0, adapterIdle);
     // 電台：駕駛中且未暫停才播（暫停 / 面板 / 開始畫面淡出）；暫停中也每幀呼叫
     radioCtx.inVehicle = driving;
     radioCtx.paused = st.paused;
@@ -1572,6 +1810,7 @@ async function init() {
     updateKnockout(dt);
     stepWorld(dt, state.mode === 'drive' ? state.vehicle.pos : player.pos);
     if (state.pendingFall) handleFall();
+    updateWanted(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -1690,6 +1929,8 @@ async function init() {
       fast: dayNight.fast,
       markers: collectMarkers(hudMarkers, true),
       route: nav.route(),
+      searchCircle: wanted.searchCircle,
+      policeCars: collectPoliceDots(),
       weatherIcon: weather.getState().icon,
       radio: radio.getState(),
     });
@@ -1910,6 +2151,7 @@ async function init() {
     economy = createEconomy({ bus, initial: save });
     resetExtraStats(save.stats);
     closePanels();
+    cancelRespawn();
     placePlayer(save);
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
@@ -1960,7 +2202,8 @@ async function init() {
   const resumeGame = () => {
     if (!state.started || !state.paused) return;
     state.paused = false;
-    input.enabled = true;
+    // 被捕 / 送醫畫面進行中維持鎖輸入（由 finishRespawn 解鎖）；滑鼠鎖定照樣在本手勢內同步要求（畫面的點擊跳過走 document 捕獲監聽，鎖定中仍收得到）
+    if (!state.respawn) input.enabled = true;
     setGameActive(true);
     requestLock();
     loop.resetClock();
@@ -1972,6 +2215,7 @@ async function init() {
     if (state.mode === 'drive') exitVehicle(true);
     state.mode = 'walk';
     player.locked = false;
+    cancelRespawn();
     state.started = false;
     state.paused = false;
     input.enabled = false;
@@ -2046,6 +2290,8 @@ async function init() {
       weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, stalls, valetSites, valetCars, phone, phoneLink,
       // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
       weather, env, radio,
+      // Phase 7：通緝 / 警力（wanted.setStars(3)、police.cars / officers、policeAdapters.stats()）
+      wanted, police, policeAdapters, wantedUI,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

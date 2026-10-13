@@ -1,7 +1,8 @@
 // 資料驅動送貨委託（契約 §16）：日常打工 = 從真實地標接貨、送到另一個地標
 // createMissions({ bus, scene, root, landmarks, addMoney, fetchJson, now, rng, isTouch, interactLabel }) → 契約 §16 的 API（另加 speedScale / isModalOpen / abandon）
 // 流程：同時開放 3 個起點光柱 → 靠近按 E（interactable priority 3）→ 接單卡 → 目的地光柱 + nav:destination
-//   → 抵達目的地（地標 radius + 8 m 內，步行或駕駛）結算 → 結算面板；失敗（timeout / destroyed / ko / abandon）→ 失敗面板 + 重試
+//   → 抵達目的地（地標 radius + 8 m 內，步行或駕駛）結算 → 結算面板；失敗（timeout / destroyed / ko / abandon / busted / wasted）→ 失敗面板 + 重試
+//   Phase 7：failActive(reason) 讓整合層以 'busted'（被捕）/ 'wasted'（送醫）讓進行中的委託 / 打工 / 外送 / 追垃圾車失敗
 // 條件：timed 倒數、超時失敗（只有 conditions 含 timed 者會因超時失敗）；非 timed 委託的 timeLimitSec 只作提早完成加成基準，
 //   目標列顯示固定的「建議 m:ss」、objective / active 的 timerSec = null、suggestSec = 建議時間；fragile 損壞度（車撞 relSpeed ≥ 4 m/s 起算、≥ 15 m/s 一次 40%；被擊倒 50%；100% 失敗），
 //   報酬 × (1 − 損壞度 × 0.7)；heavy 步行 speedScale() = 0.6（駕駛 1）；有時限者提早完成加成 = 剩餘時間比例 × 30% × 基本報酬
@@ -80,6 +81,8 @@ const FAIL_TEXT = {
   destroyed: '貨物損壞到認不出來了，委託人只想靜靜。',
   ko: '你被擊倒，貨物在混亂中不見了。',
   abandon: '你放棄了這趟委託。',
+  busted: '你被警察逮捕，委託被取消了。',
+  wasted: '你被送進醫院，貨物在混亂中不見了。',
 };
 
 // 衝擊 → 損壞百分比
@@ -654,6 +657,17 @@ export function createMissions({
     return run && has(run.m, 'heavy') && !driving ? HEAVY_SPEED_SCALE : 1;
   }
 
+  // 整合層強制失敗（Phase 7：被捕 'busted' / 送醫 'wasted'）：進行中的委託 / 打工 / 外送 / 追垃圾車以該 reason 失敗
+  //   （fragile 委託不走 KO 的損壞 50%，一律失敗）；都沒有進行中 → false
+  function failActive(reason) {
+    if (run) fail(reason);
+    else if (jobsEngaged()) jobs.fail(reason);
+    else if (evActive()) timed.fail(reason);
+    else if (truckEngaged()) truck.fail(reason);
+    else return false;
+    return true;
+  }
+
   function abandon() {
     if (!run && jobsEngaged()) jobs.abandon();
     else if (!run && evActive()) timed.abandon();
@@ -668,13 +682,21 @@ export function createMissions({
       objKeyD = -1;
       ui.subtitle(`取餐完成！${formatClock(p.limitSec)} 內把餐點送到${p.toName}（路程約 ${p.routeM} m）`);
     } else if (name === 'event:complete') ui.subtitle(`外送送達！入帳 NT$${p.reward}`);
-    else if (name === 'event:fail') ui.subtitle(p.reason === 'timeout' ? '外送逾時，客人取消了訂單（不扣錢）。' : '外送取消了（不扣錢）。');
+    else if (name === 'event:fail') ui.subtitle(EVENT_FAIL_TEXT[p.reason] || '外送取消了（不扣錢）。');
   }
+
+  const EVENT_FAIL_TEXT = {
+    timeout: '外送逾時，客人取消了訂單（不扣錢）。',
+    busted: '你被警察逮捕，外送取消了（不扣錢）。',
+    wasted: '你被送進醫院，外送取消了（不扣錢）。',
+  };
 
   const TRUCK_FAIL_TEXT = {
     timeout: '垃圾車收完這一區開走了……（不扣錢）',
     lost: '跟丟垃圾車了（不扣錢）。',
     abandon: '你放棄追垃圾車了（不扣錢）。',
+    busted: '你被警察逮捕，垃圾車開走了（不扣錢）。',
+    wasted: '你被送進醫院，垃圾車開走了（不扣錢）。',
   };
 
   function onTruckEvent(name, p) {
@@ -705,6 +727,8 @@ export function createMissions({
     abandon: '你放棄了這份打工（不扣錢）。',
     destroyed: '客人的車毀了……泊車亭請你明天不用來了（不扣錢）。',
     lost: '你把客人的車丟在路邊跑太遠，泊車亭把車收回去了（不扣錢）。',
+    busted: '你被警察逮捕，打工泡湯了（不扣錢）。',
+    wasted: '你被送進醫院，打工泡湯了（不扣錢）。',
   };
 
   function onJobEvent(name, p) {
@@ -970,6 +994,7 @@ export function createMissions({
     speedScale,
     isModalOpen: () => ui.isOpen(),
     abandon,
+    failActive,
     eventObjective: () => (timed && timed.objective()) || (truck && truck.objective()) || null,
     eventActive: () => (timed && timed.active()) || (truck && truck.active()) || null,
     eventRunning: (id) => !!id && [timed, truck].some((src) => src && src.active() && src.active().id === id),

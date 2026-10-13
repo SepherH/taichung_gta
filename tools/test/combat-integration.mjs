@@ -110,12 +110,12 @@ const spawn = computeSpawn();
 const parked = computeParkedVehicles(spawn);
 const q = {};
 
-// ======================= 1. vehicle-model：真 glb 六種車（含垃圾車）=======================
+// ======================= 1. vehicle-model：真 glb 七種車（含垃圾車、警車）=======================
 // 工作區（外包環境）只有 vehicles/manifest.json、沒有車輛 glb：此段標 SKIP 不計入（宿主有 glb 時照常檢查）
 const vehGlbPresent = vManifest.vehicles.length > 0 && vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
 if (!vehGlbPresent) console.log('SKIP  vehicle-model 真 glb 檢查（工作區缺 public/models/vehicles/*.glb）');
 else {
-  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2, garbage_truck: 4 };
+  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2, garbage_truck: 4, police: 4 };
   let nodesOk = true;
   let specOk = true;
   const det = [];

@@ -38,6 +38,9 @@ export const VEHICLE_TYPES = {
   bus: { label: '公車', length: 12.2, width: 2.5, height: 3.14, maxSpeed: 22, maxReverse: 4, accel: 3.4, brake: 7, turnRate: 0.8, camScale: 2.4, mass: 11000, maxLatAccel: 5, tiltScale: 1.4 },
   // 垃圾車（時段事件 missions/garbage-truck.js 專用，不進車流 / 停車隨機生成）：外形 / 質量取美術 manifest（7.37 × 2.67 × 3.05 m、9000 kg）；
   //   手感推測：重車、極速 70 km/h、起步比公車略快（車身短）、轉向比公車靈活（軸距 3.8 m）
+  // 警車（Phase 7 警力，src/wanted/adapters.js 以 VehicleManager.adopt 生成、AI 駕駛；玩家可搶）：外形 / 質量取美術 manifest（police.glb，比照 sedan），
+  //   手感沿用轎車
+  police: { label: '警車', length: 4.66, width: 1.99, height: 1.555, maxSpeed: 42, maxReverse: 8, accel: 8, brake: 18, turnRate: 1.7, camScale: 1.35, mass: 1450, maxLatAccel: 10.5 },
   garbage_truck: { label: '垃圾車', length: 7.4, width: 2.5, height: 3.05, maxSpeed: 19.5, maxReverse: 4, accel: 3.8, brake: 8, turnRate: 1.0, camScale: 1.9, mass: 9000, maxLatAccel: 5.5, tiltScale: 1.4 },
 };
 
@@ -45,6 +48,7 @@ export const VEHICLE_TYPES = {
 const FALLBACK_SEAT = {
   sedan: { x: 0.37, y: 0.55, z: -0.2 },
   taxi: { x: 0.37, y: 0.55, z: -0.2 },
+  police: { x: 0.37, y: 0.55, z: -0.2 },
   suv: { x: 0.38, y: 0.75, z: -0.25 },
   bus: { x: 0.72, y: 1.35, z: 4.8 },
   garbage_truck: { x: 0.55, y: 1.55, z: 2.98 },
@@ -64,6 +68,7 @@ const NO_DRIVE_CELLS = new Set(['stairs', 'riser']);
 const PARK_REST_SPEED = 0.1;
 const PARK_REST_SEC = 1;
 const HORN_COOLDOWN = 0.4; // 喇叭冷卻（s，物理時間）
+const AI_BOARD_MAX_SPEED = 3; // m/s：AI 駕駛中的車（警車）車速高於此不可上車（findNearby）
 export const FALL_OUT_DEPTH = 20; // 車身（輪底）低於地面此深度（m）視為掉出世界
 const RECOVER_LANE_OFFSET = 0.5; // 重置點：道路中心線往行進方向右側偏移 半路寬 × 此值（右側通行、避開中線對向車）
 const _tiltEuler = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -672,7 +677,7 @@ export class VehicleManager {
     for (const v of this.vehicles) {
       const vb = v.body;
       if (vb.fallen && vb.kinematic) vb.fallenTime += dt; // 倒地後已停放：倒地計時照走（preStep 不跑）
-      if (v.driven || vb.kinematic || !vb.active) continue;
+      if (v.driven || v.ai || vb.kinematic || !vb.active) continue; // ai：AI 駕駛中的車（警車）不自動停放
       const lv = vb.body.linvel();
       const av = vb.body.angvel();
       const still = Math.hypot(lv.x, lv.y, lv.z) < PARK_REST_SPEED && Math.hypot(av.x, av.y, av.z) < PARK_REST_SPEED;
@@ -694,9 +699,9 @@ export class VehicleManager {
     for (const v of this.vehicles) v.syncBody(this.pw.alpha);
   }
 
-  // 遠距簡化用（setActiveByDistance）：玩家駕駛中的車永遠啟用，不列入
+  // 遠距簡化用（setActiveByDistance）：玩家駕駛中的車與 AI 駕駛中的車（v.ai，警車）永遠啟用，不列入
   bodies(out = []) {
-    for (const v of this.vehicles) if (!v.driven) out.push(v.body);
+    for (const v of this.vehicles) if (!v.driven && !v.ai) out.push(v.body);
     return out;
   }
 
@@ -706,6 +711,7 @@ export class VehicleManager {
     let bestD = maxDist;
     for (const v of this.vehicles) {
       if (v.driven || v.fallen || v.isOverturned()) continue; // 翻覆 / 倒地的車要先扶起（findOverturned）
+      if (v.ai && Math.abs(v.speed || 0) > AI_BOARD_MAX_SPEED) continue; // 行駛中的 AI 警車不可直接上車（比照車流 CARJACK_MAX_SPEED）
       for (const c of v.circles()) {
         const d = Math.hypot(pos.x - c.x, pos.z - c.z) - c.r;
         if (d < bestD) {

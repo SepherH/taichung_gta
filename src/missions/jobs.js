@@ -726,6 +726,7 @@ export function createJobs({
     onPlayerKo: () => fail('ko'),
     onVehicleDisabled,
     abandon: () => fail('abandon'),
+    fail: (reason) => fail(reason), // 整合層強制失敗（被捕 'busted' / 送醫 'wasted'）
     serialize,
     restore,
     dispose,

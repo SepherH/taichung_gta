@@ -248,6 +248,53 @@
       },
       "triangles": 4928,
       "bytes": 168904
+    },
+    {
+      "id": "police",
+      "name": "警車",
+      "file": "police.glb",
+      "length": 4.66,
+      "width": 1.99,
+      "height": 1.555,
+      "wheelbase": 2.7,
+      "track": 1.54,
+      "wheelRadius": 0.315,
+      "mass": 1450,
+      "seat": [
+        0.37,
+        0.52,
+        -0.15
+      ],
+      "paint": "#F4F6F8",
+      "notes": "臺灣警車一般外觀（推測，非特定車款）：白色四門轎車基底，尺寸、軸距、輪距、輪胎比照 sedan；車側深藍＋淺藍斜條紋、前門與引擎蓋「POLICE」字樣（mesh）、前後保險桿深灰。車頂警示燈條左紅右藍，材質 lightbar_red / lightbar_blue 帶 emission，供執行期閃爍；height 含燈條。seat = 駕駛座 H 點（左駕，角色 drive 動作的 Hips 關節位置）。",
+      "lightbar": [
+        "lightbar_red",
+        "lightbar_blue"
+      ],
+      "wheels": {
+        "wheel_fl": [
+          0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_fr": [
+          -0.77,
+          0.315,
+          1.385
+        ],
+        "wheel_rl": [
+          0.77,
+          0.315,
+          -1.315
+        ],
+        "wheel_rr": [
+          -0.77,
+          0.315,
+          -1.315
+        ]
+      },
+      "triangles": 6982,
+      "bytes": 231844
     }
   ]
 }
