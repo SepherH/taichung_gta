@@ -41,20 +41,29 @@ const TOWER_H = 30;
 const SIDE_MIN_H = 24;
 const SHOP_P = 0.4; // 填充透天厝：臨路店面帶上方橫招牌
 const BLADE_P = 0.16; // 直立招牌（垂直於牆、雙面）
-const ROOF_P = 0.3; // 大樓頂招牌（無名稱牌者）
+const ROOF_P = 0.4; // 大樓頂招牌（無名稱牌者）
 const SIDE_P = 0.2; // 大樓側面直條招牌
 const ROAD_PROBE = [1.5, 4, 8, 12]; // 沿外法線探測道路（m）
 const ROAD_PAD = 0.3; // 招牌任一點離路面至少
 const SHOPFRONT_H = 3.2; // 與 facade.js 首層店面帶一致
 const WALL_OFF = 0.1; // 貼牆招牌離牆（店面帶在 0.03 m）
 const BLADE_IN = 0.15;
-const BLADE_OUT = 0.95;
 const BLADE_Y = 3.5;
-const BLADE_H = 2.6;
 const ROOF_INSET = 0.6;
 const ROOF_LIFT = 1.3; // 女兒牆最高 1.1 m
-const SIDE_W = 2;
-const SIDE_H = 8;
+const SIDE_W = 2.4;
+const SIDE_H = 9;
+// v1b-bloom 招牌尺寸（依立面寬度放大；高度上限仍守 v1-neon 測試：店面帶頂 ≤ 基座 + 5.5、頂招牌高 ≤ 5）
+export const SIGN_SIZE = {
+  shopW: [2.5, 5], // 店面帶橫招牌寬（m）= 立面寬 × shopK
+  shopK: 0.85,
+  shopH: [0.7, 1.25], // 橫招牌高 = 寬 / 4
+  bladeH: [3, 6], // 直立招牌高（m）
+  bladeD: [0.8, 1.3], // 直立招牌外伸（寬）= 高 / 4.5
+  roofW: [8, 22], // 樓頂招牌寬 = 臨路邊長 × roofK
+  roofK: 0.7,
+  roofH: 4.8, // 樓頂招牌高上限
+};
 
 // 濕亮路面（mid 以上）
 export const WET = { night: 0.85, rain: 1, roughness: 0.3, metalness: 0.35, env: 1.1, dayEnv: 0.35 };
@@ -281,8 +290,8 @@ export function placeNeonSigns(buildings, { roads = [], terrain = null, bodies =
     if (b.inferred && b.type === 'house' && !tower && facing.length && rng() < SHOP_P) {
       const e = facing[0];
       if (e.L >= 3.5) {
-        const w = Math.min(Math.max(e.L * 0.75, 1.6), 4.4);
-        const sh = Math.min(Math.max(w / 4, 0.6), 1.1);
+        const w = Math.min(Math.max(e.L * SIGN_SIZE.shopK, SIGN_SIZE.shopW[0]), SIGN_SIZE.shopW[1], e.L - 0.3);
+        const sh = Math.min(Math.max(w / 4, SIGN_SIZE.shopH[0]), SIGN_SIZE.shopH[1]);
         const y0 = base + Math.min(SHOPFRONT_H, h * 0.4) + 0.1;
         const corners = flatSign(e, e.L / 2, WALL_OFF, w, y0, y0 + sh);
         if (y0 + sh <= top - 0.2 && cornersClear(corners, roadGrid)) {
@@ -300,12 +309,14 @@ export function placeNeonSigns(buildings, { roads = [], terrain = null, bodies =
         const px = e.ax + e.tx * s;
         const pz = e.az + e.tz * s;
         const y0 = base + BLADE_Y;
-        const y1 = Math.min(y0 + BLADE_H, top - 0.3);
-        if (y1 - y0 >= 1.6) {
+        const [hLo, hHi] = SIGN_SIZE.bladeH;
+        const y1 = Math.min(y0 + hLo + (hHi - hLo) * rng(), top - 0.3);
+        if (y1 - y0 >= hLo) {
+          const out = BLADE_IN + Math.min(Math.max((y1 - y0) / 4.5, SIGN_SIZE.bladeD[0]), SIGN_SIZE.bladeD[1]);
           const ix = px + e.nx * BLADE_IN;
           const iz = pz + e.nz * BLADE_IN;
-          const ox = px + e.nx * BLADE_OUT;
-          const oz = pz + e.nz * BLADE_OUT;
+          const ox = px + e.nx * out;
+          const oz = pz + e.nz * out;
           const corners = [[ix, y0, iz], [ox, y0, oz], [ox, y1, oz], [ix, y1, iz]];
           if (cornersClear(corners, roadGrid)) {
             const [mode, phase] = pickAnim(rng);
@@ -320,9 +331,9 @@ export function placeNeonSigns(buildings, { roads = [], terrain = null, bodies =
     if (tower && !b.name && rng() < ROOF_P) {
       const e = facing[0] || E.slice().sort((a, c) => c.L - a.L)[0];
       if (e && e.L >= 8) {
-        const w = Math.min(Math.max(e.L * 0.5, 6), 18);
+        const w = Math.min(Math.max(e.L * SIGN_SIZE.roofK, SIGN_SIZE.roofW[0]), SIGN_SIZE.roofW[1], e.L);
         const y0 = top + ROOF_LIFT;
-        const corners = flatSign(e, e.L / 2, -ROOF_INSET, w, y0, y0 + w / 4);
+        const corners = flatSign(e, e.L / 2, -ROOF_INSET, w, y0, y0 + Math.min(w / 4, SIGN_SIZE.roofH));
         const cx = (corners[0][0] + corners[1][0]) / 2;
         const cz = (corners[0][2] + corners[1][2]) / 2;
         if (pointInPolygon(cx, cz, p) && cornersClear(corners, roadGrid)) {

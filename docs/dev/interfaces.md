@@ -1111,3 +1111,10 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 每幀由 `environment.update` 呼叫 `updateNeon`（重用參數物件，不配置）：日夜亮度走 `registerNight`、閃爍為 shader uniform；quality tier 經 `weather.getTier()` 帶入，low 關閉閃爍與濕亮路面
 - 濕亮路面：材質以 `registerWetSurface(material)` 登記（src/world.js 車道、src/street.js 路口），濕度 = max(夜間 × 0.85, 雨量)；envMap 只在 tier 切換時增減（重編譯一次）
 - 色調：黃昏洋紅 / 橘紫、夜晚深藍紫（src/daynight.js SKY_KEYS），白天數值與 V1 前相同（tools/test/v1-neon.mjs 逐點比對）
+- 招牌尺寸（V1b，`SIGN_SIZE`）：店面帶橫招牌寬 = 立面寬 × 0.85 夾 2.5–5 m（高 = 寬 / 4，0.7–1.25 m）；直立招牌高 3–6 m（種子決定，外伸 = 高 / 4.5 夾 0.8–1.3 m）；樓頂招牌寬 = 臨路邊 × 0.7 夾 8–22 m、高 ≤ 4.8 m、出現率 0.4；側面直條 2.4 × 9 m。emissive 上限仍 2.2（白天 0）
+- 選擇性泛光（V1b，src/postfx.js）：`createPostFx(renderer, scene, camera, { tier, THREE, passes: await loadPostFxPasses(), night: () => dayNight.night })` → `{ render(), setTier(id), resize(), dispose(), info }`；main.js 以 `postfx.render()` 取代 `renderer.render`，`drawCalls = postfx.info.sceneCalls`（探針 pass 記錄場景本身 draw call，不計 post pass），`onResize` 呼叫 `resize()`、`applyQuality` 呼叫 `setTier(tier)`；canvas 尺寸 / pixelRatio 改變而未呼叫 resize 時，下一幀 render 自動跟上
+  - 流程：RenderPass（HalfFloat RT + MSAA：mid 2 / high 4）→ UnrealBloomPass → OutputPass（沿用 renderer.toneMapping ACES / exposure、sRGB 輸出）
+  - 選擇方式：亮度門檻、不另渲染 bloom layer（draw call 不增）；高通改「最大色版」：霓虹 2.2、車頭燈 2.0–2.5、警燈 4–6、爆炸火光超過夜間門檻 1.45，窗光 1.3 / 店面微光 1.2 不發光暈。要讓新物件發光暈，emissive 最大色版需 ≥ 1.65（門檻 + 半過渡寬）
+  - 強度：`bloomParams(night)` = 0.9 × smoothstep(0.02, 0.5, night)（黃昏 night 0.4 ≈ 0.8）；門檻黃昏 2.1 → 全夜 1.45；強度 < 0.005（白天）時直接 `renderer.render`，零 post 成本且保留 canvas MSAA
+  - tier：low 完全不建 composer（含 pass 載入失敗）；mid 泛光鏈半解析度；high / ultra 全解析度；tier 切換時釋放 / 重建
+  - `dispose()` 釋放 composer（兩張 RT）與 RenderPass / Bloom / Output；之後 render 退回直接渲染

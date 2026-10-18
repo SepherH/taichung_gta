@@ -17,6 +17,7 @@ import { cachedStandardMaterial, clamp, makeTextTexture } from './utils.js';
 import { pushOutOfCircles } from './collision.js';
 import { closestOnSegment } from './geom.js';
 import { registerNight } from './daynight.js';
+import { keepUntoneMapped } from './postfx.js';
 import { SURFACE_OFFSET } from './data/city.js';
 import { VehicleBody, rotateVec, yawOf, leanAngle } from './physics/vehicle-body.js';
 import { createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS, SEAT_HIPS_HEIGHT } from './vehicle-model.js';
@@ -169,10 +170,10 @@ export function createVehicleMesh(type, color) {
     // 計程車頂燈
     if (type === 'taxi') {
       if (!taxiSignMat) {
-        taxiSignMat = new THREE.MeshBasicMaterial({
+        taxiSignMat = keepUntoneMapped(new THREE.MeshBasicMaterial({
           map: makeTextTexture('TAXI', { width: 256, height: 96, bg: '#f5c518', color: '#111111' }),
           toneMapped: false,
-        });
+        })); // composer 路徑也維持不套 ACES 的外觀（postfx.js）
       }
       g.add(part(new THREE.BoxGeometry(0.8, 0.26, 0.34), taxiSignMat, 0, cabY + cabH / 2 + 0.21, -0.2));
     }

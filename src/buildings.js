@@ -18,6 +18,7 @@ import { buildFacadeDetails } from './facade.js';
 import { applyTile } from './street.js';
 import { RED_BRIDGE_LANDMARK_ID, dropProceduralRedBridge } from './qiuhonggu.js';
 import { buildNeon } from './neon.js';
+import { keepUntoneMapped } from './postfx.js';
 
 const FACADE_SEED = 20260930; // 樓宇細節固定種子
 const LOW_RISE_H = 18; // 低層（約 5 層以下，推測門檻）：商業 / 一般建築改用石材外牆
@@ -347,7 +348,8 @@ function buildPlates(scene, list, anisotropy) {
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(d.uv, 2));
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: atlas.textures[a], toneMapped: false }));
+    // toneMapped:false：夜間 composer 路徑（OutputPass 套 ACES）由 keepUntoneMapped 預補償，日夜外觀一致
+    const mesh = new THREE.Mesh(geo, keepUntoneMapped(new THREE.MeshBasicMaterial({ map: atlas.textures[a], toneMapped: false })));
     group.add(mesh);
     return mesh;
   });

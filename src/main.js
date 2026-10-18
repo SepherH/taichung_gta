@@ -83,6 +83,7 @@ import { HUD } from './hud.js';
 import { DayNight, nightMaterials, registerNight } from './daynight.js';
 import { createWeather, WEATHER_KINDS } from './weather.js';
 import { createEnvironment } from './environment.js';
+import { createPostFx, loadPostFxPasses } from './postfx.js';
 import { nextFrame } from './utils.js';
 import { applyRendererQuality, createAdaptiveResolution, isInputBlocked, isTouch, pixelRatioFor, qualityTier, setGameActive, setQualitySetting } from './mobile.js';
 import { bus } from './core/events.js';
@@ -580,6 +581,8 @@ async function init() {
   applyRendererQuality(renderer, 1, scene, tier);
   let adapt = createAdaptiveResolution(renderer, tier);
   let adaptive = tier === 'low'; // 自適應解析度只在低品質（手機）啟用
+  // 選擇性泛光（v1b-bloom）：low 不建 composer、mid 半解析度、high / ultra 全解析度；白天強度 0 時直接 renderer.render
+  const postfx = createPostFx(renderer, scene, camera, { tier, THREE, passes: await loadPostFxPasses(), night: () => dayNight.night });
   const terrain = getTerrain();
 
   await progress('依 OSM 鋪設道路、公園與水域…');
@@ -2288,6 +2291,7 @@ async function init() {
     applyRendererQuality(renderer, 1, scene, tier);
     adapt = createAdaptiveResolution(renderer, tier);
     adaptive = tier === 'low';
+    postfx.setTier(tier); // 依新 tier 重建 / 釋放 composer，並跟上新的 pixelRatio
     applyViewDist(budget.viewDist);
     weather.setQuality(budget); // 雨絲數依畫質
     heli.setQuality(); // V5：low 檔關探照燈陰影
@@ -2327,6 +2331,7 @@ async function init() {
     // 保留自適應解析度目前的 renderScale（旋轉螢幕時 dpr 可能改變）
     renderer.setPixelRatio(pixelRatioFor(tier, window.devicePixelRatio, adapt.controller.scale));
     renderer.setSize(window.innerWidth, window.innerHeight);
+    postfx.resize();
   };
   window.addEventListener('resize', onResize);
 
@@ -2751,8 +2756,8 @@ async function init() {
   // 大地圖 / 圖鑑蓋滿畫面時不渲染 3D（契約 §19；畫布保留最後一幀）
   const render = () => {
     if (hide3D()) return;
-    renderer.render(scene, camera);
-    drawCalls = renderer.info.render.calls;
+    postfx.render();
+    drawCalls = postfx.info.sceneCalls; // 場景本身的 draw call（不計 post pass）
   };
 
   // 每幀排程（core/loop.js）：世界更新 → 音效 → 渲染 → 效能統計 → 輸入收尾
