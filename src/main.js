@@ -48,6 +48,9 @@
 //   每幀 updateGangs 接在 updateVigilante 之後（手機 / BUSTED・WASTED / 噴漆 → frozen）；gang:enter / gang:hostile / gang:driveby → toast；
 //   小地圖 hud state.gangZones、大地圖 zones = GANG_ZONES；開新局 / 回主選單 → gangs.cancel()，被捕 / 送醫 → gangs 訂閱 player:busted / player:wasted 歸零；
 //   車內中彈 hp 歸零 → 強制下車倒地走 WASTED
+// V3 街頭隨機犯罪事件（§32）：createStreetEvents（street-events.js 純邏輯排程）+ createStreetWorld（徵用骨架行人 / 事件車 / 既有警車 adapters / gangs.skirmish）；
+//   每幀 updateStreetEvents 接在 updateExplosions / handleCarKo 之後（手機 / BUSTED・WASTED / 噴漆 → 凍結；搶劫 / 警車任務 / 委託類 → 不生成新事件、既有照常收尾）；
+//   事件歹徒 / 罪犯車經 vigHooks 豁免犯行；street:start 80 m 內 toast、小地圖 kind 'street-event' 黃點閃爍；開新局 / 回主選單 → cancelStreetEvents()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -63,7 +66,7 @@ import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles } from './places.js';
 import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, parks, surfaceFootways, surfaceRoads } from './citymodel.js';
-import { loadCharacterModels, getCharacterManifest, createCharacter, disposeCharacter, CharacterAnimator } from './characters/index.js';
+import { loadCharacterModels, getCharacterManifest, createCharacter, disposeCharacter, repaintCharacter, CharacterAnimator } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS, SEAT_HIPS_HEIGHT } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
 import { STALL_BASE_KEY, TAKEOUT_BAG_KEY, TAKEOUT_BAG_LOCAL, VALET_SITES, VALET_STAND_KEY, buildValetStandFallback, createSidewalkNear, runStallSpot, stallRow, valetSpots, valetStandBoxes } from './job-props.js';
@@ -129,6 +132,7 @@ import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
 import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
+import { createStreetEvents, createStreetWorld } from './street-events.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -1021,6 +1025,7 @@ async function init() {
     pushAll(out, sprayMarkers);
     pushAll(out, robberyMarkers);
     pushAll(out, fugitiveMarkers());
+    pushAll(out, streetMarkers());
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1470,7 +1475,7 @@ async function init() {
   bus.on('weapon:fire', (e) => {
     // 警員開槍（adapters：police true / byPlayer false）不算；玩家開槍要 CRIME_GUNFIRE_RANGE 內有行人或警員
     if (!e || !e.byPlayer || e.police) return;
-    if (vigHooks.fugitiveShot(e.ex, e.ez)) return; // 警車任務：射擊逃犯車（落點在逃犯車附近）不算 gunfire
+    if (vigHooks.fugitiveShot(e.ex, e.ez, e.vehicle)) return; // 警車任務：射擊逃犯車（落點在逃犯車附近）、街頭事件：打中罪犯車本身（e.vehicle）不算 gunfire
     if (peopleNear(e.x, e.z, CRIME_GUNFIRE_RANGE, true)) reportCrime(CRIMES.gunfire, e.x, e.z);
   });
   // 搶警車：每台只算一次 policeVehicle；路邊上車開走警車（警車不走 carjack 流程）比照搶車另報 carjack
@@ -2065,7 +2070,8 @@ async function init() {
   // 通緝：爆炸致死 / 傷人走既有 ped:dead（cause 'explosion' → kill / killPolice）與 combat:hit（assault）；炸警車 = policeVehicle
   bus.on('vehicle:explode', (e) => {
     if (!e || !e.byPlayer || !isPoliceCar(e.vehicle) || stolenPolice.has(e.vehicle)) return;
-    if (vigHooks.fugitiveShot(e.x, e.z)) return;
+    // 帶被炸的車：街頭事件豁免只限罪犯車本身（shotAtEvent 比對命中車），罪犯車旁被炸的警車照算；警車任務沿用落點判定
+    if (vigHooks.fugitiveShot(e.x, e.z, e.vehicle)) return;
     reportCrime(CRIMES.policeVehicle, e.x, e.z);
   });
   // 每幀：引信吃模擬時間（worldStep.simDt），粒子 / 閃光吃渲染 dt；殘骸車流車被 traffic 回收後 detach
@@ -2083,6 +2089,75 @@ async function init() {
     }
   };
   const clearExplosions = () => explosions.clear();
+
+  // ---------- V3 街頭隨機犯罪事件（src/street-events.js；介面見 docs/dev/interfaces.md §32）----------
+  // 純邏輯排程 createStreetEvents + 世界轉接 createStreetWorld：搶劫 / 槍戰徵用附近骨架行人（brain.override）、追車 / 酒駕 = vehicles.adopt 事件車，
+  // 追車警車走既有 policeAdapters（spawnCar / driveCar / despawnCar；不經 police.js，0 星不追玩家）、槍戰走 gangs.skirmish（成員換色掛槍）
+  const streetEvents = createStreetEvents({ bus, rng: Math.random });
+  const streetPlayer = { x: 0, z: 0, actor: player.actor, inVehicle: false };
+  const streetWorld = createStreetWorld({
+    traffic, combat, vehicles, dmg, findRoute: (a, b) => findRoute(graph, a, b), police: policeAdapters, gangs, bus, rng: Math.random,
+    repaint: (p) => {
+      repaintCharacter(p.character, p.citizen.look);
+      p.look = p.citizen.look;
+      traffic._gangWeapon(p, p.citizen.gang ? p.citizen.gang.weapon : null);
+    },
+    canSee: (ax, az, bx, bz) => policeAdapters.canSee(ax, az, bx, bz),
+    getPlayer: () => {
+      const p = playerPos();
+      streetPlayer.x = p.x;
+      streetPlayer.z = p.z;
+      streetPlayer.inVehicle = state.mode === 'drive';
+      return streetPlayer;
+    },
+    isKept: (v) => v === state.vehicle || v === cj.vehicle,
+    onKeep: (v) => adopted.add(v),
+  });
+  // 犯行豁免：事件歹徒（搶匪 / 下車罪犯 / 槍戰成員；以 actor.id 比對，骨架回池換人不沿用）與打中罪犯車 / 酒駕車本身（weapon:fire.vehicle）；
+  // 誤傷路人 / 警察（含落點在罪犯車旁）照既有規則算
+  const vigActorHook = vigHooks.fugitiveActor;
+  const vigShotHook = vigHooks.fugitiveShot;
+  vigHooks.fugitiveActor = (a) => vigActorHook(a) || streetEvents.isEventActor(a);
+  vigHooks.fugitiveShot = (x, z, v) => vigShotHook(x, z) || streetEvents.shotAtEvent(x, z, v);
+  // 賞金歸屬：玩家駕駛的車撞到事件車 → 記為玩家出手（射中事件車走 weapon:impact，street-events 自行訂閱）；只是在旁邊不給賞金
+  router.onVehicleHitVehicle(({ a, b }) => {
+    const va = a && a.owner;
+    const vb = b && b.owner;
+    if (va && byPlayer(va)) streetEvents.vehicleHitByPlayer(vb);
+    else if (vb && byPlayer(vb)) streetEvents.vehicleHitByPlayer(va);
+  });
+  const streetMarkerBuf = [];
+  const streetMarkers = () => {
+    streetMarkerBuf.length = 0;
+    return streetEvents.markers(streetMarkerBuf);
+  };
+  const streetCtx = {
+    player: { x: 0, z: 0 },
+    view: null,
+    hour: 12,
+    busy: false,
+    world: streetWorld,
+    earn: (n) => economy.add(n, 'street'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+  };
+  // 每幀（updateExplosions 之後）：手機 / BUSTED・WASTED / 噴漆 → 凍結（事件車煞停、計時不前進）；
+  // 搶劫 / 警車任務 / 委託 / 外送 / 打工進行中 → busy（不生成新事件，既有事件照常收尾）；暫停 / 全螢幕面板時 updateGame 不跑
+  const updateStreetEvents = (dt, skip) => {
+    const frozen = skip || !!state.respawn || !!state.spraying;
+    streetWorld.update(dt, frozen);
+    const p = playerPos();
+    streetCtx.player.x = p.x;
+    streetCtx.player.z = p.z;
+    streetCtx.view = traffic.view;
+    streetCtx.hour = dayNight.hour;
+    streetCtx.busy = frozen || !!robberies.active || vigilante.active || otherMissionBusy();
+    streetEvents.update(frozen ? 0 : dt, streetCtx);
+  };
+  // 開新局 / 回主選單：無聲收尾（參與者 / 事件車回收、排程重置）；已結束仍在離場的事件車 / 收隊警車 / 待回收行人也一併清掉（零殘留）
+  const cancelStreetEvents = () => {
+    streetEvents.cancel();
+    streetWorld.reset();
+  };
 
   // 車流停車判斷用：玩家（或玩家的車）與路邊車輛
   const blockers = [];
@@ -2411,6 +2486,7 @@ async function init() {
     updateGangs(dt, phoneOpen);
     updateExplosions(dt);
     handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
+    updateStreetEvents(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2757,6 +2833,7 @@ async function init() {
     cancelVigilante();
     gangs.cancel();
     clearExplosions();
+    cancelStreetEvents();
     cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
@@ -2826,6 +2903,7 @@ async function init() {
     cancelVigilante();
     gangs.cancel();
     clearExplosions();
+    cancelStreetEvents();
     cancelRobbery();
     cancelSpray();
     cancelRespawn();
@@ -2911,6 +2989,8 @@ async function init() {
       robberies, clerks,
       // Phase 11：警車任務（vigilante.fugitives 看逃犯車狀態；fugitiveWorld.cars = 受控逃犯車）
       vigilante, fugitiveWorld, vigBar,
+      // V3：街頭事件（streetEvents.events 看各 slot；streetWorld.stats() 看事件車 / 待回收行人）
+      streetEvents, streetWorld,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

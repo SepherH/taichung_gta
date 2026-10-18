@@ -28,7 +28,7 @@
 //   手槍：鏡頭射線取瞄點 → 槍口確認遮擋（aim.js resolveShot）；命中角色 → combat.applyHit（weapon 'pistol'），
 //     命中其他（或角色倒地中不受理）→ weapon:impact（V4：raycast 給了 vehicle 時 payload 帶 vehicle / damage（def.vehicleDamage）/ byPlayer，
 //     整合層據此對車造成損壞，見 explosions.js damageVehicle）；射程（由槍口起算 80 m）內沒打到東西 → weapon:fire.miss = true（不發 impact）；
-//     每發 weapon:fire（另帶 miss / ex, ey, ez 落點或射程末端 / dist，供彈道特效）；打空彈匣後自動裝填一次；彈匣空且無備彈 → weapon:dryFire（DRY_FIRE_INTERVAL 節流）
+//     每發 weapon:fire（另帶 miss / ex, ey, ez 落點或射程末端 / dist，供彈道特效；vehicle = 打到的車（同 weapon:impact）或 null）；打空彈匣後自動裝填一次；彈匣空且無備彈 → weapon:dryFire（DRY_FIRE_INTERVAL 節流）
 //     def.infiniteAmmo：備彈無限（裝填不扣備彈、不會沒子彈、addAmmo 回 0）；ammo() / 事件的 reserve 為 Infinity，serialize 仍存數字 reserve
 //     裝填中不能射、不能切；裝填中被打倒 → 取消（彈藥不變，發 reload end）
 // 事件（bus）：weapon:equip / swing / fire / dryFire / reload / ammo / impact（payload 見契約 §10）
@@ -442,6 +442,7 @@ export function createWeapons({
       dirX: shot.dir.x, dirY: shot.dir.y, dirZ: shot.dir.z,
       byPlayer: actor.kind === 'player', hit: hitActor,
       miss: !shot.hit, ex: shot.point.x, ey: shot.point.y, ez: shot.point.z, dist: shot.dist,
+      vehicle: shot.hit && !hitActor ? shot.vehicle || null : null, // 打到的車（同 weapon:impact；犯行豁免比對命中車用）
     });
     emit('weapon:ammo', ammoPayload());
     recoilKick(P, streak, rand(), setting('recoil', 1), kickTmp);

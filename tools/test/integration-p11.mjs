@@ -69,7 +69,7 @@ const GROUPS = [
     'if (vigHooks.fugitiveActor(e.target)) return;',
     'if (!e || !e.byPlayer || vigHooks.fugitiveActor(e.ped)) return;',
     "e.cause === 'vehicle' && !vigHooks.fugitiveActor(e.ped)",
-    'if (vigHooks.fugitiveShot(e.ex, e.ez)) return;',
+    'if (vigHooks.fugitiveShot(e.ex, e.ez, e.vehicle)) return;',
   ]],
   ['BUSTED / WASTED：beginRespawn → vigHooks.end(kind)', [/missions\.failActive\(kind\);\s*\n\s*vigHooks\.end\(kind\);/]],
   ['除錯物件：window.__game.vigilante', ['vigilante, fugitiveWorld, vigBar,']],

@@ -32,36 +32,132 @@ function num(v, d) {
   return Number.isFinite(v) ? v : d;
 }
 
-function rgb() {
-  return { r: 0, g: 0, b: 0 };
+// 每幀不配置（v1-neon 子行程量測；修前 apply 關 + 開合計約 640 B/次）：
+// - 浮點數一律經物件欄位進出：helper 只收物件參照、不收 / 不回傳浮點數（update 內聯預算用完後的 helper 呼叫不內聯，浮點參數 / 回傳值會裝箱成 HeapNumber）
+// - 不寫 x && x.field 取浮點欄位：浮點與 null 在同一個 phi 匯合會強制裝箱
+// - 容器用 class：各自獨立的 hidden class、浮點初值建立 Double 表示，欄位原地覆寫不配置
+class Rgb {
+  constructor() {
+    this.r = 0.5;
+    this.g = 0.5;
+    this.b = 0.5;
+  }
+}
+class FogParams {
+  constructor(near, far) {
+    this.color = new Rgb();
+    this.near = 0.5;
+    this.far = 0.5;
+    this.near = near;
+    this.far = far;
+  }
+}
+class HemiParams {
+  constructor() {
+    this.intensity = 0.5;
+    this.color = new Rgb();
+    this.groundColor = new Rgb();
+  }
+}
+class SunParams {
+  constructor() {
+    this.intensity = 0.5;
+    this.color = new Rgb();
+  }
+}
+class WeatherOut {
+  constructor() {
+    this.rain = 0.5;
+    this.fog = 0.5;
+  }
+}
+class EnvParams {
+  constructor(near, far) {
+    this.sky = new Rgb();
+    this.fog = new FogParams(near, far);
+    this.hemi = new HemiParams();
+    this.sun = new SunParams();
+    this.weather = new WeatherOut();
+    this.day = 0.5;
+    this.night = 0.5;
+  }
+}
+// 本幀輸入（日夜基準 + 天氣）讀進固定形狀的暫存，後續計算只讀這裡（單態、不經多型載入）
+class EnvInput {
+  constructor() {
+    this.rain = 0.5;
+    this.fog = 0.5;
+    this.overcast = 0.5;
+    this.haze = 0.5;
+    this.fogNearMul = 0.5;
+    this.fogFarMul = 0.5;
+    this.sunMul = 0.5;
+    this.hemiMul = 0.5;
+    this.day = 0.5;
+    this.night = 0.5;
+    this.sunIntensity = 0.5;
+    this.hemiIntensity = 0.5;
+    this.greyAmt = 0.5; // towardGrey 的參數（欄位傳遞）
+    this.greyK = 0.5;
+  }
+}
+class NeonIn {
+  constructor() {
+    this.night = 0.5;
+    this.rain = 0.5;
+    this.tier = null;
+  }
 }
 
+function readInput(inp, w, b) {
+  inp.rain = num(w.rain, 0);
+  inp.fog = num(w.fog, 0);
+  inp.overcast = num(w.overcast, 0);
+  inp.haze = num(w.haze, 0);
+  inp.fogNearMul = num(w.fogNearMul, 1);
+  inp.fogFarMul = num(w.fogFarMul, 1);
+  inp.sunMul = num(w.sunMul, 1);
+  inp.hemiMul = num(w.hemiMul, 1);
+  // 不寫成 num(b && b.day, 1)：浮點欄位與 null 在同一個 phi 匯合會強制裝箱（每次配置 HeapNumber）
+  if (b) {
+    inp.day = num(b.day, 1);
+    inp.night = num(b.night, 0);
+    inp.sunIntensity = num(b.sunIntensity, 2.6);
+    inp.hemiIntensity = num(b.hemiIntensity, 1);
+  } else {
+    inp.day = 1;
+    inp.night = 0;
+    inp.sunIntensity = 2.6;
+    inp.hemiIntensity = 1;
+  }
+}
+
+// c 必為物件（呼叫端以 || FALLBACK 保底）：同上，不用 c && c.r
 function copyRgb(out, c) {
-  out.r = num(c && c.r, 0);
-  out.g = num(c && c.g, 0);
-  out.b = num(c && c.b, 0);
+  out.r = num(c.r, 0);
+  out.g = num(c.g, 0);
+  out.b = num(c.b, 0);
   return out;
 }
 
-const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-
-// 往灰階（亮度 × k）混合 amt
-function towardGrey(c, amt, k) {
+// 往灰階（亮度 × inp.greyK）混合 inp.greyAmt
+function towardGrey(c, inp) {
+  const amt = inp.greyAmt;
   if (amt <= 0) return;
-  const g = lum(c) * k;
+  const g = (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) * inp.greyK;
   c.r += (g - c.r) * amt;
   c.g += (g - c.g) * amt;
   c.b += (g - c.b) * amt;
 }
 
+// THREE.Color 也直接寫欄位（等同 setRGB(r, g, b) 於工作色彩空間）：不把浮點數當參數傳給未內聯的 setRGB 而裝箱
 function writeColor(target, c) {
   if (!target) return;
-  if (typeof target.setRGB === 'function') target.setRGB(c.r, c.g, c.b);
-  else {
+  if (target.isColor || typeof target.setRGB !== 'function') {
     target.r = c.r;
     target.g = c.g;
     target.b = c.b;
-  }
+  } else target.setRGB(c.r, c.g, c.b);
 }
 
 export function fogRange(viewDist, fogNear = 180, fogFar = 720, ratio = 0.25) {
@@ -77,16 +173,9 @@ export function createEnvironment({
   let vd = viewDist;
   let range = fogRange(vd, fogNear, fogFar, fogNearRatio);
 
-  const neonIn = { night: 0, rain: 0, tier: null }; // updateNeon 參數（重用，每幀不配置）
-  const params = {
-    sky: rgb(),
-    fog: { color: rgb(), near: range.near, far: range.far },
-    hemi: { intensity: 1, color: rgb(), groundColor: rgb() },
-    sun: { intensity: 1, color: rgb() },
-    weather: { rain: 0, fog: 0 },
-    day: 1,
-    night: 0,
-  };
+  const neonIn = new NeonIn(); // updateNeon 參數（重用，每幀不配置）
+  const input = new EnvInput();
+  const params = new EnvParams(range.near, range.far);
 
   function attach(dn) {
     if (attached && attached !== dn && typeof attached.attachEnvironment === 'function') attached.attachEnvironment(null);
@@ -108,22 +197,23 @@ export function createEnvironment({
   function update(dt, src = {}) {
     const dn = (src && src.dayNight) || attached;
     const b = (dn && dn.base) || null;
-    const w = weatherParams(src && src.weather);
-    const rain = num(w.rain, 0);
-    const fog = num(w.fog, 0);
-    const overcast = num(w.overcast, 0);
-    const haze = num(w.haze, 0);
-    const day = num(b && b.day, 1);
-    const night = num(b && b.night, 0);
+    const inp = input;
+    readInput(inp, weatherParams(src && src.weather), b);
+    const day = inp.day;
+    const night = inp.night;
+    const overcast = inp.overcast;
+    const haze = inp.haze;
 
     params.day = day;
     params.night = night;
-    params.weather.rain = rain;
-    params.weather.fog = fog;
+    params.weather.rain = inp.rain;
+    params.weather.fog = inp.fog;
 
     // 天空：陰天往暗灰；霧天再往亮灰（霧白），亮度隨白天
     const sky = copyRgb(params.sky, (b && b.sky) || FALLBACK_SKY);
-    towardGrey(sky, overcast * 0.85, 0.75);
+    inp.greyAmt = overcast * 0.85;
+    inp.greyK = 0.75;
+    towardGrey(sky, inp);
     if (haze > 0) {
       const g = 0.25 + 0.5 * day;
       sky.r += (g - sky.r) * haze * 0.6;
@@ -141,26 +231,32 @@ export function createEnvironment({
 
     // 霧：色同天空（遠處融入背景）；距離 = 視距夾過的基準 × 天氣倍率
     copyRgb(params.fog.color, sky);
-    params.fog.far = range.far * num(w.fogFarMul, 1);
-    params.fog.near = Math.min(range.near * num(w.fogNearMul, 1), params.fog.far * 0.9);
+    params.fog.far = range.far * inp.fogFarMul;
+    params.fog.near = Math.min(range.near * inp.fogNearMul, params.fog.far * 0.9);
 
     // 主光：陰雨 / 霧壓暗並往灰白
-    params.sun.intensity = num(b && b.sunIntensity, 2.6) * num(w.sunMul, 1);
+    params.sun.intensity = inp.sunIntensity * inp.sunMul;
     copyRgb(params.sun.color, (b && b.sunColor) || WHITE);
-    towardGrey(params.sun.color, overcast * 0.6, 1.1);
+    inp.greyAmt = overcast * 0.6;
+    inp.greyK = 1.1;
+    towardGrey(params.sun.color, inp);
 
     // 環境光：同理（較溫和；夜間保底亮度不被壓過頭）
-    params.hemi.intensity = num(b && b.hemiIntensity, 1) * num(w.hemiMul, 1);
+    params.hemi.intensity = inp.hemiIntensity * inp.hemiMul;
     copyRgb(params.hemi.color, (b && b.hemiSky) || FALLBACK_HEMI_SKY);
-    towardGrey(params.hemi.color, overcast * 0.5, 1);
+    inp.greyAmt = overcast * 0.5;
+    inp.greyK = 1;
+    towardGrey(params.hemi.color, inp);
     copyRgb(params.hemi.groundColor, (b && b.hemiGround) || FALLBACK_HEMI_GROUND);
-    towardGrey(params.hemi.groundColor, overcast * 0.3, 0.9);
+    inp.greyAmt = overcast * 0.3;
+    inp.greyK = 0.9;
+    towardGrey(params.hemi.groundColor, inp);
 
     if (apply) applyToScene(dn);
 
     const ws = src && src.weather;
     neonIn.night = night;
-    neonIn.rain = rain;
+    neonIn.rain = inp.rain;
     neonIn.tier = ws && typeof ws.getTier === 'function' ? ws.getTier() : null;
     updateNeon(dt, neonIn);
   }

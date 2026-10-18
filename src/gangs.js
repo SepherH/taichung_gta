@@ -24,6 +24,7 @@
 //   ≥ hostileAt：該幫 ENGAGE_RADIUS 內成員圍攻（近戰衝上來出拳 / 揮棒；持槍者保持 gunMin–gunMax 距離射擊），emit gang:hostile；
 //   ≥ drivebyAt：派一台幫派車追玩家，靠近 drivebyRange 內乘客開槍（emit gang:driveby）；結束後冷卻 drivebyCooldown 秒
 //   衰減：地盤內最後一次挑釁 decayDelay 秒後每秒 −decayIn；離開該幫地盤每秒 −decayOut；< calmBelow 收手、幫派車離開
+// V3 街頭事件：skirmish(sideA, sideB, { a, b, sec, weapon }) → 成員 actor[]（指定骨架行人換成兩幫持槍成員互射 sec 秒，同互毆流程）；warring(actors?) → 互毆中人數
 // 幫派互毆：每 warCheck 秒以 warChance 機率，找一組「入侵的敵對幫派成員（rival crew）」與在地成員（warRadius 內）互毆 warSec 秒
 // 開槍：命中率依距離 hitNear → hitFar；命中走 combat.applyHit（weapon 'pistol'）；玩家在車內時以 throughVehicle 扣血並 ctx.damageVehicle 扣車耐久；
 //   每發 emit weapon:fire（byPlayer false、gang: id）讓行人聽到槍聲 / 音效（通緝不計：整合層只認 byPlayer）
@@ -665,6 +666,47 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     return false;
   }
 
+  // ---------- V3 街頭事件槍戰（street-events.js）：指定兩組骨架行人換成兩幫持槍成員，沿用互毆 engage(war) 互射 sec 秒 ----------
+  // sideA / sideB：traffic 骨架行人（p.citizen / p.actor / p.brain）；已是成員、大腦已被接管者略過。回傳登記的成員 actor 陣列（任一邊 0 人 → 已登記者照常互毆不了、回 []）
+  // 換色只改 c.look（makeMember），骨架重新上色 / 掛槍由呼叫端處理（traffic 只在掛骨架時上色）
+  function recruit(peds, def, crew, weapon, out) {
+    for (const p of peds) {
+      const c = p && p.citizen;
+      if (!c || !p.actor || c.gang || byId.has(p.actor.id) || (p.brain && p.brain.override)) continue;
+      makeMember(c, def, crew, false);
+      c.gang.weapon = weapon;
+      pedHooks.onAttach(p);
+      const m = byId.get(p.actor.id);
+      if (m) out.push(m);
+    }
+    return out;
+  }
+  function skirmish(sideA, sideB, { a, b, sec = C.warSec, weapon = 'pistol' } = {}) {
+    const ga = GANGS.find((g) => g.id === a);
+    const gb = GANGS.find((g) => g.id === b);
+    if (!ga || !gb || ga === gb) return [];
+    const ma = recruit(sideA || [], ga, ++st.crewSeq, weapon, []);
+    const mb = recruit(sideB || [], gb, ++st.crewSeq, weapon, []);
+    if (!ma.length || !mb.length) return [...ma, ...mb].map((m) => m.actor);
+    for (let k = 0; k < ma.length; k++) engage(ma[k], mb[k % mb.length].actor, true);
+    for (let k = 0; k < mb.length; k++) engage(mb[k], ma[k % ma.length].actor, true);
+    const all = [...ma, ...mb];
+    for (const m of all) m.warT = sec;
+    const p0 = ma[0].actor.pos;
+    const p1 = mb[0].actor.pos;
+    emit('gang:war', { a: ga.id, b: gb.id, x: (p0.x + p1.x) / 2, z: (p0.z + p1.z) / 2, street: true });
+    return all.map((m) => m.actor);
+  }
+  // 槍戰中（互毆中）的成員數：actors 省略 = 全部
+  function warring(actors = null) {
+    let n = 0;
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
+      if (m.engaged && m.war && (!actors || actors.includes(m.actor))) n++;
+    }
+    return n;
+  }
+
   // ---------- 開車掃射 ----------
   function endCar(g, reason) {
     const cars = cur.cars;
@@ -812,6 +854,8 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     gangs: GANGS,
     members: list,
     config: C,
+    skirmish,
+    warring,
     isHostile: (id) => !!(stateOf.get(id) && stateOf.get(id).hostile),
     car: (id) => (stateOf.get(id) ? stateOf.get(id).car : null),
     get territory() {

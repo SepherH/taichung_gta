@@ -175,6 +175,72 @@ N.registerWetSurface(roadMat);
 N.registerWetSurface(junctionMat);
 const neon = N.buildNeon(scene, { THREE, registerNight, buildings, roads: surfaceRoads, terrain, seed: SEED, makeCanvas });
 const geo = neon.mesh.geometry;
+
+// ---------- 每幀配置量測子行程（V1_NEON_ALLOC=1）----------
+// 在任何其他 updateNeon / environment 呼叫之前執行並結束（同 v3-events）：避免測試直接以各種物件字面量呼叫 updateNeon 的型別回饋污染最佳化結果
+// （遊戲內 updateNeon 只由 environment.update 呼叫，參數物件單態）。父行程以 --min/max-semi-space-size=128 --expose-gc 啟動本段：
+// 量測迴圈在 128 MB 新生代內不觸發 scavenge，heapUsed 差 = 實際配置量；同一迴圈加「每次配置一物件」對照組證明量得到；
+// PerformanceObserver('gc') 確認量測期間除了量前的 gc() 外沒有 GC（否則量測無效 = 失敗）
+if (process.env.V1_NEON_ALLOC === '1') {
+  const color = (r, g, b) => ({ r, g, b });
+  // 非整數 night / rain / overcast（黃昏小雨）：整數值走 Smi 會漏測浮點裝箱
+  const dn = {
+    base: { hour: 19, elev: -0.1, day: 0.3, night: 0.7, sky: color(0.07, 0.04, 0.19), sunColor: color(0.6, 0.53, 1), sunIntensity: 0.7, hemiIntensity: 0.9, hemiSky: color(0.4, 0.36, 0.7), hemiGround: color(0.2, 0.16, 0.3) },
+  };
+  const wEnv = { rain: 0.35, fog: 0.1, fogNearMul: 0.8, fogFarMul: 0.9, sunMul: 0.7, hemiMul: 0.85, overcast: 0.4, haze: 0.1 };
+  const weather = { getEnv: () => wEnv, getTier: () => 'high' }; // 同 weather.js：getEnv 回共用物件
+  // apply: true 的路徑（scene / 光源寫入；Color 替身同 THREE.Color：isColor + setRGB）
+  class FakeColor {
+    constructor() {
+      this.isColor = true;
+      this.r = 0.5;
+      this.g = 0.5;
+      this.b = 0.5;
+    }
+    setRGB(r, g, b) {
+      this.r = r;
+      this.g = g;
+      this.b = b;
+      return this;
+    }
+  }
+  const env = createEnvironment({ apply: false });
+  const envApply = createEnvironment({ scene: { background: new FakeColor(), fog: { color: new FakeColor(), near: 1, far: 2 } } });
+  const src = { dayNight: dn, weather }; // 呼叫端重用參數物件（main.js 同）
+  const srcApply = { dayNight: { base: dn.base, hemi: { intensity: 1, color: new FakeColor(), groundColor: new FakeColor() }, sun: { intensity: 1, color: new FakeColor() } }, weather };
+  const { PerformanceObserver } = await import('node:perf_hooks');
+  let gcs = 0;
+  const obs = new PerformanceObserver((list) => (gcs += list.getEntries().length));
+  obs.observe({ entryTypes: ['gc'] });
+  const frame = () => {
+    env.update(0.016, src);
+    envApply.update(0.016, srcApply);
+  };
+  for (let i = 0; i < 100000; i++) frame(); // 暖機（最佳化完成後量測）
+  const ITER = 200000;
+  const sink = [];
+  const measure = (alloc) => {
+    global.gc();
+    const h0 = process.memoryUsage().heapUsed;
+    for (let i = 0; i < ITER; i++) {
+      frame();
+      if (alloc) sink[i & 7] = { i };
+    }
+    return (process.memoryUsage().heapUsed - h0) / ITER;
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 20)); // 讓 gc 觀察項送達
+  await tick();
+  const g0 = gcs;
+  const per = measure(false);
+  await tick();
+  const g1 = gcs;
+  const perAlloc = measure(true);
+  await tick();
+  obs.disconnect();
+  console.log(JSON.stringify({ per, perAlloc, gcPer: g1 - g0, gcAlloc: gcs - g1 }));
+  process.exit(0);
+}
+
 const triangles = geo.attributes.position.count / 3;
 check('新增 draw call ≤ 4（招牌單一 mesh = 1）', neon.stats.drawCalls <= 4 && scene.children.length === 1, `drawCalls ${neon.stats.drawCalls}`);
 check('三角形增量 ≤ 20000', triangles <= 20000 && triangles === neon.stats.triangles, `triangles ${triangles}`);
@@ -272,7 +338,8 @@ check('tier 不變時不觸發材質重編譯', recompiles === 0);
   const base = (nightV, sky) => ({
     base: { hour: 22, elev: -0.8, day: 1 - nightV, night: nightV, sky, sunColor: color(0.6, 0.53, 1), sunIntensity: 0.7, hemiIntensity: 0.9, hemiSky: color(0.4, 0.36, 0.7), hemiGround: color(0.2, 0.16, 0.3) },
   });
-  const weather = { getEnv: () => ({ rain: 0, fog: 0, fogNearMul: 1, fogFarMul: 1, sunMul: 1, hemiMul: 1, overcast: 0, haze: 0 }), getTier: () => 'high' };
+  const wEnv = { rain: 0, fog: 0, fogNearMul: 1, fogFarMul: 1, sunMul: 1, hemiMul: 1, overcast: 0, haze: 0 }; // 同 weather.js getEnv：共用物件
+  const weather = { getEnv: () => wEnv, getTier: () => 'high' };
   const env = createEnvironment({ apply: false });
   env.update(0.016, { dayNight: base(0, color(0.27, 0.57, 0.89)), weather });
   const p = env.getParams();
@@ -283,13 +350,21 @@ check('tier 不變時不觸發材質重編譯', recompiles === 0);
   const lowW = { ...weather, getTier: () => 'low' };
   env.update(0.016, { dayNight: base(1, color(0.07, 0.04, 0.19)), weather: lowW });
   check('environment：tier 切 low → 濕亮關閉', N.neonState().tier === 'low' && roadMat.envMap === null);
-  // 每幀不配置（粗測：大量 update 後堆積增量很小）
-  if (global.gc) global.gc();
-  const h0 = process.memoryUsage().heapUsed;
-  const dn = base(1, color(0.07, 0.04, 0.19));
-  for (let i = 0; i < 200000; i++) env.update(0.016, { dayNight: dn, weather });
-  const dh = (process.memoryUsage().heapUsed - h0) / 1024 / 1024;
-  check('environment + neon 20 萬次 update 堆積增量 < 8 MB', dh < 8, `${dh.toFixed(2)} MB`);
+  // 每幀不配置：見上方 V1_NEON_ALLOC 子行程（--min/max-semi-space-size=128 + --expose-gc，在其他 updateNeon 呼叫之前量測）
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const r = spawnSync(process.execPath, ['--min-semi-space-size=128', '--max-semi-space-size=128', '--expose-gc', fileURLToPath(import.meta.url)], { env: { ...process.env, V1_NEON_ALLOC: '1' }, encoding: 'utf8' });
+  let res = null;
+  try {
+    res = JSON.parse((r.stdout || '').trim().split('\n').pop());
+  } catch {
+    res = null;
+  }
+  check(
+    res ? `environment + neon 每次 update 不配置（apply 關 / 開各一次：${res.per.toFixed(2)} B/次；對照每次配置一物件 ${res.perAlloc.toFixed(1)} B/次；量測期間 GC ${res.gcPer} / ${res.gcAlloc}）` : 'environment + neon 每次 update 不配置（子行程量測失敗）',
+    !!res && res.per < 1 && res.perAlloc - res.per >= 12 && res.gcPer <= 1 && res.gcAlloc <= 1,
+    res ? '' : (r.stderr || '').slice(0, 300),
+  );
 }
 
 neon.dispose();

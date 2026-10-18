@@ -427,6 +427,15 @@ const state = { time: 0, tier: 'high', anim: true, wetOn: true, wet: 0, envMap: 
 const controllers = []; // { uniforms }
 const wetSurfaces = []; // { material, roughness, metalness, envMapIntensity, hasEnv }
 
+// 每幀寫入的 uniform 用獨立 class：three 的 { value } 物件字面量共用同一個 map（多數裝貼圖 / 向量，欄位是 Tagged 表示），
+// 共用時每次寫浮點數都會配置 HeapNumber；獨立 class 的 value 欄位維持 Double 表示、原地覆寫
+class FloatUniform {
+  constructor(v) {
+    this.value = 0.5; // 先以浮點數建立 Double 表示
+    this.value = v;
+  }
+}
+
 export function neonState() {
   return state;
 }
@@ -486,7 +495,12 @@ export function wetness(night, rain) {
   return w < 0 ? 0 : w > 1 ? 1 : w;
 }
 
-export function updateNeon(dt, { night = 0, rain = 0, tier = null } = {}) {
+// 每幀不配置：參數直接讀欄位（不解構預設值）、濕度就地計算（不把浮點數傳給可能未內聯的 wetness）——
+// 未內聯呼叫的浮點數參數 / 回傳值、浮點與 undefined / null 在同一 phi 匯合都會裝箱成 HeapNumber
+const NO_INPUT = { night: 0, rain: 0, tier: null };
+export function updateNeon(dt, input) {
+  const o = input || NO_INPUT;
+  const tier = o.tier;
   if (tier) setNeonTier(tier);
   if (state.anim && Number.isFinite(dt) && dt > 0) state.time = (state.time + dt) % 3600;
   for (let i = 0; i < controllers.length; i++) {
@@ -494,9 +508,14 @@ export function updateNeon(dt, { night = 0, rain = 0, tier = null } = {}) {
     u.uNeonTime.value = state.time;
     u.uNeonAnim.value = state.anim ? 1 : 0;
   }
-  const w = wetness(night, rain);
+  const nv = o.night;
+  const rv = o.rain;
+  const night = Number.isFinite(nv) ? nv : 0;
+  const rain = Number.isFinite(rv) ? rv : 0;
+  // 同 wetness()；以 Math.min / max 夾值（三元式混 0 / 1 / 浮點的 phi 會被表示成 Tagged 而裝箱）
+  const w = state.wetOn ? Math.min(1, Math.max(0, night * WET.night, rain * WET.rain)) : 0;
   state.wet = w;
-  const envK = w * (WET.dayEnv + (WET.env - WET.dayEnv) * (night || 0));
+  const envK = w * (WET.dayEnv + (WET.env - WET.dayEnv) * night);
   for (let i = 0; i < wetSurfaces.length; i++) {
     const e = wetSurfaces[i];
     if (!e.hasEnv) continue;
@@ -550,7 +569,7 @@ export function buildNeon(scene, {
   envTex.mapping = THREE.EquirectangularReflectionMapping;
   setWetEnvMap(envTex);
 
-  const uniforms = { uNeonTime: { value: state.time }, uNeonAnim: { value: state.anim ? 1 : 0 } };
+  const uniforms = { uNeonTime: new FloatUniform(state.time), uNeonAnim: new FloatUniform(state.anim ? 1 : 0) };
   const material = new THREE.MeshStandardMaterial({
     color: 0x3a3440, map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0, roughness: 0.55, metalness: 0.1,
   });

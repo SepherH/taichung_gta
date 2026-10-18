@@ -66,7 +66,7 @@ const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空�
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）

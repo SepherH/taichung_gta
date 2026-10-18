@@ -49,6 +49,8 @@
 | `vigilante:level` | `{ level, phase: 'start', count, timeSec, speed }`（每關開始）/ `{ level, phase: 'clear', reward, earned }`（全部制伏，賞金已 `ctx.earn`） | missions/vigilante.js |
 | `vigilante:end` | `{ reason: 'timeout'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'cancel', levels, earned, level }`（levels = 完成關數、earned = 本次共得 NT$） | missions/vigilante.js |
 | `vigilante:subdued` | `{ id, level, x, z, remaining }`（單台逃犯車制伏；附加事件） | missions/vigilante.js |
+| `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
+| `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
 
 表外的新事件名稱必須先加進本表。
@@ -907,7 +909,7 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 警車判定 `isPoliceCar(v)` = `v.type === 'police' \|\| policeAdapters.isPoliceVehicle(v)`；其他任務 `otherMissionBusy()` = 委託 / 外送 / 垃圾車 / 打工 / 搶劫 / 噴漆；反向：任務中 `robCtx.onFoot` 為假（不開始搶劫）、噴漆廠視同未駕駛、`createMissions({ extraBusy })` 擋接委託 / 垃圾車 / 打工
 - 互動：駕駛中 `inter = vigilanteInteractable(v) \|\| nearestInteractable(...)`（priority 4，E / 手把 B / tb-interact 同一路徑）；任務中 `nearestInteractable` 不列委託
 - 每幀 `updateVigilante(dt, phoneOpen)` 接在 `updateRobberies` 之後：手機 / `state.respawn` / `state.spraying` / 搶劫中不推進並 `fugitiveWorld.brakeAll()`；`fugitiveWorld.update(dt)` → `vigilante.update` → `vigBar.set`
-- 犯行：通緝段宣告 `vigHooks = { fugitiveActor, fugitiveShot, end, active }`（預設無作用，警車任務段覆寫為 vigilante 方法；integration-p7 抽段不需注入 vigilante）；`combat:hit` / `ped:dead` / `ped:knockdown` 對 `vigHooks.fugitiveActor` 不報；`weapon:fire` 落點 `vigHooks.fugitiveShot(ex, ez)` 不報 gunfire；撞一般市民車輛 / 行人照常
+- 犯行：通緝段宣告 `vigHooks = { fugitiveActor, fugitiveShot, end, active }`（預設無作用，警車任務段覆寫為 vigilante 方法；integration-p7 抽段不需注入 vigilante）；`combat:hit` / `ped:dead` / `ped:knockdown` 對 `vigHooks.fugitiveActor` 不報；`weapon:fire` 落點 `vigHooks.fugitiveShot(ex, ez, vehicle)`（vehicle = 打中的車，街頭事件比對用）不報 gunfire；撞一般市民車輛 / 行人照常
 - `beginRespawn` → `vigHooks.end(kind)`（在 `missions.failActive(kind)` 之後；同時收起任務條）；`quitToMenu` / `startGame` → `cancelVigilante()`（在 `cancelRobbery` 之前）
 - 除錯：`window.__game.vigilante` / `fugitiveWorld` / `vigBar`（僅 dev）
 
@@ -976,6 +978,39 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 31.4 回歸
 - `node tools/test/v4-explode.mjs`（純邏輯，無 three：門檻 / 時序 / 加速 / 範圍傷害 / 擊飛 / 連鎖 / 殘骸 / 槍擊累積 / 犯行 / 池化 / cancel・dispose / 幀率無關 / 每幀成本）
+
+## 32. V3 街頭隨機犯罪事件（罪惡之都；接線點在 `src/main.js`，介面以 `src/street-events.js` 檔頭為準）
+
+### 32.1 模組介面（`src/street-events.js`，純邏輯，只 import `gangs.js` / `vehicle-damage.js` / `carjack.js`，不 import three / rapier）
+- `createStreetEvents({ bus, rng?, config? })` → `{ update(dt, ctx), active, cancel(), dispose(), isEventActor(a), shotAtEvent(x, z, vehicle), vehicleHitByPlayer(v), markers(out), events, config, cooldown, stats() }`
+  - `ctx = { player: { x, z }, view?: { dx, dz }（鏡頭水平朝向）, hour, busy, world, earn(n), toast?(text, sec), zoneAt?(x, z) }`；`busy` 時不生成新事件、既有事件照常收尾
+  - 排程：事件開始時起算冷卻 45–90 s；之後每 5 s 以 `spawnChance(hour, 地盤內)` 擲骰（基礎 0.12，夜間 20–5 時 ×2、玩家在幫派地盤內 ×1.6）；同時 ≤ 2 件；種類權重 `kindWeights`（夜間搶劫 / 酒駕較多；槍戰只在環帶內有地盤邊界點 `BORDER_POINTS` 時、地盤內加倍）；`config.kindMul` 可逐種調整
+  - 生成點：玩家 60–200 m（搶劫 / 槍戰 ≤ 100 m：骨架行人只在 pedFar 內）、與鏡頭朝向夾角 60–100°（視野邊緣；下限 > 水平半視角：vfov 60° 時 16:9 = 45.7°、21:9 = 53.4°）；world 吸附後再驗一次（+15 m 容許），不合格 `release(h, 'cancel')` 換候選
+  - 事件（每件超時 60–120 s）：`robbery` 歹徒跑向路人推倒 → 逃跑，玩家打倒歹徒 → `subdued` 賞金 NT$100–200、受害者道謝；歹徒離玩家 > 120 m → `escaped`｜`chase` 罪犯車背離玩家逃竄（22 m/s）、1–2 台警車追（25 m 內 ram）；耐久 ≤ `SMOKE_DARK_AT` 或低速 7 s（起步 5 s 後；> 事件車卡住倒車 `STUCK_SEC` 4 + `REVERSE_SEC` 1.5 s）→ 玩家出手過（玩家駕駛車撞擊 `vehicleHitByPlayer`、射中事件車 `weapon:impact` byPlayer）= `subdued` 賞金 NT$300–500，否則 `arrested`（玩家只是在旁邊不算）；玩家開走罪犯車也算 `subdued`；> 260 m `escaped`｜`gang` 地盤邊界兩幫成員互射 10–20 s → `over`｜`drunk` 車速 5–20 m/s 正弦起伏 + 方向盤蛇行、不理號誌；自己撞停 / 卡住 8 s → `crashed`（玩家出手過才 `subdued` NT$100–200）；搶劫同樣只認玩家出手（bus byPlayer），被別人撞倒、玩家在旁不給賞金
+  - 呈現：事件在玩家 80 m 內（開始時或之後首次接近）toast `HINTS[kind]`；開始 / 提示後 6 s 內 `markers()` 回 kind `'street-event'` 黃點（0.25 s 亮暗閃爍）
+  - 犯行豁免（只限罪犯本人）：`isEventActor(a)`（搶匪 / 下車罪犯 / 槍戰成員；結束後 20 s 內仍算；以登記時的 `a.id` 比對——traffic 骨架回池換給別的市民只改 id，新身分不沿用）、`shotAtEvent(x, z, vehicle)`（打中的車就是進行中的罪犯車 / 酒駕車本身 `handle.vehicle`、落點 4.5 m 內；罪犯車旁的警車 / 路人照算）；`combat:hit` / `ped:knockdown` / `ped:dead` byPlayer 打到歹徒、`weapon:impact` byPlayer 打到事件車 → 記為玩家出手
+  - 錯開更新：事件邏輯每 0.1 s 輪詢（兩 slot 相位錯開）、排程每 5 s；slot / 輸出 / 標記建構時配置，每幀路徑不配置
+- `ctx.world`（`createStreetWorld` 或測試替身）：`spawn(kind, x, z, ev) → handle | null`（`handle.x / z / actors`、車輛事件 `handle.vehicle`）、`poll(h, out)`、`act(h, verb, ev)`（`approach / grab / flee / subdued / drive / eject`）、`release(h, outcome)`
+- `createStreetWorld({ traffic, combat, vehicles, dmg?, findRoute?, police, gangs?, repaint?(p), canSee?, getPlayer, bus?, rng?, isKept?, onKeep? })` → 上列 world + `update(dt, frozen)`（每幀事件車控制、離開 / 回收）、`reset()`（回主選單 / 開新局：離場中的事件車 / 收隊警車立即收掉、待回收行人清 override 交還 traffic）、`dispose()`（= reset + 取消訂閱）、`cars`、`isEventVehicle(v)`、`stats()`
+  - 行人事件徵用 30 m 內漫步中的骨架行人（無 override、非幫派、combat normal），以 `brain.override` 控制；推倒 = `combat.knockdownActor(受害者, { emit: true, attacker: 歹徒 })`（目擊者 / ped-ambient 照既有反應）；喊叫 / 道謝走 `traffic.ambient.bubbles` + `anim.playGesture`
+  - 槍戰 = `gangs.skirmish(sideA, sideB, { a, b, sec, weapon: 'pistol' })`（成員換色 `repaint(p)`）；流彈：槍戰成員未命中的 `weapon:fire` 沿射線 40 m 內第一個 0.45 m 內的路人 / 玩家 `combat.applyHit`（pistol 10，玩家在車內 `throughVehicle`）
+  - 事件車 = `vehicles.adopt` + `dmg.attach`（`v.ai`、`v.streetEvent`），駕駛同 vigilante 逃犯車（路線跟隨、彎道減速、卡住倒車）+ wobble；事件車 / 警車生成點只取 `canSee(玩家 → 點)` 為 false 的車道點（同 adapters findSpawnPoint；`canSee` 省略 = 都看得到 → 不生成）；追車警車 = `police.spawnCar / driveCar / despawnCar`（既有 adapters 控制，不經 police.js、不追玩家）
+  - 回收（不在玩家眼前消失）：行人解除 override，> 110 m 且離開視線（`traffic._hidden`）才 `traffic._recyclePed`；> 110 m 但看得到 → 不強制回收、交還 traffic 一般 LOD（90 s 上限同樣交還）；事件車：玩家正駕駛 / 下車棄置 / 熄火殘骸 → `onKeep`（一般回收名單），仍在逃者繼續開、> 150 m 且看不到才移除（45 s 上限交 onKeep）；收隊警車同樣只在 > 150 m 且看不到時 `despawnCar`，超過 90 s 仍看得到 → 停止巡邏、`driveCar(stop)` 煞停，之後一樣等看不到才移除；`cancel` 一律立即移除
+
+### 32.2 跨檔最小擴充
+- `gangs.js`：`skirmish(sideA, sideB, { a, b, sec, weapon })` → 成員 actor[]（指定骨架行人換成兩幫成員、`engage(war)` 互射 sec 秒，emit `gang:war { …, street: true }`）、`warring(actors?)` → 互毆中人數
+- `map/marker-colors.js`：`'street-event': '#ffee58'`；`hud.js` `EDGE_KINDS` 加 `'street-event'`（超出半徑貼邊）；`map/big-map.js` 圖例「街頭事件」
+
+### 32.3 接線（main.js）
+- `streetEvents` / `streetWorld` 建在爆炸段之後；`repaint` = `repaintCharacter(p.character, p.citizen.look)` + `traffic._gangWeapon(p, weapon)`；`canSee` = `policeAdapters.canSee`；`isKept / onKeep` 同警車任務逃犯車（`adopted`）
+- 每幀 `updateStreetEvents(dt, phoneOpen)` 接在 `updateExplosions` / `handleCarKo` 之後：手機 / BUSTED・WASTED / 噴漆 → 凍結（事件車煞停、邏輯 dt 0）；搶劫 / 警車任務 / 委託・外送・打工（`otherMissionBusy`）→ `busy`；暫停 / 全螢幕面板時 updateGame 不跑；專案目前無競速模式
+- `view = traffic.view`（上一幀鏡頭）、`hour = dayNight.hour`、賞金 `economy.add(n, 'street')`、toast 走 `hud.toast`；小地圖 / 大地圖 `collectMarkers` 併入 `streetMarkers()`
+- 犯行：`vigHooks.fugitiveActor` / `fugitiveShot(x, z, vehicle)` 併入 `streetEvents.isEventActor` / `shotAtEvent`（既有 `combat:hit` / `ped:dead` / `ped:knockdown` / `weapon:fire`（帶 `e.vehicle` = 打中的車）/ `vehicle:explode`（帶被炸的車）監聽沿用）；誤傷路人 / 警察、炸罪犯車旁的警車、撞警車照算
+- 賞金歸屬：`router.onVehicleHitVehicle` 玩家駕駛的車撞到事件車 → `streetEvents.vehicleHitByPlayer(v)`
+- `startGame`、`quitToMenu` → `cancelStreetEvents()`（`streetEvents.cancel()` + `streetWorld.reset()`）；除錯 `window.__game.streetEvents` / `streetWorld`（僅 dev）
+
+### 32.4 回歸
+- `node tools/test/v3-events.mjs`（純邏輯 + 替身，無 three：排程頻率 / 權重、同時上限 / 冷卻、生成距離 / 視野、四種事件開始・結束・制伏・逃脫、賞金與犯行豁免（真 wanted）、busy、cancel、幀率無關、每幀不配置、每幀成本 < 0.3 ms、world 轉接、接線）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

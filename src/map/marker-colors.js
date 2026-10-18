@@ -16,6 +16,7 @@ export const MARKER_COLORS = {
   'spray-shop': '#e040fb', // 噴漆廠（Phase 8，src/wanted/places.js SPRAY_SHOPS；小地圖沿用既有畫法，不貼邊，同光柱洋紅色）
   fugitive: '#ff1744', // 逃犯車（Phase 11 警車任務，src/missions/vigilante.js markers()；會移動，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
   store: '#43a047', // 超商（Phase 9，src/wanted/places.js STORES；小地圖畫綠底「超」字圖示（hud.js ICON_KINDS），不貼邊，同小光柱綠色）
+  'street-event': '#ffee58', // V3 街頭事件（src/street-events.js markers()；事件開始 / 提示後短暫閃爍的黃點，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';
