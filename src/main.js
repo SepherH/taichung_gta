@@ -57,6 +57,11 @@
 //   每幀 updateRace 接在 updateVigilante 之後（手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆 / 搶劫 / 警車任務中不推進、對手車煞停）；
 //   互斥：state.racing（getter）併入 otherMissionBusy（警車任務）與搶劫守門、vigHooks.active 併入（委託類 / 噴漆）；比賽中犯行照常；
 //   vigHooks.end 併入退賽（BUSTED / WASTED）；開新局 / 回主選單 → cancelRace()；最佳成績存檔 races.best（races.serialize / restore）
+// 計程車 / 救護車副任務（Phase 13，§35）：createTaxi / createEms（missions/taxi.js / ems.js 純邏輯）+ createCurbPedWorld（招手乘客 / 倒地傷患 = 徵用 traffic.peds）
+//   + createSideJobBar（.taxi-bar / .ems-bar）+ 目的地 / 醫院光柱 + 小地圖 'taxi-fare' / 'taxi-dest' / 'ems-patient' / 'ems-hospital'；救護車 = createAmbulanceDepot
+//   在醫院旁生成 suv 白車 + 紅條 + 頂燈（emissive 方塊閃爍，不加光源 / 貼圖）；駕駛計程車 / 救護車時互動鍵開始 / 收工（後備：競速 / 警車 / 委託 / 打卡都沒有時才出現）；
+//   每幀 updateSideJobs 接在 updateGangs 之後（手機 / 暫停 / BUSTED・WASTED / 噴漆中不推進，但傷患倒地計時照刷）；互斥：state.sideJob（getter）併入 otherMissionBusy 與搶劫守門、
+//   vigHooks.active / end 包裝（委託類 / 噴漆 / BUSTED・WASTED）；開新局 / 回主選單 → cancelSideJobs()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -140,6 +145,8 @@ import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
 import { createRaces, createRivalWorld, createRaceHud, arrowAngle as raceArrowAngle, promptText as racePromptText, CP_RADIUS as RACE_CP_RADIUS } from './missions/race.js';
+import { createTaxi, createCurbPedWorld, createSideJobBar, PROMPT_START as TAXI_PROMPT_START, PROMPT_QUIT as TAXI_PROMPT_QUIT } from './missions/taxi.js';
+import { createEms, createAmbulanceDepot, ambulanceSpot, PROMPT_START as EMS_PROMPT_START, PROMPT_QUIT as EMS_PROMPT_QUIT } from './missions/ems.js';
 import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 import { createStreetEvents, createStreetWorld } from './street-events.js';
 
@@ -163,6 +170,9 @@ const RACE_LOCK_CONTROLS = Object.freeze({ throttle: 0, steer: 0, brake: 1, hand
 const RACE_PRIORITY = 5; // 街頭競速起點互動優先序（高於警車任務 4 / 委託 3：駕車進起點光柱時 E 優先開賽）
 const RACE_CP_BEACON = { height: 45, radius: RACE_CP_RADIUS, sink: 2 }; // 競速檢查點大光柱圈（半徑 = 通過判定半徑 12 m；顏色 BEACON_COLORS.race 橘 #fb8c00）
 const RACE_SPAWN_PAD = 2.5; // 對手車生成格位離建築輪廓至少（m，buildingAt pad）
+const SIDEJOB_PRIORITY = 4; // 計程車 / 救護車互動 sideInter.priority（僅標示；實際仲裁 = 駕駛中 if (!inter) 鏈的最後後備，不經 pickInteractable）
+const SIDEJOB_BEACON = { height: 40, radius: 8, sink: 2 }; // 計程車目的地 / 醫院光柱（顏色 BEACON_COLORS.taxi 黃 / ems 紅）
+const AMB_FLASH_SEC = 0.25; // 救護車頂燈紅藍交替間隔（s；只改 emissiveIntensity）
 const STORE_BEACON = { height: 7, radius: 0.7, sink: 1 }; // 超商門口小光柱（createBeaconPool 選項；顏色 BEACON_COLORS.store 綠 #43a047）
 const AUTOSAVE_SEC = 15; // 自動存檔間隔（s）
 const MAX_STEP_DIST = 30; // 單幀位移超過此值（傳送 / 重生）不計入里程（m）
@@ -1061,6 +1071,7 @@ async function init() {
     pushAll(out, fugitiveMarkers());
     pushAll(out, streetMarkers());
     pushAll(out, raceMarkers());
+    pushAll(out, sideJobMarkers());
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1087,6 +1098,7 @@ async function init() {
   const interCands = [null, null, null, null];
   const nearestInteractable = (pos, walking) => {
     interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos); // 警車任務 / 街頭競速進行中不接委託（互斥）
+    if (state.sideJob) interCands[0] = null; // 計程車 / 救護車副任務中同樣不接委託
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1762,7 +1774,7 @@ async function init() {
   // 警車：警力生成的警車（policeAdapters，含被玩家開走的）或路邊停放的 police 車型
   const isPoliceCar = (v) => !!v && (v.type === 'police' || policeAdapters.isPoliceVehicle(v));
   // 其他任務進行中（委託 / 外送 / 追垃圾車 / 打工 / 搶劫 / 噴漆）→ 不可開始警車任務
-  const otherMissionBusy = () => !!(missions.active() || missions.eventActive() || missions.jobActive() || robberies.active || state.spraying || state.racing); // state.racing：街頭競速段定義的 getter
+  const otherMissionBusy = () => !!(state.sideJob || missions.active() || missions.eventActive() || missions.jobActive() || robberies.active || state.spraying || state.racing); // state.sideJob / state.racing：計程車救護車段 / 街頭競速段定義的 getter
   const vigCtx = {
     player: { x: 0, z: 0 },
     inPolice: false,
@@ -1949,6 +1961,7 @@ async function init() {
     robCtx.player.yaw = player.yaw;
     robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor) || vigilante.active); // 倒地 / KO / 送醫中 / 警車任務中不能搶
     if (state.racing) robCtx.onFoot = false; // 街頭競速中（下車 10 s 內）也不能搶（互斥）
+    if (state.sideJob) robCtx.onFoot = false; // 計程車 / 救護車副任務中（下車 10 s 內）也不能搶（互斥）
     robCtx.aiming = robCtx.onFoot && aim.aiming;
     setRobBar(robberies.update(dt, robCtx));
   };
@@ -1983,6 +1996,205 @@ async function init() {
     if (traffic.ambient) traffic.ambient.setContext(ambientCtx);
   };
   const ambientCtx = { hour: 12, aiming: false, aimDirX: 0, aimDirZ: 1 };
+
+  // ---------- 計程車 / 救護車副任務（Phase 13，§35）：src/missions/taxi.js / ems.js（純邏輯 + 路邊行人世界 + 任務條）+ 目的地光柱 + 小地圖標記 ----------
+  const taxi = createTaxi({ bus, rng: Math.random });
+  const ems = createEms({ bus, rng: Math.random });
+  // 招手乘客 / 倒地傷患：徵用玩家附近漫步中的路人（brain.override / combat.knockdownActor），上車 = traffic._recyclePed（人消失於車內）
+  const curbPeds = createCurbPedWorld({ traffic, combat, rng: Math.random, getPlayer: () => playerPos() });
+  const taxiBar = createSideJobBar({ root: document.body, prefix: 'taxi' });
+  const emsBar = createSideJobBar({ root: document.body, prefix: 'ems' });
+  const sideJobBeacons = createBeaconPool({ scene, heightAt, ...SIDEJOB_BEACON });
+  // 救護車外觀：既有 suv 白車 + 兩側紅條 + 車頂紅 / 藍燈（共用單位方塊幾何、無貼圖材質；不投影、不加光源 → 不多吃貼圖單元）
+  const ambBox = new THREE.BoxGeometry(1, 1, 1);
+  const ambStripeMat = new THREE.MeshStandardMaterial({ color: 0xc62828, roughness: 0.6 });
+  const ambLightMats = [
+    new THREE.MeshStandardMaterial({ color: 0x5a0000, emissive: 0xff1a1a, emissiveIntensity: 0.15 }),
+    new THREE.MeshStandardMaterial({ color: 0x00105a, emissive: 0x2a5cff, emissiveIntensity: 0.15 }),
+  ];
+  const decorateAmbulance = (v) => {
+    const root = v.mesh;
+    if (!root || root.getObjectByName('ems-decor')) return;
+    const g = new THREE.Group();
+    g.name = 'ems-decor';
+    g.scale.set(1 / (root.scale.x || 1), 1 / (root.scale.y || 1), 1 / (root.scale.z || 1)); // glb 根節點有縮放時維持公尺尺寸
+    const { length: L, width: W, height: H } = v.spec;
+    for (const s of [-1, 1]) {
+      const m = new THREE.Mesh(ambBox, ambStripeMat);
+      m.scale.set(0.03, 0.24, L * 0.86);
+      m.position.set(s * (W / 2 + 0.02), H * 0.48, 0);
+      g.add(m);
+    }
+    for (let i = 0; i < 2; i++) {
+      const m = new THREE.Mesh(ambBox, ambLightMats[i]);
+      m.scale.set(0.42, 0.14, 0.26);
+      m.position.set(i ? 0.25 : -0.25, H + 0.07, -0.15);
+      g.add(m);
+    }
+    root.add(g);
+  };
+  const ambulances = createAmbulanceDepot({
+    vehicles, dmg, spot: ambulanceSpot(), decorate: decorateAmbulance,
+    isBusy: (v) => v === state.vehicle || v === cj.vehicle || v === emsCar,
+  });
+  // 互斥旗標：警車任務段的 otherMissionBusy、搶劫守門、委託 nearestInteractable 讀 state.sideJob（getter，不另存狀態）
+  Object.defineProperty(state, 'sideJob', { get: () => taxi.active || ems.active, enumerable: true, configurable: true });
+  // vigHooks.active（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口）/ vigHooks.end（BUSTED / WASTED）併入副任務
+  const vigActiveSide = vigHooks.active;
+  vigHooks.active = () => vigActiveSide() || taxi.active || ems.active;
+  const vigEndSide = vigHooks.end;
+  vigHooks.end = (kind) => {
+    vigEndSide(kind);
+    taxi.end(kind);
+    ems.end(kind);
+    taxiBar.set(null);
+    emsBar.set(null);
+  };
+  const sideMk = [];
+  const sideJobMarkers = () => {
+    sideMk.length = 0;
+    taxi.markers(sideMk);
+    return ems.markers(sideMk);
+  };
+  const isTaxiCar = (v) => !!v && v.type === 'taxi';
+  let taxiCar = null; // 開始 / 任務中駕駛的計程車（耐久歸零 = 車毀結束）
+  let emsCar = null;
+  const taxiCtx = {
+    player: { x: 0, z: 0 },
+    inTaxi: false,
+    car: null,
+    speed: 0,
+    health: null,
+    maxHealth: null,
+    wrecked: false,
+    world: curbPeds,
+    earn: (n) => economy.add(n, 'taxi'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    routeLength: (a, b) => {
+      const r = findRoute(graph, a, b);
+      return r ? r.lengthM : null;
+    },
+  };
+  const emsCtx = {
+    player: { x: 0, z: 0 },
+    inAmbulance: false,
+    speed: 0,
+    wrecked: false,
+    world: curbPeds,
+    earn: (n) => economy.add(n, 'ems'),
+    heal: () => {
+      player.actor.hp = player.actor.maxHp;
+    },
+    toast: (text, seconds) => hud.toast(text, seconds),
+  };
+  const sideBusy = () => otherMissionBusy() || vigilante.active;
+  const startCtx = { inTaxi: false, inAmbulance: false, busy: false, stalled: false, overturned: false, toast: taxiCtx.toast };
+  const toggleSideJob = () => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    if (!v) return;
+    if (taxi.active || ems.active) {
+      if (taxi.active) taxi.end('quit', taxiCtx);
+      else ems.end('quit', emsCtx);
+      return;
+    }
+    startCtx.inTaxi = isTaxiCar(v);
+    startCtx.inAmbulance = ambulances.isAmbulance(v);
+    startCtx.busy = sideBusy();
+    startCtx.stalled = dmg.healthOf(v) === 0;
+    startCtx.overturned = !!v.fallen || v.isOverturned();
+    if (startCtx.inTaxi && taxi.start(startCtx)) taxiCar = v;
+    else if (startCtx.inAmbulance && ems.start(startCtx)) emsCar = v;
+  };
+  const sideInter = { text: '', priority: SIDEJOB_PRIORITY, dist: 0, act: toggleSideJob };
+  // 駕駛計程車 / 救護車：未開始 → 開始提示（其他任務中回 null）；進行中 → 收工提示
+  const sideJobInteractable = (v) => {
+    if (!v || state.respawn) return null;
+    const isTaxi = isTaxiCar(v);
+    const isAmb = ambulances.isAmbulance(v);
+    if (!isTaxi && !isAmb) return null;
+    if (taxi.active) sideInter.text = isTaxi ? TAXI_PROMPT_QUIT : null;
+    else if (ems.active) sideInter.text = isAmb ? EMS_PROMPT_QUIT : null;
+    else sideInter.text = sideBusy() ? null : isTaxi ? TAXI_PROMPT_START : EMS_PROMPT_START;
+    return sideInter.text ? sideInter : null;
+  };
+  // 光柱：計程車目的地 / 送醫中的醫院（換點時重放）
+  let sideBeaconAt = null;
+  const syncSideJobBeacons = (dt) => {
+    const d = taxi.beacons().dest || ems.beacons().dest;
+    if (d !== sideBeaconAt) {
+      sideJobBeacons.releaseAll();
+      if (d) sideJobBeacons.acquire(taxi.active ? 'taxi' : 'ems', d.x, d.z, d);
+      sideBeaconAt = d;
+    }
+    sideJobBeacons.update(dt);
+  };
+  // 頂燈：救護車任務中紅藍交替（只在切換時改 emissiveIntensity），否則暗
+  let ambFlashT = 0;
+  let ambFlashState = -1;
+  const flashAmbulance = (dt) => {
+    ambFlashT = (ambFlashT + dt) % (AMB_FLASH_SEC * 2);
+    const st = ems.active ? (ambFlashT < AMB_FLASH_SEC ? 1 : 2) : 0;
+    if (st === ambFlashState) return;
+    ambFlashState = st;
+    ambLightMats[0].emissiveIntensity = st === 1 ? 2.4 : 0.15;
+    ambLightMats[1].emissiveIntensity = st === 2 ? 2.4 : 0.15;
+  };
+  // 手機 / 暫停 / 全螢幕面板（updateGame 不跑）、BUSTED・WASTED、噴漆中：不推進（計時停、任務條維持）；
+  // 但世界照跑（combat 會推進起身）→ 傷患倒地計時照常刷新（curbPeds.update 不跳過）
+  const updateSideJobs = (dt, skip) => {
+    const p = playerPos();
+    curbPeds.update(dt);
+    if (skip || !!state.respawn || !!state.spraying) {
+      syncSideJobBeacons(0);
+      return;
+    }
+    ambulances.update(dt, p);
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const speed = v ? v.speed || 0 : 0;
+    if (taxi.active) {
+      // 載客中以上車那台車為準：換開別台計程車 = 不在車上（taxi.js 比對 ctx.car；耐久只讀上車那台）
+      const inTaxi = isTaxiCar(v) && (taxi.phase !== 'ride' || v === taxiCar);
+      if (inTaxi) taxiCar = v;
+      taxiCtx.player.x = p.x;
+      taxiCtx.player.z = p.z;
+      taxiCtx.inTaxi = inTaxi;
+      taxiCtx.car = isTaxiCar(v) ? v : null;
+      taxiCtx.speed = speed;
+      taxiCtx.health = inTaxi ? dmg.healthOf(v) : null;
+      taxiCtx.maxHealth = inTaxi ? dmg.maxHealthOf(v) : null;
+      taxiCtx.wrecked = !!taxiCar && dmg.healthOf(taxiCar) === 0;
+    }
+    const t = taxi.update(dt, taxiCtx);
+    if (!t.active) taxiCar = null;
+    taxiBar.set(t.text, t.urgent);
+    if (ems.active) {
+      const inAmb = ambulances.isAmbulance(v);
+      if (inAmb) emsCar = v;
+      emsCtx.player.x = p.x;
+      emsCtx.player.z = p.z;
+      emsCtx.inAmbulance = inAmb;
+      emsCtx.speed = speed;
+      emsCtx.wrecked = !!emsCar && dmg.healthOf(emsCar) === 0;
+    }
+    const e = ems.update(dt, emsCtx);
+    if (!e.active) emsCar = null;
+    emsBar.set(e.text, e.urgent);
+    flashAmbulance(dt);
+    syncSideJobBeacons(dt);
+  };
+  // 回主選單 / 開局：無聲結束（乘客 / 傷患交還、任務條收起、光柱收起）
+  const cancelSideJobs = () => {
+    taxi.cancel();
+    ems.cancel();
+    curbPeds.dispose(); // 保底：殘留 handle 一律交還（解除 override / pinned），live 清空
+    taxiCar = null;
+    emsCar = null;
+    taxiCtx.car = null;
+    taxiBar.set(null);
+    emsBar.set(null);
+    flashAmbulance(0); // 頂燈轉暗（選單巡覽 / BUSTED 畫面不會跑 updateSideJobs）
+    syncSideJobBeacons(0);
+  };
 
   // ---------- 街頭競速（Phase 12，§34）：src/missions/race.js（純邏輯 + 對手車世界介面 + HUD）+ 起點 / 檢查點光柱 + 小地圖旗幟 ----------
   const races = createRaces({ bus, rng: Math.random });
@@ -2687,6 +2899,7 @@ async function init() {
     updateVigilante(dt, phoneOpen);
     updateRace(dt, phoneOpen);
     updateGangs(dt, phoneOpen);
+    updateSideJobs(dt, phoneOpen);
     updateExplosions(dt);
     handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
     updateStreetEvents(dt, phoneOpen);
@@ -2734,6 +2947,8 @@ async function init() {
       // 駕駛中也可接委託 / 打卡（E）；小吃與彈藥只在步行
       inter = raceInteractable(v); // 街頭競速起點優先（比賽中 / 其他任務中回 null）
       if (!inter) inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
+      // 駕駛計程車 / 救護車：開始 / 收工降為後備（只在附近沒有委託 / 打卡等既有互動時出現；其他車回 null）
+      if (!inter) inter = sideJobInteractable(v);
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
@@ -3036,6 +3251,7 @@ async function init() {
     closePanels();
     cancelVigilante();
     cancelRace();
+    cancelSideJobs();
     gangs.cancel();
     clearExplosions();
     cancelStreetEvents();
@@ -3044,6 +3260,7 @@ async function init() {
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     placePlayer(save);
+    ambulances.ensure(true); // 醫院旁救護車（停放點附近且完好就沿用；棄置遠處的收回重生）
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
     missions.restore(save.missions);
@@ -3109,6 +3326,7 @@ async function init() {
     player.locked = false;
     cancelVigilante();
     cancelRace();
+    cancelSideJobs();
     gangs.cancel();
     clearExplosions();
     cancelStreetEvents();
@@ -3202,6 +3420,8 @@ async function init() {
       vigilante, fugitiveWorld, vigBar,
       // Phase 12：街頭競速（races.start('qiqi-classic') 除錯開賽；races.rivals 看對手車進度；rivalWorld.cars = 受控對手車）
       races, rivalWorld, raceHud,
+      // Phase 13：計程車 / 救護車副任務（taxi.start() / ems.start() 除錯開始；curbPeds.live = 招手乘客 / 傷患；ambulances.vehicle = 救護車）
+      taxi, ems, curbPeds, ambulances,
       // V3：街頭事件（streetEvents.events 看各 slot；streetWorld.stats() 看事件車 / 待回收行人）
       streetEvents, streetWorld,
       // 補手槍備彈（回實際加入數，上限 120）

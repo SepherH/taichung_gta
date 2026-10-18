@@ -62,12 +62,12 @@ export const RADIO_BTN_ID = 'tb-radio';
 const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
 // 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
 export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
-const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ', robbery: '搶劫 ', vigilante: '警車任務 ', race: '競速 ' }; // economy 入帳原因 → 跳動文字前綴（robbery = Phase 9 超商搶劫、vigilante = Phase 11 警車任務）
+const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ', robbery: '搶劫 ', vigilante: '警車任務 ', race: '競速 ', taxi: '計程車 ', ems: '救護車 ' }; // economy 入帳原因 → 跳動文字前綴（robbery = Phase 9 超商搶劫、vigilante = Phase 11 警車任務）
 const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空白）
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event', 'race-cp']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event', 'race-cp', 'taxi-fare', 'taxi-dest', 'ems-patient', 'ems-hospital']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）

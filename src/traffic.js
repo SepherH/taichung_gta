@@ -22,7 +22,7 @@
 // - mid（pedNear–pedFar）：骨架、mixer 每 3 幀（視野外凍結）、大腦 / 走路每 3 幀（累積 dt）
 // - far（> pedFar）：InstancedMesh 替身（骨架回池、無剛體、無大腦），走路每 6 幀
 // - 倒地 / 起身 / 還手 / 逃跑 / 走回路線 / 被玩家鎖定者強制 near；骨架池上限 plan.poolMax（池滿時 near 的人可借走最遠 mid 的骨架）
-// - 密度管理（_manageCrowd）：以 sync 的 center 為中心、plan.radius 內維持 plan.target 人；plan.recycle 外回收；
+// - 密度管理（_manageCrowd）：以 sync 的 center 為中心、plan.radius 內維持 plan.target 人；plan.recycle 外回收（citizen.pinned = 副任務徵用中者除外）；
 //   不足時在 plan.spawnMin–plan.radius 環帶、視野外（setView：視錐外或被建築擋住）的生成點（places.js pedestrianRoutes）補生成
 // - ped.state：walk（沿路線區段來回走）/ return（走回路線點）/ react（套用大腦的 flee / fight / watch / dodge 意圖）/ down（倒地，剛體 dynamic）/ getup（起身動畫中）
 // - 大腦 mode 為 wander 時走原本的人行道邏輯；否則套用 moveX / moveZ / run / faceYaw，回 wander 時投影回最近的人行道路段再繼續
@@ -730,6 +730,7 @@ export class Traffic {
 
   // 可回收（非開場）：視野外、漫步中、沒有在打鬥 / 倒地（替身市民一律漫步中）
   _canRecycle(c) {
+    if (c.pinned) return false; // 副任務徵用中（taxi.js createCurbPedWorld：招手乘客 / 傷患）
     const p = c.ped;
     if (p && (p.state !== 'walk' || this.combat.stateOf(p.actor) !== 'normal')) return false;
     const o = p || c;
@@ -753,7 +754,7 @@ export class Traffic {
       const o = c.ped || c;
       const d2 = (o.x - cx) ** 2 + (o.z - cz) ** 2;
       c.d2 = d2;
-      if (d2 > far2 && recycled < farLimit) {
+      if (d2 > far2 && recycled < farLimit && !c.pinned) {
         this._recyclePed(c);
         recycled++;
       } else if (d2 <= r2) count++;

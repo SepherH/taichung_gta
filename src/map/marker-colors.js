@@ -19,6 +19,10 @@ export const MARKER_COLORS = {
   'street-event': '#ffee58', // V3 街頭事件（src/street-events.js markers()；事件開始 / 提示後短暫閃爍的黃點，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
   'race-start': '#fb8c00', // 街頭競速起點（Phase 12，src/missions/race.js markers()；小地圖畫橘色旗幟圖示（hud.js FLAG_KINDS），不貼邊，同起點光柱橘色）
   'race-cp': '#ffca28', // 街頭競速下一個檢查點（比賽中只有一個；小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
+  'taxi-fare': '#f5c518', // 計程車招手乘客（Phase 13，src/missions/taxi.js markers()；小地圖超出半徑時貼邊）
+  'taxi-dest': '#00e5a0', // 計程車目的地（載客中只有一個；貼邊）
+  'ems-patient': '#ff6e6e', // 救護車倒地傷患（Phase 13，src/missions/ems.js markers()；貼邊）
+  'ems-hospital': '#e53935', // 救護車送醫目的地（HOSPITAL；貼邊，同光柱紅色）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';

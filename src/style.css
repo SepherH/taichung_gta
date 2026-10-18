@@ -1651,3 +1651,42 @@ body.touch .rob-bar {
 .race-arrow[hidden] {
   display: none !important;
 }
+
+/* 計程車 / 救護車副任務條（Phase 13，src/missions/taxi.js createSideJobBar）：同警車任務條（.vig-bar）膠囊樣式與位置
+   （與其他任務互斥，共用位置）；計程車黃框、救護車紅框；剩 ≤ 15 s 轉紅（.taxi-urgent / .ems-urgent） */
+.taxi-bar,
+.ems-bar {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 55;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: rgba(12, 16, 32, 0.72);
+  border: 1px solid rgba(245, 197, 24, 0.9);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--tg-ui-scale, 1));
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.ems-bar {
+  border-color: rgba(229, 57, 53, 0.9);
+}
+
+.taxi-bar[hidden],
+.ems-bar[hidden] {
+  display: none !important;
+}
+
+.taxi-bar.taxi-urgent,
+.ems-bar.ems-urgent {
+  border-color: rgba(255, 23, 68, 0.95);
+  color: #ffd0d8;
+}

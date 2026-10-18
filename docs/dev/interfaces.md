@@ -53,6 +53,17 @@
 | `race:checkpoint` | `{ id, index, total, time, rank, name }`（玩家依序通過第 index 個檢查點；time = 比賽秒數、rank = 當下名次） | missions/race.js |
 | `race:finish` | `{ id, name, rank, total, time, reward, best, newBest }`（玩家過終點；獎金已 `ctx.earn`、最佳成績已更新） | missions/race.js |
 | `race:abort` | `{ id, reason: 'left'\|'wrecked'\|'busted'\|'wasted'\|'cancel', time, cp }`（退賽；對手車已回收） | missions/race.js |
+| `taxi:start` | `{}`（駕駛計程車按互動鍵開始載客） | missions/taxi.js（§35） |
+| `taxi:fare` | `{ x, z }`（路邊出現招手乘客） | missions/taxi.js |
+| `taxi:pickup` | `{ dest, x, z, dist, limit }`（乘客上車；dest = 目的地名、dist = 路網距離 m、limit = 限時 s） | missions/taxi.js |
+| `taxi:paid` | `{ dest, dist, meter, tip, bonus, total, streak, fares, timeLeft }`（送達付費；total 已 `ctx.earn`） | missions/taxi.js |
+| `taxi:failed` | `{ reason: 'timeout'\|'damaged', dest, streak }`（乘客下車不付費；連載歸零，任務繼續） | missions/taxi.js |
+| `taxi:end` | `{ reason: 'left'\|'wrecked'\|'busted'\|'wasted'\|'quit'\|'cancel', fares, earned, streak }` | missions/taxi.js |
+| `ems:start` | `{ level }`（駕駛救護車按互動鍵出勤） | missions/ems.js（§35） |
+| `ems:patients` | `{ level, patients, limit }`（本關傷患生成完畢、開始計時） | missions/ems.js |
+| `ems:pickup` | `{ level, picked, patients }`（一名傷患停車 3 s 抬上車） | missions/ems.js |
+| `ems:level` | `{ level, reward, patients, timeLeft, earned }`（送達醫院；賞金已 `ctx.earn`、`ctx.heal()` 已回血） | missions/ems.js |
+| `ems:end` | `{ reason: 'timeout'\|'lost'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'quit'\|'complete'\|'cancel', level, cleared, earned }` | missions/ems.js |
 | `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
 | `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
@@ -1094,6 +1105,42 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 34.3 回歸
 - `node tools/test/p12-race.mjs`（賽道點位在路網上、純邏輯、對手車世界 / HUD 替身、save.js 相容）、`node tools/test/integration-p12.mjs`（main.js 抽段執行 + hud / 標記 / CSS / 文件靜態檢查）
+
+## 35. Phase 13 計程車 / 救護車副任務 Taxi / EMS（P13；接線點在 `src/main.js`，介面以 `src/missions/taxi.js` / `ems.js` 檔頭為準）
+
+### 35.1 模組介面（純邏輯，不 import three / rapier；DOM 只在 `createSideJobBar`）
+- `createTaxi({ bus, rng?, config? })`（`taxi.js`）→ `{ update(dt, ctx) → snapshot, start(startCtx?) → boolean, cancel(), end(reason, ctx?), canStart(startCtx) → { ok, reason }, markers(out), beacons() → { dest }, snapshot(), dispose(), active, phase: 'idle'|'seek'|'ride', fares, earned, streak, fare, dest, trip }`
+  - `startCtx = { inTaxi, busy, stalled?, overturned?, toast? }`；`reason` ∈ `active` / `notTaxi` / `busy` / `stalled` / `overturned`（後三者 toast 後回 false）；省略 `startCtx` 不檢查（除錯）
+  - `ctx = { player: { x, z }, inTaxi, car?, speed, health, maxHealth, wrecked, world, earn(n), toast?, routeLength?(a, b) → m | null }`；載客中以上車那台車（`ctx.car`）為準：換開別台計程車 = 視同下車（不判到達 / 不比耐久，> 10 s → `left`，換回原車繼續）；`world = { spawnFare(center, rMin, rMax) → h | null, state(h) → { x, z, exists }, board(h), alight(h, at), remove(h) }`
+  - 招客：每 `FARE_RETRY_SEC` 1 s 試 `spawnFare`（玩家 25–90 m）；乘客消失（`world.remove` 交還 handle）或離 > 250 m → 重找。上車：駕駛計程車、離乘客 ≤ `BOARD_RADIUS` 6 m、\|車速\| < 2 m/s
+  - 目的地：`DESTINATIONS`（沿用 `RACES` 起點 / 檢查點的七期地標車道點，15 處）中離上車點直線 250–1400 m 者隨機；限時 = 路網距離 ÷ 10 m/s + 20 s（`tripLimit`）
+  - 付費（離目的地 ≤ 10 m、\|車速\| < 2 m/s）：跳表 `meterFare` = NT$80 + NT$40 × 公里（四捨五入）、小費 `tipFor` = floor(跳表 × 0.5 × 剩餘時間 / 限時)、連載加成 `streakBonus` = round((跳表 + 小費) × 10% × min(連載 − 1, 5))
+  - 乘客下車不付費（連載歸零、任務繼續）：`timeout` 超時、`damaged` 載客中耐久掉 > 25% 滿耐久
+  - 結束：`left`（不在計程車上 > 10 s）/ `wrecked` / `busted` / `wasted`（另訂閱 `player:busted` / `player:wasted`）/ `quit`（任務中再按互動鍵）/ `cancel`（無聲）
+  - 標記：招手乘客 `{ kind: 'taxi-fare' }`、載客中目的地 `{ kind: 'taxi-dest', label }`；`beacons().dest` = 目的地（光柱）
+- `createEms({ bus, rng?, config? })`（`ems.js`）→ `{ update(dt, ctx) → snapshot, start(startCtx?), cancel(), end(reason, ctx?), canStart(startCtx), markers(out), beacons() → { dest }, snapshot(), dispose(), slots, active, phase: 'idle'|'spawn'|'collect'|'deliver', level, patients, picked, timeLeft, limit, earned, cleared }`
+  - `startCtx = { inAmbulance, busy, stalled?, overturned?, toast? }`；`ctx = { player: { x, z }, inAmbulance, speed, wrecked, world, earn(n), heal(), toast? }`；`world` = `{ spawnPatient(center, rMin, rMax) → h | null, state(h), board(h), remove(h) }`
+  - 關卡：傷患數 `patientsFor(level)` = 1 / 2 / 3（第 3 關起 3 名）；`spawn` 每 0.5 s 補 1 名（玩家 30–110 m），湊齊或 4 s 後已有 ≥ 1 名 → `collect` 開始計時；限時 `levelLimit` = 30 + 10 × 傷患數 + 估計路程（玩家 → 傷患貪婪鏈 → 醫院直線 × 1.4）÷ 10 m/s
+  - 撿取：駕駛救護車、離最近未上車傷患 ≤ 6 m、\|車速\| < 2 m/s 連續 `PICK_SEC` 3 s（中斷歸零）→ `world.board`；全數上車 → `deliver`（`HOSPITAL` 12 m 內停車）→ `ctx.earn(300 × 關數)`、`ctx.heal()`（玩家生命值回滿）、下一關；通過 `MAX_LEVEL` 12 關 → `complete`
+  - 結束：`timeout` / `lost`（傷患死亡 / 消失）/ `left` / `wrecked` / `busted` / `wasted` / `quit` / `complete` / `cancel`（無聲）；未上車傷患 `world.remove`（照常起身）
+  - 標記：未上車傷患 `{ kind: 'ems-patient' }`、送醫中 `{ kind: 'ems-hospital' }`；`beacons().dest` = 送醫中的 `HOSPITAL`
+- `createCurbPedWorld({ traffic, combat?, rng?, getPlayer?, spawnWalker? })`（`taxi.js`）：上述兩個 `world`。徵用 `traffic.peds` 漫步中路人（walk / wander、無 override、非幫派、combat normal）；乘客 = `brain.override` 原地站立面向玩家、每 2.6 s `anim.playGesture('wave')`；傷患 = `combat.knockdownActor` 倒地，`update(dt)` 每 0.5 s 刷新 combat 倒地計時（不自行起身），被扶起（getup / normal）→ 立即再 `knockdownActor` 壓回；傷患 `dying` / `dead` 一經判定即 `exists: false`（revive 後也不回任務）；徵用期間 `citizen.pinned = true`（`traffic.js` 依距離回收 / `_canRecycle` 跳過），`board` / `remove` / `dispose` 解除；`board` = `traffic._recyclePed`（人消失於車內）；`alight` 只在給 `spawnWalker` 時生成下車路人（目前未接）
+- `createAmbulanceDepot({ vehicles, dmg?, spot, decorate?, isBusy? })`（`ems.js`）→ `{ update(dt, player), ensure(force, player?), isAmbulance(v), vehicle, spot, dispose() }`：遊戲中無救護車 → `vehicles.adopt({ type: 'suv', color: '#f4f4f2' })`（`v.ambulance = true`）+ `dmg.attach` + `decorate(v)`；毀損且無人駕駛 → 交一般回收，玩家離停放點 > 60 m 時補車；完好但棄置在離停放點 > `AMB_HOME_DIST` 30 m、無人駕駛且非 `isBusy`（main：正駕駛 / 搶車中 / 任務中的 `emsCar`）→ 玩家離棄車與停放點都 > 60 m（`ensure(true)` 不看玩家）時 `dmg.detach` + `vehicles.remove` 收回並在停放點補車；`ambulanceSpot()` = `HOSPITAL` 往道路 4.5 m、沿路緣 9 m（河南路三段車道內，車頭沿道路）
+- `createSideJobBar({ root, prefix: 'taxi'|'ems' })` → `{ set(text | null, urgent), dispose(), el }`：`.taxi-bar` / `.ems-bar`（同 `.vig-bar` 樣式）、剩 ≤ 15 s 加 `.taxi-urgent` / `.ems-urgent`（`style.css`）
+- 效能：snapshot / 標記 / 光柱目標重用物件；任務條文字只在顯示內容（整秒、趟數、金額、抬上車十分位）變化時重建；招客 / 傷患生成與倒地刷新錯開（1 s / 0.5 s）；時間吃呼叫端 dt（clamp ≤ 0.1 s），幀率無關
+- 其他：`MARKER_COLORS` `taxi-fare` `#f5c518` / `taxi-dest` `#00e5a0` / `ems-patient` `#ff6e6e` / `ems-hospital` `#e53935`（`hud.js EDGE_KINDS` 貼邊、`MARKER_LABELS`）；`BEACON_COLORS.taxi = 0xf5c518`、`ems = 0xe53935`；入帳 reason `taxi` / `ems` 跳字「計程車」/「救護車」
+
+### 35.2 接線（main.js）
+- 建立（街頭競速段之前）：`taxi` / `ems` / `curbPeds = createCurbPedWorld({ traffic, combat, getPlayer: playerPos })` / `taxiBar` / `emsBar` / 光柱池 `SIDEJOB_BEACON` / `ambulances = createAmbulanceDepot({ vehicles, dmg, spot: ambulanceSpot(), decorate: decorateAmbulance })`
+  - 救護車外觀：`decorateAmbulance` 在 `v.mesh` 下加 `ems-decor` 群組（兩側紅條 + 車頂紅 / 藍燈，共用單位方塊幾何、無貼圖 `MeshStandardMaterial`、不投影、不加光源）；頂燈 `AMB_FLASH_SEC` 0.25 s 紅藍交替（只改 `emissiveIntensity`，救護車任務中才閃）
+- 互斥：`state.sideJob`（getter = `taxi.active || ems.active`）併入 `otherMissionBusy()`（警車任務 / 競速開賽 / 街頭事件 busy）、搶劫守門、`nearestInteractable` 遮掉委託；`vigHooks.active` 包裝（委託類 `extraBusy` / 噴漆廠入口）；開始 `busy` = `otherMissionBusy() || vigilante.active`
+- 互動：駕駛中 `inter = raceInteractable(v)` → `vigilanteInteractable` / `nearestInteractable`（委託 / 打卡）→ 都沒有才 `sideJobInteractable(v)`（計程車 / 救護車：未開始 = 開始、進行中 = 收工；後備，不擋既有互動）；E / 手把 B / tb-interact 同一路徑
+- 每幀 `updateSideJobs(dt, phoneOpen)` 接在 `updateGangs` 之後：手機 / `state.respawn` / `state.spraying` 不推進，但 `curbPeds.update(dt)` 照跑（世界照跑時 combat 仍推進起身）；`taxiCar` / `emsCar` 耐久 0 → `wrecked`；`routeLength` = `findRoute(graph, a, b).lengthM`；`earn` = `economy.add(n, 'taxi'|'ems')`；`heal` = `player.actor.hp = maxHp`
+- `beginRespawn` → `vigHooks.end(kind)`（包裝：`taxi.end(kind)` / `ems.end(kind)`、收任務條）；`quitToMenu` / `startGame` → `cancelSideJobs()`（緊接 `cancelRace()`；含 `curbPeds.dispose()`、頂燈轉暗）；`startGame` → `ambulances.ensure(true)`
+- 除錯：`window.__game.taxi` / `ems` / `curbPeds` / `ambulances`
+
+### 35.3 回歸
+- `node tools/test/p13-taxi.mjs`、`node tools/test/p13-ems.mjs`（純邏輯 + 世界 / HUD 替身）、`node tools/test/integration-p13.mjs`（main.js 靜態檢查 + 抽段執行、hud / 標記 / CSS / 文件）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
