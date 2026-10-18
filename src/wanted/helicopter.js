@@ -248,7 +248,9 @@ export function createHelicopter(deps = {}) {
   function applyQuality() {
     if (!view) return;
     const low = quality() === 'low';
-    view.light.castShadow = !low;
+    // 探照燈一律不投陰影：多一張 spot shadow map 會讓部分材質超過 MAX_TEXTURE_IMAGE_UNITS（16）而 shader 編譯失敗，
+    // 整個城市建築不渲染（1019 通道實測）。光圈照明仍在，只是沒有陰影
+    view.light.castShadow = false;
     view.light.shadow.mapSize.set(low ? 256 : 512, low ? 256 : 512);
   }
 

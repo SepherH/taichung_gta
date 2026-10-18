@@ -1115,6 +1115,13 @@ const lineBlocked = (top, ax, ay, az, bx, by, bz) => {
   ok(lastFlash.length === 1, 'wanted.css：搜索中閃爍規則只宣告一次（無死碼）');
 }
 
+// 1019 熱修回歸：探照燈投陰影會讓材質超過 16 個貼圖單元、整城不渲染 → castShadow 一律 false
+{
+  const heliSrc = readFileSync(new URL('../../src/wanted/helicopter.js', import.meta.url), 'utf8');
+  check('探照燈 SpotLight 不投陰影（castShadow 恆為 false，避免超過 MAX_TEXTURE_IMAGE_UNITS 致 shader 失敗）',
+    /view\.light\.castShadow = false;/.test(heliSrc) && !/\.light\.castShadow = (?!false)/.test(heliSrc));
+}
+
 console.log(`v5-police.mjs：通過 ${pass} / ${total}`);
 if (fails.length) {
   for (const f of fails) console.log(`✗ ${f}`);
