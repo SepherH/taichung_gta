@@ -19,6 +19,14 @@
 //   沒提供時以喇叭方向估算（離喇叭軸線 HORN_LANE_HALF 內視為在車道上，往垂直軸線、自己所在的那一側跳開）
 // 任意 dt：mid / far 由呼叫端以累積 dt 降頻呼叫；所有計時以秒累加，短狀態（閃避 / 側跳）至少輸出一次移動意圖才結束
 // 不在每幀配置新物件：意圖、閃避方向、喇叭、側跳方向都用建構時配置的暫存物件；只有刺激事件（被打 / 目擊 / 恐慌）才配置
+// P10（ped-ambient）新增分流，預設關閉、既有行為不變：
+//   拍片：filmChance > 0（ped-ambient.attach 設定）時，目擊者中 filmRoll < filmChance 者（id 雜湊、不吃 rng 序列）改走「拍片」——
+//     仍是 watch 狀態（filming = true）：先背對事發點走開到 FILM_MIN_DIST 以外（最多 FILM_BACKOFF_MAX 秒），再面向事發點拍
+//     FILM_MIN–FILM_MAX 秒後回漫步；肇事者逼近 WATCH_FLEE_DIST 內照舊改逃跑。filmChance 為 0（預設）時完全不進此分流
+//   onThreatened(threat)：被持槍瞄準蹲縮完後由 ped-ambient 呼叫 → 漫步 / 圍觀中者逃離 threat（actor 或 { x, z }）；倒地中只記下逃離對象
+// 被拖出的司機（traffic spawnEjectedDriver 起身後 onAttacked({ attacker, ejected: true })）：還手與否只看性格——
+//   搶車者當下倒地 / 起身中（例如被前一個還手者打倒）也照樣還手（不受「對象已倒地不再加入」限制），
+//   _fight 內面向對方等他起身再打（hp 歸零則照既有散去）；MAX_FIGHTERS 與玩家在車內照舊改逃跑
 
 export const FIGHT_CHANCE = 0.25; // 一般行人還手比例：多數人被打會逃
 export const FIGHT_CHANCE_HEAVY = 0.45; // 壯碩體型（pedestrian_heavy）還手比例較高
@@ -62,6 +70,12 @@ export const DISPERSE_MIN = 2; // 還手對象 hp 歸零倒地後，還手者散
 export const DISPERSE_MAX = 4; // 散去時間上限（秒）
 // 槍聲（Phase 4）
 export const GUNSHOT_RADIUS = 30; // 槍聲此半徑（m）內的行人逃跑
+// 拍片目擊者（P10，filmChance > 0 才啟用）
+export const FILM_MIN_DIST = 8; // 拍片時與事發點保持的距離（m）
+export const FILM_BACKOFF_MAX = 8; // 走開到 FILM_MIN_DIST 外最多花的秒數（被擋住就原地拍）
+export const FILM_MIN_TIME = 5; // 拍片時間下限（秒，從站定開始算）
+export const FILM_MAX_TIME = 10; // 拍片時間上限（秒）
+const FILM_SALT = 0xf11e;
 
 // mulberry32：固定種子的 32-bit 亂數產生器（與 utils.js 同演算法，本檔自帶以免依賴）
 export function mulberry32(seed) {
@@ -141,10 +155,26 @@ export class NpcBrain {
     this.stateDur = 0; // sidestep / look / glare 的持續時間
     this.selfPt = { x: 0, z: 0 }; // 威脅來源不明時的威脅點
     this.fightOn = null; // 已計入 group.fighters 的還手對象
+    this.grudge = null; // 被拖出的司機還手中的搶車者：對方倒地時等他起身（不放棄）
     this.disperseT = 0; // > 0：還手對象 hp 歸零，倒數散去
     this.panicSeen = 0; // 已收過的恐慌事件編號（每人每事件只反應 / 轉傳一次）
     this.relay = null; // 待轉傳的恐慌資訊
-    this.relayT = 0;    this.intent = { moveX: 0, moveZ: 0, run: false, faceYaw: null, wantPunch: false, jump: false, mode: 'wander' };
+    this.relayT = 0;
+    this.filmChance = 0; // > 0 才啟用拍片分流（ped-ambient 設定）
+    this.filmRoll = mulberry32(seedFromId(actor.id, FILM_SALT))(); // 另開種子：不影響 this.rng 序列
+    this.filming = false; // watch 中的拍片分流
+    this.filmStart = -1; // 站定開始拍的 this.t（< 0 = 還在走開）
+    this.filmDur = 0;
+    this.intent = { moveX: 0, moveZ: 0, run: false, faceYaw: null, wantPunch: false, jump: false, mode: 'wander' };
+  }
+
+  get films() {
+    return this.filmChance > 0 && this.filmRoll < this.filmChance;
+  }
+
+  // 被威脅（持槍瞄準後蹲縮完，ped-ambient 呼叫）：下一次 update 時漫步 / 圍觀中者逃離 threat
+  onThreatened(threat) {
+    this.pending.push({ type: 'threat', threat: threat && threat.pos ? threat : null, pos: threat && !threat.pos ? threat : null });
   }
 
   get fights() {
@@ -152,8 +182,9 @@ export class NpcBrain {
   }
 
   // 被打（attacker 為 actor）或被車撞（vehicle 為 { x, z }）；weapon：'fist' | 'bat' | 'pistol'（pistol = 被槍擊，一律逃跑）
-  onAttacked({ attacker = null, vehicle = null, weapon = null } = {}) {
-    this.pending.push({ type: 'attacked', attacker, vehicle, weapon });
+  // ejected：被拖出的司機（attacker = 搶車者），見檔頭
+  onAttacked({ attacker = null, vehicle = null, weapon = null, ejected = false } = {}) {
+    this.pending.push({ type: 'attacked', attacker, vehicle, weapon, ejected });
   }
 
   // 目擊事件：pos 為事發點，threat 為肇事者 actor 或 { pos }（可為 null）；
@@ -218,6 +249,8 @@ export class NpcBrain {
 
   _enter(state) {
     if (this.fightOn && state !== 'fight') this._uncountFight();
+    if (state !== 'fight') this.grudge = null;
+    if (state !== 'watch') this.filming = false;
     this.state = state;
     this.t = 0;
   }
@@ -245,19 +278,32 @@ export class NpcBrain {
   }
 
   _startWatch(pos, threat) {
+    this.filming = false;
     this.watchAt = { x: pos.x, z: pos.z };
     this.watchThreat = threat;
     this.watchDur = WATCH_MIN_TIME + this.rng() * (WATCH_MAX_TIME - WATCH_MIN_TIME);
     this._enter('watch');
   }
 
-  _startFight(attacker) {
-    if (this.state === 'fight' && this.target === attacker) return;
+  // 拍片（watch 的分流）：先走開再拍；時間另計（站定後 FILM_MIN–FILM_MAX 秒）
+  _startFilm(pos, threat) {
+    this._startWatch(pos, threat);
+    this.filming = true;
+    this.filmStart = -1;
+    this.filmDur = FILM_MIN_TIME + this.rng() * (FILM_MAX_TIME - FILM_MIN_TIME);
+  }
+
+  _startFight(attacker, grudge = false) {
+    if (this.state === 'fight' && this.target === attacker) {
+      if (grudge) this.grudge = attacker;
+      return;
+    }
     if (this.fightOn) this._uncountFight(); // 換對象
     this._enter('fight');
     this.target = attacker;
     this.punchT = FIGHT_FIRST_PUNCH;
     this.disperseT = 0;
+    this.grudge = grudge ? attacker : null;
     const g = this.group;
     if (g) {
       let set = g.fighters.get(attacker);
@@ -280,13 +326,14 @@ export class NpcBrain {
     return f && f.actor ? f.actor.pos : f;
   }
 
-  _canFight(attacker, ctx) {
+  _canFight(attacker, ctx, ejected = false) {
     if (!attacker || !this.fights) return false;
     if (attacker.kind === 'player' && ctx.playerInVehicle) return false;
     if (this.state === 'fight' && this.target === attacker) return true;
     // 已有 MAX_FIGHTERS 人圍著同一對象還手 → 改逃跑（避免圍毆玩家無解）；對象已倒地也不再加入
     if (fighterCount(this.group, attacker) >= MAX_FIGHTERS) return false;
-    return !(ctx.combat && ctx.combat.isDown(attacker));
+    // 被拖出的司機：搶車者倒地 / 起身中也照性格還手（_fight 內等他起身）
+    return ejected || !(ctx.combat && ctx.combat.isDown(attacker));
   }
 
   _calm() {
@@ -372,10 +419,16 @@ export class NpcBrain {
         this.fleeFrom = s.attacker ? { actor: s.attacker } : s.vehicle || (s.threat && s.threat.pos ? { actor: s.threat } : s.pos) || null;
         continue;
       }
+      if (s.type === 'threat') {
+        if (this._calm() || this.state === 'watch') this._startFlee(s.threat ? { actor: s.threat } : s.pos);
+        continue;
+      }
       if (s.type === 'attacked') {
         if (s.weapon === 'pistol') this._startFlee(s.attacker ? { actor: s.attacker } : null);
-        else if (s.attacker && this._canFight(s.attacker, ctx)) this._startFight(s.attacker);
+        else if (s.attacker && this._canFight(s.attacker, ctx, s.ejected)) this._startFight(s.attacker, s.ejected);
         else if (!(this.state === 'fight' && s.attacker === this.target)) this._startFlee(s.attacker ? { actor: s.attacker } : s.vehicle);
+      } else if (this._calm() && this.films) {
+        this._startFilm(s.pos, s.threat);
       } else if (this._calm() && this.watches) {
         this._startWatch(s.pos, s.threat);
       } else if (this._calm() || this.state === 'flee') {
@@ -529,6 +582,10 @@ export class NpcBrain {
       this._startFlee({ actor: th });
       return;
     }
+    if (this.filming) {
+      this._film(it);
+      return;
+    }
     if (this.t >= this.watchDur) {
       this.watchAt = null;
       this.watchThreat = null;
@@ -538,6 +595,33 @@ export class NpcBrain {
     const dx = this.watchAt.x - p.x;
     const dz = this.watchAt.z - p.z;
     if (Math.hypot(dx, dz) > 1e-6) it.faceYaw = Math.atan2(dx, dz);
+  }
+
+  // 拍片：離事發點不到 FILM_MIN_DIST → 背對事發點走開（不跑，免得像逃跑）；站定後面向事發點，FILM_MIN–FILM_MAX 秒後回漫步
+  _film(it) {
+    const p = this.actor.pos;
+    const dx = this.watchAt.x - p.x;
+    const dz = this.watchAt.z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (this.filmStart < 0 && d < FILM_MIN_DIST && this.t < FILM_BACKOFF_MAX) {
+      if (d > 1e-6) {
+        it.moveX = -dx / d;
+        it.moveZ = -dz / d;
+      } else {
+        it.moveX = -Math.sin(this.actor.yaw || 0);
+        it.moveZ = -Math.cos(this.actor.yaw || 0);
+      }
+      return;
+    }
+    if (this.filmStart < 0) this.filmStart = this.t;
+    if (this.t - this.filmStart >= this.filmDur) {
+      this.filming = false;
+      this.watchAt = null;
+      this.watchThreat = null;
+      this._enter('wander');
+      return;
+    }
+    if (d > 1e-6) it.faceYaw = Math.atan2(dx, dz);
   }
 
   _fight(dt, ctx, it) {
@@ -563,6 +647,11 @@ export class NpcBrain {
         this._enter('wander');
         return;
       }
+      if (d > 1e-6) it.faceYaw = Math.atan2(dx, dz);
+      return;
+    }
+    if (targetDown && this.grudge === target && d <= FIGHT_GIVEUP_DIST && this.t < FIGHT_GIVEUP_TIME) {
+      // 被拖出的司機：搶車者倒地 / 起身中 → 不出拳，面向他等起身
       if (d > 1e-6) it.faceYaw = Math.atan2(dx, dz);
       return;
     }

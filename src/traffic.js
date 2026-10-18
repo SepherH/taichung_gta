@@ -33,6 +33,9 @@
 // 轉接器（契約 §5）：carjackCandidates / releaseCar / spawnEjectedDriver；喇叭：attachBus(bus) 訂閱 vehicle:horn →
 //   前方 HORN_PED_RANGE 內行人 brain.hear、前方同車道車流車 HORN_REACT_MAX 秒內加速離開（不減速讓道以外不做反應）
 // 網格每幀依插值後的剛體姿態擺放；停用中（setActiveByDistance 半徑外）的剛體不動，網格改用車道 / 人行道 pose
+// 生活行為（P10，src/ped-ambient.js）：this.ambient = createPedAmbient(...)，骨架掛上 / 回池時 attach / detach，sync 內 thinkPeds 之後 update；
+//   combat 'hit' / 'knockdown'、NPC 車互撞、bus 的 weapon:fire → ambient.notify({ type: 'incident' })（遠處漫步者拍片）；
+//   玩家衝刺擦撞由 context.player 位移自行偵測；遊戲時刻 / 持槍瞄準需 main.js 呼叫 traffic.ambient.setContext({ hour, aiming, aimDirX, aimDirZ })
 //
 // 接線說明（整合單元 main.js；不改也能跑：crowd 字串 / 無號誌 / 無喇叭的舊行為）：
 // 1. 建構：const lights = createTrafficLights(); lights.buildMeshes(scene)；
@@ -64,6 +67,7 @@ import { createNpcCar, createPedestrianBody, setActiveByDistance, PED_RADIUS } f
 import { PED_KNOCKBACK_DECAY, pathPoint, walkPed, returnPed, pedBlocked, pedMove, reactPed, startReturn, syncActor, updatePed, stepPeds, afterStepPeds, thinkPeds, animatePed } from './traffic-peds.js';
 import { yawOf } from './physics/vehicle-body.js';
 import { crowdPlan, createCrowdLod, createStagger, swapPolicy, createCrowdImpostors } from './crowd.js';
+import { createPedAmbient, createSpeechBubbles } from './ped-ambient.js';
 
 const CAR_COLORS = ['#f2f2f2', '#1f1f22', '#8a8f94', '#b01e28', '#2d5fb0', '#d9d2c0', '#3f6b4a'];
 const SHIRTS = ['#d84a4a', '#3a6fd8', '#f2c14e', '#ffffff', '#6a4c93', '#2a9d8f', '#e76f51', '#8d99ae'];
@@ -82,6 +86,9 @@ const CROWD_SLACK = 0.1; // radius 內超過目標此比例才回收多出來的
 // 改 1.05（low 42 / mid 84 / high 147 / ultra 210）；補生成滿額時先回收 radius 外的最遠者（_spawnRing），拖出的司機為臨時例外，下次管理回收
 const CROWD_TOTAL_FACTOR = 1.05;
 const CROWD_TICK = 0.1; // 管理頻率（s）
+// 滿額補生成的退路（_spawnRing）：radius 外沒有視野外可回收者時，才回收視野內 pedFar + 遲滯外最遠的替身，且每此秒數最多 1 個
+// （radius 外的人全在視野內時——開闊公園、長直路——不讓遠景小人每次管理都憑空消失）
+const SEEN_RECYCLE_COOLDOWN = 2;
 const CROWD_MAX_PER_TICK = 4; // 每次最多補 / 回收幾人（開場補滿不受限）
 const CROWD_RECYCLE_PER_TICK = 8; // 超出回收半徑者每次最多回收幾人（畫質降級 / 傳送後分攤到多次）
 const CROWD_SPAWN_TRIES = 24; // 每補一人最多抽幾個生成點（開場 ×4）；抽不到就換下一人再試（每次管理共 CROWD_MAX_PER_TICK 人份）
@@ -273,6 +280,8 @@ export class Traffic {
     this.context = { combat: this.combat, playerInVehicle: false, vehicles: [], player: null, lockTarget: null };
     this._vehRefs = new WeakMap(); // 撞人的車輛實體 → { body, pos }（combat 去重 key 與 npc-ai 事發點）
     this._busOff = null;
+    // 生活行為（講電話 / 聊天 / 慢跑 / 拍片 / 蹲縮 / 被撞罵人）；台詞泡泡 Sprite 池（沒有 document 時只跑邏輯）
+    this.ambient = createPedAmbient({ seed: CITY_SEED, bubbles: createSpeechBubbles(THREE, scene) });
 
     // 行人：路線 / 生成點（places.js，固定種子、全域只算一次）+ 物件池
     this.pedPool = []; // 已回池、待重用的骨架行人（骨架 / animator 保留，網格隱藏）
@@ -280,6 +289,7 @@ export class Traffic {
     this.view = null; // setView：鏡頭位置與水平朝向（null = 全部視為視野外）
     this.frame = 0;
     this._crowdT = 0;
+    this._seenRecycleAt = -Infinity; // 上次滿額退路回收「視野內」替身的時間（this.clock；SEEN_RECYCLE_COOLDOWN 冷卻）
     this._simAcc = 0; // 本幀物理子步已推進的模擬秒數（_step 累加、sync 取走）
     this._spawnSeq = 0;
     this._spotQ = [];
@@ -315,6 +325,12 @@ export class Traffic {
     router.onVehicleHitVehicle(({ a, b, impulse, dir }) => {
       if (b.kind === 'npcCar') b.hit({ impulse, dir });
       if (a.kind === 'npcCar') a.hit({ impulse, dir: { x: -dir.x, y: -dir.y, z: -dir.z } });
+      // 車禍：路人圍過來拍（同一處未過期的事件會合併，不怕連續接觸）
+      const crash = a.getPosition ? a : b.getPosition ? b : null;
+      if (crash) {
+        const cp = crash.getPosition();
+        this.ambient.notify({ type: 'incident', x: cp.x, z: cp.z, kind: 'crash' });
+      }
     });
     // 車撞行人 → combat（門檻、傷害分級、去重、倒地 / 起身都由 combat 決定）；衝量改成向量交給 Actor.body.knockdown
     router.onVehicleHitPedestrian(({ vehicle, ped, impulse, relSpeed, dir }) => {
@@ -323,6 +339,12 @@ export class Traffic {
       this.combat.onVehicleHit({ ped: actor, relSpeed, vehicle: this._vehicleRef(vehicle), impulse: { x: dir.x * impulse, y: dir.y * impulse, z: dir.z * impulse } });
     });
     wireCombatToBrains(this.combat, this.brains);
+    // 打架 / 撞人：遠處（FILM_MIN_DIST 外）的漫步者可能停下拍片（8 m 內目擊者由 npc-ai 的拍片分流處理）
+    const incident = ({ target, cause }) => {
+      if (target && target.pos) this.ambient.notify({ type: 'incident', x: target.pos.x, z: target.pos.z, kind: cause === 'vehicle' ? 'crash' : 'fight' });
+    };
+    this.combat.on('hit', incident);
+    this.combat.on('knockdown', incident);
     // 被打：轉身面向攻擊者（受擊動作看得出是被誰打）+ 擊退
     this.combat.on('hit', ({ attacker, target, knockback }) => {
       const p = target.ped;
@@ -504,6 +526,7 @@ export class Traffic {
     const brain = new NpcBrain({ actor: a, heavy: p.variant === PED_HEAVY, seed: CITY_SEED });
     this.brains.set(a.id, brain);
     p.brain = brain;
+    this.ambient.attach(p);
     p.alive = true;
     p.mesh.visible = true;
     this.peds.push(p);
@@ -515,6 +538,7 @@ export class Traffic {
   // 市民放掉骨架：路線狀態 / 位置抄回市民；退出 combat / 大腦、移除剛體、隱藏網格、回池；showImpostor 時同幀顯示替身
   _releaseSkeleton(c, showImpostor = true) {
     const p = c.ped;
+    this.ambient.detach(p);
     for (const k of ROUTE_KEYS) c[k] = p[k];
     this.combat.unregister(p.actor);
     this.brains.delete(p.actor.id);
@@ -755,10 +779,17 @@ export class Traffic {
         spot = sp;
       }
       if (!spot) continue;
-      // 市民總數已滿：回收一個本環帶外（補內圈時 = CROWD_INNER 外、補外圈時 = radius 外）、視野外、漫步中的最遠者來用
+      // 市民總數已滿：回收一個本環帶外（補內圈時 = CROWD_INNER 外、補外圈時 = radius 外）、視野外、漫步中的最遠者來用；
+      // 沒有的話（降級後 radius 外的人都在視野內，總數卡在上限、radius 內補不到人）才回收 radius 外且 pedFar + 遲滯外最遠的替身
+      // （遠景小人消失不明顯，同 _manageCrowd 總數超過上限時的處理），每 SEEN_RECYCLE_COOLDOWN 秒最多 1 個；冷卻中就本次少補
       if (this.citizens.length >= cap || !this.freeSlots.length) {
         let victim = null;
         for (const c of this.citizens) if (c.d2 > vic2 && (!victim || c.d2 > victim.d2) && this._canRecycle(c)) victim = c;
+        if (!victim && this.clock - this._seenRecycleAt >= SEEN_RECYCLE_COOLDOWN) {
+          const out2 = Math.max(plan.radius, plan.far + plan.hysteresis) ** 2;
+          for (const c of this.citizens) if (c.rep === 'impostor' && c.d2 > out2 && (!victim || c.d2 > victim.d2)) victim = c;
+          if (victim) this._seenRecycleAt = this.clock;
+        }
         if (!victim) break;
         this._recyclePed(victim);
       }
@@ -1433,7 +1464,15 @@ export class Traffic {
     this.detachBus();
     const fn = (evt) => this.onHorn(evt);
     const off = bus.on('vehicle:horn', fn);
-    this._busOff = typeof off === 'function' ? off : () => bus.off && bus.off('vehicle:horn', fn);
+    // 槍聲：30 m 內的人由 npc-ai 逃跑（weapons gunshotListeners），外圈的漫步者可能停下拍片
+    const shot = (e) => e && this.ambient.notify({ type: 'incident', x: e.x, z: e.z, kind: 'gunshot' });
+    const offShot = bus.on('weapon:fire', shot);
+    const offHorn = typeof off === 'function' ? off : () => bus.off && bus.off('vehicle:horn', fn);
+    const offFire = typeof offShot === 'function' ? offShot : () => bus.off && bus.off('weapon:fire', shot);
+    this._busOff = () => {
+      offHorn();
+      offFire();
+    };
     return this._busOff;
   }
 
@@ -1509,6 +1548,8 @@ export class Traffic {
     }
     this._updateLod(center);
     this._thinkPeds(simDt);
+    this.ambient.update(this, simDt);
+    this.ambient.updateBubbles(dt);
     for (const car of this.cars) {
       const v = car.v;
       const b = car.body;

@@ -39,9 +39,20 @@
 //         on('weaponSwap', cb(clipTime))：weapon_equip 跨過 events.weapon_equip.swapAt（缺則長度 × 0.4），整合層此時把武器換到手上
 //         on('upperFinished', cb(name))：上半身一次性動作播完；on('upperCancel', cb(name))：被 hit / knockdown / 上車 / reset 打斷
 //   hit / knockdown / getup / enter_car / drive 狀態中不接受 playUpper（回 false）；進入這些狀態時取消播放中的上半身動作
+//
+// P10（路人生活行為，src/ped-ambient.js）增補：不改上面的狀態機，另以 overlay action 疊在目前狀態之上
+// - setAmbient(name|null)：循環 overlay（phone_talk / phone_text / phone_film / chat_gesture / look_around / sit_idle / jog / cower）；
+//   playGesture(name) → duration|false：上半身一次性 overlay（wave / angry_shout / cheer），播完自動淡出
+// - 疊加：同武器層的權重正規化——上半身 clip（AMBIENT_UPPER）權重 AMBIENT_UPPER_WEIGHT（≈ 92%，manifest 骨群組外的軌道濾掉，
+//   腿仍由 idle / walk 驅動），全身 clip 權重 AMBIENT_FULL_WEIGHT（≈ 99.5%）；權重以 FADE 秒線性淡入淡出
+// - jog：timeScale = 速度 ÷ 參考速度（jog clip = JOG_REF_SPEED，退回 run 時用 run 的參考速度），夾在 RATE_MIN–RATE_MAX
+// - 缺 clip：依 CLIP_FALLBACK（ped-ambient.js AMBIENT_CLIP_FALLBACK 併入）退回；退回 idle 或全缺 = 不疊加（遊戲照常），
+//   記在 ambientMissing（不記入 missing、不逐個 warn，整個程式只 console.info 一次）
+// - hit / knockdown / getup / enter_car / drive（UPPER_BLOCKED）時 overlay 全部淡出且不接受新的；reset() 立即清掉
 import * as THREE from 'three';
 import { animateHumanoid, poseSitting } from '../humanoid.js';
-import { getCharacterManifest } from './model.js';
+import { getCharacterManifest, characterBoneGroups } from './model.js';
+import { AMBIENT_CLIPS, AMBIENT_GESTURES, AMBIENT_UPPER, AMBIENT_CLIP_FALLBACK, JOG_REF_SPEED, resolveAmbientClip } from '../ped-ambient.js';
 
 const FADE = 0.2; // 交叉淡化秒數
 
@@ -51,7 +62,7 @@ const FADE = 0.2; // 交叉淡化秒數
 // 步幅是以 clip 長度 × 參考速度推算（推算值，非量測），美術改 clip 長度時需同步調整。
 const WALK_REF_SPEED = 1.4;
 const RUN_REF_SPEED = 5;
-const REF_SPEED = { walk: WALK_REF_SPEED, run: RUN_REF_SPEED };
+const REF_SPEED = { walk: WALK_REF_SPEED, run: RUN_REF_SPEED, jog: JOG_REF_SPEED };
 export const RATE_MIN = 0.6;
 export const RATE_MAX = 1.8;
 export const WALK_RATE_MAX = 2.2; // 只放寬 walk 狀態（其餘狀態仍 RATE_MIN–RATE_MAX）
@@ -106,8 +117,16 @@ export const UPPER_BLOCKED = new Set(['hit', 'knockdown', 'getup', 'enter_car', 
 const FALLBACK_UPPER_SEC = 0.6;
 let weaponInfoLogged = false; // 武器 clip 缺檔只 console.info 一次（整個程式）
 
-// 缺 clip 時依序嘗試的替代 clip
+// 生活行為 overlay 權重（相對目前狀態的 clip 權重 1）
+export const AMBIENT_UPPER_WEIGHT = 12;
+export const AMBIENT_FULL_WEIGHT = 200;
+let ambientInfoLogged = false; // 生活行為 clip 缺檔只 console.info 一次（整個程式）
+// overlay 用的 clip 副本快取：來源 clip → Map(鍵 → 副本)（替代 clip 另複製以免與原狀態共用 action；上半身另濾軌道）
+const ambientClipCache = new WeakMap();
+
+// 缺 clip 時依序嘗試的替代 clip（生活行為的名稱只供 overlay 解析，不是狀態機狀態）
 const CLIP_FALLBACK = {
+  ...AMBIENT_CLIP_FALLBACK,
   idle: [],
   walk: ['run', 'idle'],
   run: ['walk', 'idle'],
@@ -156,6 +175,7 @@ export class CharacterAnimator {
       ? [Math.min(win[0], punchDur), Math.min(win[1], punchDur)]
       : [punchDur * PUNCH_HIT_WINDOW[0], punchDur * PUNCH_HIT_WINDOW[1]];
     this._setupWeaponClips(character.clips, meta, events);
+    this._setupAmbientClips(character.clips, meta);
     this.hitSide = null; // 目前 hit 狀態的受擊方向（'front'|'back'|null）
     this._cur = null; // 目前狀態實際播放的 { action, duration, source }（定向受擊時為 hit_front / hit_back）
     this.mixerTicks = 0; // mixer 實際推進的次數（武器層程序化後座判斷本幀是否重擺過姿勢）
@@ -176,6 +196,12 @@ export class CharacterAnimator {
   // 物件池重用：停掉全部動作、回 idle（事件訂閱保留）
   reset() {
     if (this.mixer) this.mixer.stopAllAction();
+    for (const o of this._ambOv) {
+      o.name = null;
+      o.info = null;
+      o.w = 0;
+      o.target = 0;
+    }
     this.cancelUpper();
     this._state = null;
     this._cur = null;
@@ -263,6 +289,168 @@ export class CharacterAnimator {
     if (missed.length && !this.character.fallback && !weaponInfoLogged) {
       weaponInfoLogged = true;
       console.info(`[animator] 角色 glb 缺武器 / 受擊 clip：${missed.join('、')}，改用替代 clip 或略過`);
+    }
+  }
+
+  // 生活行為 clip 來源解析（action 第一次用到才建）
+  _setupAmbientClips(clips, meta) {
+    this._amb = new Map(); // name → { source, clip, action, duration, loop, upper, weight }
+    this.ambientMissing = []; // [{ state, used }]
+    const missed = [];
+    for (const name of AMBIENT_CLIPS) {
+      const source = resolveAmbientClip(name, (n) => clips.has(n));
+      if (source !== name) {
+        this.ambientMissing.push({ state: name, used: source });
+        missed.push(name);
+      }
+      const clip = source && source !== 'idle' ? clips.get(source) : null; // 退回 idle = 不疊加
+      const m = meta.get(name);
+      const duration = clip ? clip.duration : m && Number.isFinite(m.duration) ? m.duration : FALLBACK_UPPER_SEC;
+      const upper = AMBIENT_UPPER.has(name);
+      const loop = !AMBIENT_GESTURES.includes(name);
+      this._amb.set(name, { source, clip, action: null, duration, loop, upper, weight: upper ? AMBIENT_UPPER_WEIGHT : AMBIENT_FULL_WEIGHT });
+    }
+    // overlay 槽：0 = 循環（setAmbient）、1 = 淡出中的前一個循環、2 = 一次性手勢（playGesture）
+    this._ambOv = [0, 1, 2].map(() => ({ name: null, info: null, w: 0, target: 0, t: 0 }));
+    if (missed.length && !this.character.fallback && !ambientInfoLogged) {
+      ambientInfoLogged = true;
+      console.info(`[animator] 角色 glb 缺生活行為 clip：${missed.join('、')}，改用替代 clip 或不疊加`);
+    }
+  }
+
+  // 生活行為 clip 解析結果：{ source, duration, loop, upper } 或 null（非生活行為 clip）
+  ambientClip(name) {
+    const i = this._amb.get(name);
+    return i ? { source: i.source, duration: i.duration, loop: i.loop, upper: i.upper } : null;
+  }
+
+  // 目前的循環 overlay 名稱（null = 無）
+  get ambient() {
+    return this._ambOv[0].name;
+  }
+
+  // overlay 的 action（第一次用到才建；替代 clip / 上半身濾軌道的副本全程式快取共用）
+  _ambAction(name, info) {
+    if (info.action || !info.clip || !this.mixer) return info.action;
+    let clip = info.clip;
+    const upperBones = info.upper ? characterBoneGroups(getCharacterManifest()).upper : null;
+    const key = `${name}|${upperBones ? upperBones.join(',') : ''}`;
+    if (info.source !== name || upperBones) {
+      let byKey = ambientClipCache.get(clip);
+      if (!byKey) ambientClipCache.set(clip, (byKey = new Map()));
+      let out = byKey.get(key);
+      if (!out) {
+        const keep = upperBones ? new Set(upperBones) : null;
+        const tracks = keep ? clip.tracks.filter((t) => keep.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName)) : clip.tracks;
+        // 濾完沒剩任何軌道（骨名對不上）→ 用整份 clip，總比不疊好
+        out = new THREE.AnimationClip(`${name}<-${info.source}`, clip.duration, (tracks.length ? tracks : clip.tracks).map((t) => t.clone()));
+        byKey.set(key, out);
+      }
+      clip = out;
+    }
+    const action = this.mixer.clipAction(clip);
+    if (info.loop) action.setLoop(THREE.LoopRepeat, Infinity);
+    else {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    }
+    info.action = action;
+    return action;
+  }
+
+  // keep：接手淡出中的同一個 action（不從頭播）
+  _ambPlay(o, name, info, keep = false) {
+    o.name = name;
+    o.info = info;
+    o.t = 0;
+    o.target = info.weight;
+    const a = this._ambAction(name, info);
+    if (!a) return;
+    if (keep) {
+      a.setEffectiveWeight(o.w);
+      return;
+    }
+    a.reset();
+    a.setEffectiveTimeScale(1);
+    a.setEffectiveWeight(o.w);
+    a.play();
+  }
+
+  // 循環 overlay：name = AMBIENT_LOOPS 之一或 null（淡出）；回傳是否接受（UPPER_BLOCKED 狀態中、未知名稱 → false）
+  setAmbient(name) {
+    const ov = this._ambOv[0];
+    if (name === ov.name) return true;
+    if (name === null) {
+      this._ambFadeOut(ov);
+      return true;
+    }
+    const info = this._amb.get(name);
+    if (!info || !info.loop || UPPER_BLOCKED.has(this._state)) return false;
+    const out = this._ambOv[1];
+    let w = 0;
+    if (out.info === info) {
+      // 正在淡出的就是這個 → 從目前權重接手淡入
+      w = out.w;
+      out.name = null;
+      out.info = null;
+      out.w = 0;
+    }
+    this._ambFadeOut(ov);
+    ov.w = w;
+    this._ambPlay(ov, name, info, w > 0);
+    return true;
+  }
+
+  // 把槽 0 的 overlay 移到淡出槽（原淡出槽的直接停掉）
+  _ambFadeOut(ov) {
+    if (!ov.name) return;
+    const out = this._ambOv[1];
+    if (out.info && out.info.action) out.info.action.stop();
+    out.name = ov.name;
+    out.info = ov.info;
+    out.w = ov.w;
+    out.target = 0;
+    ov.name = null;
+    ov.info = null;
+    ov.w = 0;
+    ov.target = 0;
+  }
+
+  // 上半身一次性手勢（wave / angry_shout / cheer）；回傳長度（秒）或 false（未知名稱 / UPPER_BLOCKED 狀態）
+  // 缺 clip（退回 idle）時只計時、不疊加
+  playGesture(name) {
+    const info = this._amb.get(name);
+    if (!info || info.loop || UPPER_BLOCKED.has(this._state)) return false;
+    const g = this._ambOv[2];
+    if (g.info && g.info.action && g.info !== info) g.info.action.stop();
+    g.w = 0;
+    this._ambPlay(g, name, info);
+    return info.duration;
+  }
+
+  // 每次 update：權重淡入淡出、手勢播完淡出、jog 播放速率
+  _ambStep(dt, speed) {
+    const ov = this._ambOv;
+    for (let k = 0; k < 3; k++) {
+      const o = ov[k];
+      if (!o.info) continue;
+      o.t += dt;
+      if (k === 2 && o.t >= o.info.duration - FADE) o.target = 0;
+      const rate = (o.info.weight / FADE) * dt;
+      o.w = o.w < o.target ? Math.min(o.target, o.w + rate) : Math.max(o.target, o.w - rate);
+      const a = o.info.action;
+      if (a) {
+        a.setEffectiveWeight(o.w);
+        if (o.name === 'jog') {
+          const ref = REF_SPEED[o.info.source] || JOG_REF_SPEED;
+          a.setEffectiveTimeScale(Math.min(RATE_MAX, Math.max(RATE_MIN, speed / ref)));
+        }
+      }
+      if (o.target === 0 && o.w <= 0) {
+        if (a) a.stop();
+        o.name = null;
+        o.info = null;
+      }
     }
   }
 
@@ -370,7 +558,13 @@ export class CharacterAnimator {
       this._windowOpen = false;
       this._emit('punchHitWindow', 'close', this._t);
     }
-    if (UPPER_BLOCKED.has(st)) this.cancelUpper();
+    if (UPPER_BLOCKED.has(st)) {
+      this.cancelUpper();
+      if (this._ambOv) {
+        this._ambFadeOut(this._ambOv[0]);
+        this._ambOv[2].target = 0;
+      }
+    }
     const prev = this._cur ? this._cur.action : null;
     const cur = (side && this._hitSide.get(side)) || this._info.get(st);
     const next = cur.action;
@@ -426,6 +620,7 @@ export class CharacterAnimator {
     }
     this._speed = speed;
     if (this._up.name) this._upperStep(dt);
+    if (this._ambOv[0].info || this._ambOv[1].info || this._ambOv[2].info) this._ambStep(dt, speed);
     const st = this._state;
     const info = this._cur;
     const t0 = this._t;

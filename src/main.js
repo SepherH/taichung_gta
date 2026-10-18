@@ -1736,7 +1736,14 @@ async function init() {
       threats.push(threat);
     }
     traffic.setContext({ playerInVehicle: !!v, vehicles: threats, player: player.actor, lockTarget: null });
+    // 路人生活行為（ped-ambient）：時段決定活動比例；步行持槍瞄準時，瞄準方向上 10 m 內的路人抱頭蹲下
+    ambientCtx.hour = dayNight.hour;
+    ambientCtx.aiming = aim.aiming && state.mode !== 'drive';
+    ambientCtx.aimDirX = aim.dir.x;
+    ambientCtx.aimDirZ = aim.dir.z;
+    if (traffic.ambient) traffic.ambient.setContext(ambientCtx);
   };
+  const ambientCtx = { hour: 12, aiming: false, aimDirX: 0, aimDirZ: 1 };
 
   // 車流停車判斷用：玩家（或玩家的車）與路邊車輛
   const blockers = [];

@@ -321,6 +321,7 @@ function run(dt) {
   const firstSeen = new Map(); // ped → { citizen, t }（骨架池重用：同一個 ped 物件換掛市民時重新計時）
   const last = new Map(); // ped → { anim 狀態, ped.state, updates }
   const stat = {};
+  const ambBusy = new WeakSet();
   const S = (lv) => stat[lv] || (stat[lv] = { peds: new Set(), switches: 0, walkEnter: 0, samples: 0, off: 0, zero: 0, minR: Infinity, maxR: 0 });
   const frames = Math.round((WARM + MEASURE) / dt);
   let t = 0;
@@ -340,6 +341,9 @@ function run(dt) {
       const prev = last.get(p);
       const cur = { st: a.state, ped: p.state, n: a._testUpdates || 0 };
       last.set(p, cur);
+      // 生活行為（ped-ambient：講電話 / 慢跑 / 聊天…）會刻意停步或改步速；本測試只檢查純漫步者，做過活動的行人整段排除
+      if (p.amb && (p.amb.act || p.amb.react)) ambBusy.add(p);
+      if (ambBusy.has(p)) continue;
       if (t <= WARM || !prev || t - firstSeen.get(p).t < MIN_AGE) continue;
       if (prev.ped !== 'walk' || p.state !== 'walk' || !LOCO.has(prev.st) || !LOCO.has(cur.st)) continue;
       const s = S(p.citizen.level);

@@ -37,8 +37,9 @@ export function pathPoint(t, p, out) {
 
 // 沿路線可行走區段 [s0, s1] 來回走：更新 p.x / p.y / p.z / p.yaw（骨架行人與替身市民共用）；回傳本次沿路線走的距離（m）
 // 走過端點的部分折返（不丟掉那段時間，掉頭時步速不掉）
+// 生活活動（ped-ambient.js）：p.pace = 步速倍率（0 = 停下、慢跑 > 1；缺欄位 = 1）、p.faceHold = 覆寫面向 yaw（null / 缺 = 沿路線）
 export function walkPed(t, p, dt, snap = false) {
-  const d = p.speed * dt;
+  const d = p.speed * (p.pace ?? 1) * dt;
   p.s += p.dir * d;
   if (p.s > p.s1) {
     p.s = Math.max(p.s0, 2 * p.s1 - p.s);
@@ -47,7 +48,8 @@ export function walkPed(t, p, dt, snap = false) {
     p.s = Math.min(p.s1, 2 * p.s0 - p.s);
     p.dir = 1;
   }
-  const want = pathPoint(t, p, p);
+  const path = pathPoint(t, p, p);
+  const want = p.faceHold ?? path;
   // yHint = 上一步腳底高（初始 Infinity 取最上層可行走面）；只轉 yaw，坡上保持直立
   p.y = t.terrain.querySurface(p.x, p.z, p.y, t._q).y;
   if (snap) p.yaw = want;
@@ -209,10 +211,10 @@ export function thinkPeds(t, simDt) {
     }
     if (!st.shouldTick(p.slot, frame, lod.aiEvery(level))) continue;
     const brain = p.brain;
-    // 被拖出的司機：起身後才把「被攻擊」交給大腦（倒地中大腦只會記成逃跑）→ 依性格還手或逃跑
+    // 被拖出的司機：起身後才把「被攻擊」交給大腦（倒地中大腦只會記成逃跑）→ 依性格還手或逃跑（ejected：搶車者倒地中也照性格，見 npc-ai.js）
     if (p.pendingFrom && !t.combat.isDown(p.actor)) {
       const who = p.pendingAttacker;
-      brain.onAttacked(who ? { attacker: who } : { vehicle: p.pendingFrom });
+      brain.onAttacked(who ? { attacker: who, ejected: true } : { vehicle: p.pendingFrom });
       p.pendingAttacker = null;
       p.pendingFrom = null;
     }
