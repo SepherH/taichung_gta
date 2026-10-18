@@ -25,6 +25,7 @@ C.set_proportions([(0.0, 0.0), (0.09, 0.09), (0.50, 0.535), (0.92, 0.99), (0.95,
                    (1.22, 1.32), (1.45, 1.56), (1.555, 1.665)])
 import build_characters as BC  # noqa: E402  （clip 關鍵影格函式在呼叫時讀 C 的新比例）
 import combat_clips as CC  # noqa: E402
+import ambient_clips as AC  # noqa: E402
 
 C.MAT_SLOTS.extend(["shirt_stripe", "face"])
 V, R = C.V, C.R
@@ -536,6 +537,7 @@ def build():
         C.make_action(ch, name, keys(), loop, ground=BC.GROUND.get(name))
     C.make_action(ch, "idle_pose", idle_pose_keys(), True, ground=BC.GROUND["idle_pose"])
     CC.add_actions(ch)   # Phase 4 戰鬥 / 武器 clip（同名同長度，與行人共用清單）
+    AC.add_actions(ch)   # Phase 10 路人生活動作
     glb = os.path.join(BC.GLB_DIR, f"{SLUG}.glb")
     blend = os.path.join(BC.BLEND_DIR, f"{SLUG}.blend")
     C.export(ch, glb, blend)

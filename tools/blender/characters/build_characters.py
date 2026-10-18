@@ -17,11 +17,12 @@ import bpy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import char_lib as C  # noqa: E402
 import combat_clips as CC  # noqa: E402
+import ambient_clips as AC  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 GLB_DIR = os.path.join(REPO, "public", "models", "characters")
 BLEND_DIR = os.path.join(REPO, "assets", "blender", "characters")
-PREVIEW_DIR = os.path.join(REPO, "docs", "models", "previews")
+PREVIEW_DIR = os.environ.get("CHAR_PREVIEW_DIR") or os.path.join(REPO, "docs", "models", "previews")
 SCRATCH = os.environ.get("CHAR_PREVIEW_SCRATCH", "")
 TMP = SCRATCH or tempfile.mkdtemp(prefix="tcgta_chars_")   # 立繪 / clip 暫存（跨變體保留到拼圖完成）   # 有設才輸出大張驗收圖
 
@@ -352,6 +353,7 @@ def build_variant(v):
     for name, keys, loop in CLIPS:
         C.make_action(ch, name, keys(), loop, ground=GROUND.get(name))
     CC.add_actions(ch)   # Phase 4 戰鬥 / 武器 clip
+    AC.add_actions(ch)   # Phase 10 路人生活動作
     glb = os.path.join(GLB_DIR, f"{v['slug']}.glb")
     blend = os.path.join(BLEND_DIR, f"{v['slug']}.blend")
     os.makedirs(GLB_DIR, exist_ok=True)
@@ -370,6 +372,8 @@ def build_variant(v):
     cells = clip_previews(ch, cam, tmp, v["slug"]) if (SCRATCH or v["slug"] == "pedestrian") else []
     _, cb = CC.previews(ch, cam, CC.PED_FRAMES, os.path.join(tmp, f"{v['slug']}-combat-{{n}}.png"))
     COMBAT_CELLS.extend(cb)
+    if v["slug"] == "pedestrian":
+        AMBIENT_CELLS.extend(AC.previews(ch, cam, tmp, v["slug"]))
     C.blendsafe.save_blend(blend)
     print(f"CHARACTER {v['slug']} tris={info['tris']} glb_bytes={info['bytes']} joints={info['joints']} "
           f"anims={info['anims']} mats={info['mats']}")
@@ -377,6 +381,7 @@ def build_variant(v):
 
 
 COMBAT_CELLS = []
+AMBIENT_CELLS = []
 
 
 def main():
@@ -397,10 +402,15 @@ def main():
     sheet(stands, 3, 256, 420, os.path.join(PREVIEW_DIR, "characters-lineup.png"))
     sheet(COMBAT_CELLS, 3, 192, 230, os.path.join(PREVIEW_DIR, "characters-combat.png"))   # 列＝變體，欄＝抽樣 clip
 
+    if AMBIENT_CELLS:
+        sheet(AMBIENT_CELLS, 6, 300, 360, os.path.join(PREVIEW_DIR, "characters-ambient.png"))
+
     base = results["pedestrian"]
     loops = {n: lp for n, _, lp in CLIPS}
     loops.update({n: lp for n, _, lp, _ in CC.CLIPS})
+    loops.update({n: lp for n, _, lp, _ in AC.CLIPS})
     upper = {n: up for n, _, _, up in CC.CLIPS}
+    upper.update({n: up for n, _, _, up in AC.CLIPS})
     manifest = {
         "skeleton": C.BONES,
         "materialSlots": C.MAT_SLOTS,

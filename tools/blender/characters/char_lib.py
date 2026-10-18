@@ -567,6 +567,104 @@ def _fcurves(act):
 
 
 # ---------------------------------------------------------------- 匯出 / 預覽
+def _strip_static_glb(glb):
+    """匯出後瘦身：移除「所有 clip 都靜止且等於節點預設值」的 translation / scale 動畫通道（Blender 對每根骨頭每個 clip
+    都輸出 T / R / S 三條，其中 T / S 幾乎全是 2 取樣的靜態常數，只有 Hips 平移會動）。通道少了節點仍停在預設值，
+    不影響播放；孤兒 accessor / bufferView 一併清掉並重排 BIN。旋轉通道一律保留（clip 之間切換需要覆蓋前一個姿勢）。"""
+    import json
+    import struct
+    with open(glb, "rb") as f:
+        data = f.read()
+    jlen = struct.unpack_from("<I", data, 12)[0]
+    js = json.loads(data[20:20 + jlen])
+    boff = 20 + jlen + 8
+    blen = struct.unpack_from("<I", data, 20 + jlen)[0]
+    binb = data[boff:boff + blen]
+    acc, bvs, nodes = js["accessors"], js["bufferViews"], js["nodes"]
+    dflt = {"translation": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]}
+
+    def vals(ai):
+        a = acc[ai]
+        bv = bvs[a["bufferView"]]
+        n = a["count"] * 3
+        return struct.unpack_from("<%df" % n, binb, bv.get("byteOffset", 0) + a.get("byteOffset", 0))
+
+    static = {}   # (node, path) -> 是否每個 clip 都靜止且等於預設
+    for an in js.get("animations", []):
+        for ch in an["channels"]:
+            path = ch["target"]["path"]
+            if path not in dflt:
+                continue
+            key = (ch["target"]["node"], path)
+            smp = an["samplers"][ch["sampler"]]
+            v = vals(smp["output"])
+            ref = nodes[key[0]].get(path, dflt[path])
+            ok = all(abs(v[i] - ref[i % 3]) < 1e-5 for i in range(len(v)))
+            static[key] = static.get(key, True) and ok
+    drop = {k for k, v in static.items() if v}
+    for an in js.get("animations", []):
+        keep = [c for c in an["channels"] if (c["target"]["node"], c["target"]["path"]) not in drop]
+        used = sorted({c["sampler"] for c in keep})
+        remap = {o: i for i, o in enumerate(used)}
+        an["samplers"] = [an["samplers"][o] for o in used]
+        for c in keep:
+            c["sampler"] = remap[c["sampler"]]
+        an["channels"] = keep
+    used_acc = set()
+    for an in js.get("animations", []):
+        for sm in an["samplers"]:
+            used_acc.update((sm["input"], sm["output"]))
+    for m in js.get("meshes", []):
+        for pr in m["primitives"]:
+            used_acc.update(pr["attributes"].values())
+            if "indices" in pr:
+                used_acc.add(pr["indices"])
+    for sk in js.get("skins", []):
+        if "inverseBindMatrices" in sk:
+            used_acc.add(sk["inverseBindMatrices"])
+    order = sorted(used_acc)
+    amap = {o: i for i, o in enumerate(order)}
+    for an in js.get("animations", []):
+        for sm in an["samplers"]:
+            sm["input"], sm["output"] = amap[sm["input"]], amap[sm["output"]]
+    for m in js.get("meshes", []):
+        for pr in m["primitives"]:
+            pr["attributes"] = {k: amap[v] for k, v in pr["attributes"].items()}
+            if "indices" in pr:
+                pr["indices"] = amap[pr["indices"]]
+    for sk in js.get("skins", []):
+        if "inverseBindMatrices" in sk:
+            sk["inverseBindMatrices"] = amap[sk["inverseBindMatrices"]]
+    new_acc = [acc[o] for o in order]
+    used_bv = {a["bufferView"] for a in new_acc}
+    used_bv.update(im["bufferView"] for im in js.get("images", []) if "bufferView" in im)
+    border = sorted(used_bv)
+    bmap = {o: i for i, o in enumerate(border)}
+    out_bin = bytearray()
+    new_bvs = []
+    for o in border:
+        bv = dict(bvs[o])
+        chunk = binb[bv.get("byteOffset", 0):bv.get("byteOffset", 0) + bv["byteLength"]]
+        out_bin += b"\0" * (-len(out_bin) % 4)
+        bv["byteOffset"] = len(out_bin)
+        out_bin += chunk
+        new_bvs.append(bv)
+    out_bin += b"\0" * (-len(out_bin) % 4)
+    for a in new_acc:
+        a["bufferView"] = bmap[a["bufferView"]]
+    for im in js.get("images", []):
+        if "bufferView" in im:
+            im["bufferView"] = bmap[im["bufferView"]]
+    js["accessors"], js["bufferViews"] = new_acc, new_bvs
+    js["buffers"] = [{"byteLength": len(out_bin)}]
+    txt = json.dumps(js, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    txt += b" " * (-len(txt) % 4)
+    total = 12 + 8 + len(txt) + 8 + len(out_bin)
+    with open(glb, "wb") as f:
+        f.write(data[:8] + struct.pack("<I", total) + struct.pack("<I", len(txt)) + b"JSON" + txt
+                + struct.pack("<I", len(out_bin)) + b"BIN\0" + bytes(out_bin))
+
+
 def export(ch, glb, blend):
     arm = ch["arm"]
     for o in bpy.context.scene.objects:
@@ -580,5 +678,6 @@ def export(ch, glb, blend):
         export_animations=True, export_animation_mode="ACTIONS", export_force_sampling=True,
         export_optimize_animation_size=True, export_skins=True, export_def_bones=True,
         export_cameras=False, export_lights=False, export_frame_range=False)
+    _strip_static_glb(glb)
     os.makedirs(os.path.dirname(blend), exist_ok=True)
     blendsafe.save_blend(blend)

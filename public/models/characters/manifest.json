@@ -30,6 +30,12 @@
   "fps": 30,
   "clips": [
     {
+      "name": "angry_shout",
+      "duration": 1.0667,
+      "loop": false,
+      "upperBodyOnly": true
+    },
+    {
       "name": "bat_hold",
       "duration": 2,
       "loop": true,
@@ -46,6 +52,24 @@
       "duration": 0.6,
       "loop": false,
       "upperBodyOnly": true
+    },
+    {
+      "name": "chat_gesture",
+      "duration": 2,
+      "loop": true,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "cheer",
+      "duration": 1.2,
+      "loop": false,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "cower",
+      "duration": 0.4,
+      "loop": true,
+      "upperBodyOnly": false
     },
     {
       "name": "drive",
@@ -90,6 +114,12 @@
       "upperBodyOnly": false
     },
     {
+      "name": "jog",
+      "duration": 0.8,
+      "loop": true,
+      "upperBodyOnly": false
+    },
+    {
       "name": "jump",
       "duration": 1.0667,
       "loop": false,
@@ -100,6 +130,30 @@
       "duration": 1.2,
       "loop": false,
       "upperBodyOnly": false
+    },
+    {
+      "name": "look_around",
+      "duration": 2.6,
+      "loop": true,
+      "upperBodyOnly": false
+    },
+    {
+      "name": "phone_film",
+      "duration": 1.6,
+      "loop": true,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "phone_talk",
+      "duration": 1.6,
+      "loop": true,
+      "upperBodyOnly": true
+    },
+    {
+      "name": "phone_text",
+      "duration": 1.2,
+      "loop": true,
+      "upperBodyOnly": true
     },
     {
       "name": "pistol_aim",
@@ -138,10 +192,22 @@
       "upperBodyOnly": false
     },
     {
+      "name": "sit_idle",
+      "duration": 3.2,
+      "loop": true,
+      "upperBodyOnly": false
+    },
+    {
       "name": "walk",
       "duration": 1.0667,
       "loop": true,
       "upperBodyOnly": false
+    },
+    {
+      "name": "wave",
+      "duration": 1.2,
+      "loop": false,
+      "upperBodyOnly": true
     },
     {
       "name": "weapon_equip",
@@ -188,7 +254,7 @@
       "name": "行人 A（短髮男性、標準體型）",
       "file": "pedestrian.glb",
       "height": 1.75,
-      "bytes": 378324,
+      "bytes": 363188,
       "triangles": 2212,
       "colors": {
         "skin": "#D6A27C",
@@ -203,7 +269,7 @@
       "name": "行人 B（及肩短髮 + 馬尾女性、纖細體型）",
       "file": "pedestrian_f.glb",
       "height": 1.75,
-      "bytes": 380680,
+      "bytes": 365548,
       "triangles": 2292,
       "colors": {
         "skin": "#E3B393",
@@ -218,7 +284,7 @@
       "name": "行人 C（平頭、壯碩體型）",
       "file": "pedestrian_heavy.glb",
       "height": 1.75,
-      "bytes": 378352,
+      "bytes": 363216,
       "triangles": 2212,
       "colors": {
         "skin": "#C68E68",
@@ -234,7 +300,7 @@
       "role": "player",
       "file": "hero.glb",
       "height": 1.86,
-      "bytes": 785716,
+      "bytes": 761636,
       "triangles": 11841,
       "colors": {
         "skin": "#EDBFA8",
