@@ -108,7 +108,9 @@ import { createWanted, CRIMES } from './wanted/wanted.js';
 import { createPolice } from './wanted/police.js';
 import { createPoliceAdapters } from './wanted/adapters.js';
 import { createWantedUI } from './wanted/ui.js';
-import { respawnPlace } from './wanted/places.js';
+import { respawnPlace, SPRAY_SHOPS } from './wanted/places.js';
+import { createSprayShops } from './wanted/spray.js';
+import { createBeaconPool } from './missions/light-pillar.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -544,6 +546,7 @@ async function init() {
     placeId: null,
     koTimer: 0, // 玩家 hp 歸零倒地後到送醫（WASTED）的倒數（秒）
     respawn: null, // 被捕 / 送醫流程進行中：'busted' | 'wasted' | null（輸入鎖定、玩家不受攻擊）
+    spraying: null, // 噴漆廠進行中：shopId | null（輸入鎖定；與 respawn 互斥，期間不觸發 BUSTED / WASTED）
     pendingFall: null, // 物理子步內機車倒地（vehicles.onFall），step 結束後才處理下車
     walkTime: 0, // 本局步行累計秒數（新手提示用）
     playTime: 0, // 本局遊玩秒數（新手提示用）
@@ -906,6 +909,7 @@ async function init() {
     pushAll(out, checkins.markers());
     pushAll(out, food.markers());
     pushAll(out, pickups.markers());
+    pushAll(out, sprayMarkers);
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven) out.push(c.pos);
     return out;
   };
@@ -1236,6 +1240,66 @@ async function init() {
   });
   bus.on('wanted:state', () => syncStars());
 
+  // ---------- 噴漆廠（Phase 8）：src/wanted/spray.js（純邏輯）+ 入口光柱 + 小地圖 / 大地圖標記 ----------
+  const sprayShops = createSprayShops({ bus, wanted, police, shops: SPRAY_SHOPS });
+  const sprayMarkers = SPRAY_SHOPS.map((s) => ({ x: s.x, z: s.z, kind: 'spray-shop' }));
+  const sprayBeacons = createBeaconPool({ scene, heightAt });
+  for (const s of SPRAY_SHOPS) sprayBeacons.acquire('spray', s.x, s.z, s); // 常駐不釋放
+  // 每幀 ctx：vehicle 只在駕駛中提供（duck type：x / z / speed / isPolice / color / repaint / repair / ref）
+  // repaint / repair 只建一次，經 sprayTarget 指向本幀駕駛的車；ref = 實體車（spray.js 據此判斷中途換車 / 下車而中止）
+  let sprayTarget = null;
+  const sprayVehicle = {
+    x: 0, z: 0, speed: 0, isPolice: false, color: null, ref: null,
+    repaint: (color) => sprayTarget && sprayTarget.repaint(color),
+    repair: () => sprayTarget && dmg.repair(sprayTarget),
+  };
+  const sprayCtx = { player: { x: 0, z: 0 }, vehicle: null, money: 0, spend: null, seen: false };
+  // economy.spend 為原子操作（餘額不足整筆拒扣、回 false）→ 實扣只會是 n 或 0，不需 refund；spray.js 在噴完才呼叫
+  sprayCtx.spend = (n) => (economy.spend(n, 'spray') ? n : 0);
+  let lastPoliceSeen = false; // updateWanted 本幀算出的 police.update seen，供噴漆廠「被看見」判定共用（不重算）
+  const updateSprayShops = (dt) => {
+    sprayBeacons.update(dt);
+    if (state.mode === 'drive' && state.vehicle && !state.respawn) {
+      const v = state.vehicle;
+      sprayVehicle.x = v.pos.x;
+      sprayVehicle.z = v.pos.z;
+      sprayVehicle.speed = v.speed;
+      sprayVehicle.isPolice = policeAdapters.isPoliceVehicle(v);
+      sprayVehicle.color = v.color;
+      sprayVehicle.ref = v;
+      sprayTarget = v;
+      sprayCtx.vehicle = sprayVehicle;
+    } else {
+      sprayTarget = null;
+      sprayVehicle.ref = null;
+      sprayCtx.vehicle = null;
+    }
+    const p = playerPos();
+    sprayCtx.player.x = p.x;
+    sprayCtx.player.z = p.z;
+    sprayCtx.money = economy.money;
+    sprayCtx.seen = wanted.stars > 0 && lastPoliceSeen; // 0 星時巡邏車視線不算「被看見」
+    const r = sprayShops.update(state.respawn ? 0 : dt, sprayCtx);
+    if (r.active && !state.spraying) {
+      state.spraying = r.shopId;
+      input.enabled = false;
+      if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
+    } else if (!r.active && state.spraying) {
+      state.spraying = null;
+      hud.setSprayFade(0);
+      if (state.started && !state.paused && !panelOpen() && !phone.isOpen() && !state.respawn) input.enabled = true;
+    }
+    if (r.active) hud.setSprayFade(r.progress < 0.5 ? r.progress * 2 : (1 - r.progress) * 2);
+  };
+  // 回主選單 / 開新局：立即取消進行中的噴漆（不扣錢 / 不換色 / 不 toast）並收掉黑幕；須在 cancelRespawn 之前呼叫
+  // （cancelRespawn 的 wanted.clear('debug') 會 emit wanted:cleared，先取消才不會多跳「噴漆中斷」）
+  const cancelSpray = () => {
+    sprayShops.cancel();
+    state.spraying = null;
+    sprayTarget = null;
+    hud.setSprayFade(0);
+  };
+
   // 犯行回報（只算玩家所為）：警力看得見（police.witness）→ 全額；否則 CRIME_REPORT_RANGE 內有行人 → 路人報案（witnessed=false）；都沒有 → 不報
   const isOfficer = (a) => !!a && (a.faction === 'police' || !!a.officer);
   const peopleNear = (x, z, r, withOfficers) => {
@@ -1329,6 +1393,7 @@ async function init() {
     pl.speed = v ? Math.abs(v.speed || 0) : 0;
     pl.down = state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor);
     const { seen } = police.update(dt, policeCtx);
+    lastPoliceSeen = seen; // 噴漆廠（spray.js）「被警力看見中」沿用本幀結果，不重算
     wantedCtx.playerX = p.x;
     wantedCtx.playerZ = p.z;
     wantedCtx.seen = seen;
@@ -1346,7 +1411,7 @@ async function init() {
   // 畫面結束（自動 3.5 s 或點擊跳過）→ finishRespawn：傳送到警察局 / 醫院門口、hp 回滿、wanted.clear(kind)、emit player:busted / player:wasted、解鎖
   let respawnSeq = 0;
   const beginRespawn = (kind) => {
-    if (state.respawn) return;
+    if (state.respawn || state.spraying) return; // 噴漆廠換色期間與 BUSTED / WASTED 互斥
     const at = playerPos();
     const x = at.x;
     const z = at.z;
@@ -1681,7 +1746,7 @@ async function init() {
       hud.setInteractPrompt?.(null);
       if (state.mode === 'drive' && state.vehicle) state.vehicle.setControls(driveControls({ x: 0, y: 0 }, true));
     } else if (state.started && !state.paused) {
-      input.enabled = !state.respawn; // 被捕 / 送醫畫面中維持鎖定（finishRespawn 解鎖）
+      input.enabled = !state.respawn && !state.spraying; // 被捕 / 送醫畫面、噴漆中維持鎖定（finishRespawn / 噴漆結束解鎖）
       loop.resetClock();
     }
     return open;
@@ -1791,9 +1856,10 @@ async function init() {
     lastThrottle = 0;
     if (state.mode === 'drive') {
       const v = state.vehicle;
-      // 手機開著：輸入已停用，維持手煞（不放任車子滑行）
-      v.setControls(phoneOpen ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));
-      lastThrottle = phoneOpen ? 0 : snap.move.y;
+      // 手機開著 / 噴漆中：輸入已停用，每幀維持手煞（不放任車子滑行 / 斜坡溜車）
+      const braked = phoneOpen || !!state.spraying;
+      v.setControls(braked ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));
+      lastThrottle = braked ? 0 : snap.move.y;
       if (input.actions.down('horn')) v.honk(); // 按住連續響（honk 自帶冷卻）
       // Q（或觸控 tb-radio 送的虛擬 KeyQ）：駕駛中 = 換台（步行時 Q 仍是換武器，見 handleWeaponInput）
       if (input.actions.pressedIn('radioNext', 'vehicle')) radio.next();
@@ -1811,6 +1877,7 @@ async function init() {
     stepWorld(dt, state.mode === 'drive' ? state.vehicle.pos : player.pos);
     if (state.pendingFall) handleFall();
     updateWanted(dt, phoneOpen);
+    if (!phoneOpen) updateSprayShops(dt);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2151,6 +2218,7 @@ async function init() {
     economy = createEconomy({ bus, initial: save });
     resetExtraStats(save.stats);
     closePanels();
+    cancelSpray();
     cancelRespawn();
     placePlayer(save);
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
@@ -2203,7 +2271,7 @@ async function init() {
     if (!state.started || !state.paused) return;
     state.paused = false;
     // 被捕 / 送醫畫面進行中維持鎖輸入（由 finishRespawn 解鎖）；滑鼠鎖定照樣在本手勢內同步要求（畫面的點擊跳過走 document 捕獲監聽，鎖定中仍收得到）
-    if (!state.respawn) input.enabled = true;
+    if (!state.respawn && !state.spraying) input.enabled = true; // 噴漆中亦維持鎖定（噴漆結束時解鎖）
     setGameActive(true);
     requestLock();
     loop.resetClock();
@@ -2215,6 +2283,7 @@ async function init() {
     if (state.mode === 'drive') exitVehicle(true);
     state.mode = 'walk';
     player.locked = false;
+    cancelSpray();
     cancelRespawn();
     state.started = false;
     state.paused = false;
@@ -2292,6 +2361,8 @@ async function init() {
       weather, env, radio,
       // Phase 7：通緝 / 警力（wanted.setStars(3)、police.cars / officers、policeAdapters.stats()）
       wanted, police, policeAdapters, wantedUI,
+      // Phase 8：噴漆廠（sprayShops.shops 看每間店的 cooldown / hold）
+      sprayShops,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

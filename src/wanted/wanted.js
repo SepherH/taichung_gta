@@ -38,7 +38,7 @@ export const SEARCH_AFTER_FRAC = 0.3; // active 連續 unseen 超過 EVADE_SEC[s
 export const CIRCLE_BASE_R = 80; // m：搜索圈半徑 = BASE + PER_STAR × stars
 export const CIRCLE_PER_STAR_R = 40;
 export const INSIDE_SEARCH_RATE = 0.25; // 玩家在搜索圈內時搜尋計時倍速
-export const CLEAR_REASONS = Object.freeze(['evaded', 'busted', 'wasted', 'debug']);
+export const CLEAR_REASONS = Object.freeze(['evaded', 'busted', 'wasted', 'debug', 'spray']);
 
 // heat → 星數（最大 n 使 heat ≥ STAR_HEAT[n]）
 export function starsForHeat(heat, starHeat = STAR_HEAT) {

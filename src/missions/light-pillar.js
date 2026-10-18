@@ -6,7 +6,7 @@ import * as THREE from 'three';
 
 export const BEACON_HEIGHT = 220;
 export const BEACON_RADIUS = 2.4;
-export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff }; // job = 打工接單點（§23.4）
+export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff, spray: 0xe040fb }; // job = 打工接單點（§23.4）；spray = 噴漆廠入口（Phase 8）
 const BASE_OPACITY = 0.3;
 const PULSE_SPEED = 1.6; // rad/s，約 4 s 一個週期
 

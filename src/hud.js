@@ -168,11 +168,34 @@ export class HUD {
       });
     }
     this._buildPhase5();
+    this._buildSprayFade();
     this._camViewHint = createCamViewHint({ parent: this.root });
     this.mapCanvas = this._buildMap();
     if (typeof window !== 'undefined' && window.addEventListener) {
       window.addEventListener('resize', () => this._applyScale());
     }
+  }
+
+  // 噴漆廠換色過程（Phase 8，src/wanted/spray.js）：全螢幕黑色淡出淡入，沒有既有的淡出工具可用，
+  // 以簡單 div 實作在本檔（UI 層）；index.html / style.css 不動，樣式以 inline 補；pointer-events none 不擋輸入鎖定以外的點擊
+  // z-index 65：高於 HUD 上限 60（黑幕蓋住 HUD），低於暫停選單 tg- 70–79（menu.css），噴漆中按 Esc 暫停時選單不被黑幕蓋住
+  _buildSprayFade() {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+      this.sprayFadeEl = null;
+      return;
+    }
+    const el = document.createElement('div');
+    el.id = 'spray-fade';
+    el.style.cssText = 'position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:65;';
+    (document.body || this.root).appendChild(el);
+    this.sprayFadeEl = el;
+  }
+
+  // frac：0（透明）→ 1（全黑）；呼叫端（main.js）依噴漆進度算三角波（前半淡出、後半淡入）
+  setSprayFade(frac) {
+    if (!this.sprayFadeEl) return;
+    const v = Math.max(0, Math.min(1, Number(frac) || 0));
+    this.sprayFadeEl.style.opacity = String(v);
   }
 
   // 天氣圖示（狀態列最前面）、台名列（駕駛面板內車名上方）、觸控換台鈕；index.html / style.css 不動，樣式以 inline 補

@@ -14,6 +14,7 @@ import {
   CIRCLE_BASE_R,
   CIRCLE_PER_STAR_R,
   INSIDE_SEARCH_RATE,
+  CLEAR_REASONS,
   createWanted,
   starsForHeat,
 } from '../../src/wanted/wanted.js';
@@ -195,7 +196,8 @@ function run(w, sec, dt, ctx) {
   check('searchCircle：active 時為 null', w.searchCircle === null);
 }
 {
-  for (const reason of ['evaded', 'busted', 'wasted', 'debug']) {
+  check("CLEAR_REASONS 含 'spray'（P8 噴漆廠）", CLEAR_REASONS.includes('spray'));
+  for (const reason of ['evaded', 'busted', 'wasted', 'debug', 'spray']) {
     const { w, log } = make();
     w.report(CRIMES.killPolice, { x: 1, z: 1, witnessed: true });
     log.length = 0;

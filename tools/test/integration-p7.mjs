@@ -35,7 +35,7 @@ const missing = (code, list) => list.filter((s) => !(s instanceof RegExp ? s.tes
 const GROUPS = [
   ['import：wanted.css / wanted / police / adapters / ui / places', [
     "import './wanted/wanted.css';", "import { createWanted, CRIMES } from './wanted/wanted.js';", "import { createPolice } from './wanted/police.js';",
-    "import { createPoliceAdapters } from './wanted/adapters.js';", "import { createWantedUI } from './wanted/ui.js';", "import { respawnPlace } from './wanted/places.js';"]],
+    "import { createPoliceAdapters } from './wanted/adapters.js';", "import { createWantedUI } from './wanted/ui.js';", "import { respawnPlace, SPRAY_SHOPS } from './wanted/places.js';"]],
   ['adapters deps（檔頭列的最小集合）', [
     'createPoliceAdapters({', 'findRoute: (a, b) => findRoute(graph, a, b)', 'characters: { createCharacter, disposeCharacter, CharacterAnimator, clips:',
     'blocked: (x, z) => !!buildingAt(x, z) || inWater(x, z)', 'surfaceOffset: SURFACE_OFFSET', 'isNight: () =>', 'getPlayer: () =>']],
@@ -67,8 +67,9 @@ for (const [name, list] of GROUPS) {
   check('原 PLAYER_KO_SEC 原地起身移除、整合層不再呼叫 missions.onPlayerKo、player:ko 照發',
     !mainSrc.includes('PLAYER_KO_SEC') && !mainSrc.includes('player.recoverAfterKnockout(terrain);\n    combat.revive') && !/missions\.onPlayerKo\(\)/.test(mainSrc) && mainSrc.includes("bus.emit('player:ko', {});"));
   // resumeGame 寫成 if (!state.respawn) input.enabled = true;（integration-p3 以字面 input.enabled = true 驗「繼續」接線），語意同 input.enabled = !state.respawn
+  // Phase 8 起兩處另加 && !state.spraying（噴漆中亦維持鎖定；integration-p8 另驗）
   const resumeSrc = (mainSrc.match(/const resumeGame = \(\) => \{([\s\S]*?)\n {2}\};/) || [])[1] || '';
-  const respawnGuard = /input\.enabled = !state\.respawn|if \(!state\.respawn\) input\.enabled = true;/g;
+  const respawnGuard = /input\.enabled = !state\.respawn|if \(!state\.respawn(?: && !state\.spraying)?\) input\.enabled = true;/g;
   check('暫停 / 面板 / 手機時輸入不提早解鎖（resume / syncPanels / phone canResume 看 state.respawn）',
     (mainSrc.match(respawnGuard) || []).length === 2 && new RegExp(respawnGuard.source).test(resumeSrc)
     && mainSrc.includes('&& !state.respawn,') && mainSrc.includes('canOpen: () => !state.respawn && canOpenPhone('));
@@ -175,6 +176,10 @@ function makeWorld({ money = 500, spawnPolice = false, ui = null } = {}) {
     createPoliceAdapters: () => fakeAdapters(env),
     createWantedUI: ui ? () => ui : createWantedUI,
     respawnPlace,
+    // P8 噴漆廠接在同一段（main.js updateWanted 附近）；本測試只驗通緝接線，噴漆給最小替身
+    createSprayShops: () => ({ update() { return null; }, shops: [], dispose() {} }),
+    SPRAY_SHOPS: [],
+    createBeaconPool: () => ({ acquire() {}, release() {}, update() {}, dispose() {} }),
     HOSPITAL_FEE,
     vehicles: null, dmg: null, traffic: { citizens: [] }, findRoute: () => null, graph: null,
     getCharacterManifest: () => null, createCharacter: null, disposeCharacter: null, CharacterAnimator: null,

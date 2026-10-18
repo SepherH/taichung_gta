@@ -32,3 +32,37 @@ export const HOSPITAL = Object.freeze({
 export function respawnPlace(kind) {
   return kind === 'wasted' ? HOSPITAL : POLICE_STATION;
 }
+
+// 噴漆廠（Phase 8，src/wanted/spray.js）：osm-city.json 的 B（建物）/ L（地標）/ P（點位）內 name 含
+// 「汽車」「保養」「修車」「車業」「輪胎」「美容」者只有「汽車旅館」2 筆（非修車業），故三處皆為推測位置：
+// 取七期 / 市政府周邊的大路（道路寬 w，見 R 陣列），路緣外 2 m（市政路 / 文心路二段加 0.4 m 緩衝至 2.4 m）退到
+// 人行道、面向道路的點；yaw：前方 = (sin yaw, cos yaw)
+export const SPRAY_SHOPS = Object.freeze([
+  Object.freeze({
+    id: 'spray-shizheng',
+    name: '七期汽車美容（推測）',
+    osmRoadId: 1044403394, // 市政路（tertiary，寬 12 m），近臺中市政府警察局第六分局
+    x: 102.8,
+    z: 553.0,
+    yaw: -0.537,
+    inferred: true,
+  }),
+  Object.freeze({
+    id: 'spray-wenxin',
+    name: '市政府文心路汽車美容（推測）',
+    osmRoadId: 362714504, // 文心路二段（secondary，寬 9.6 m），近臺中市政府都市發展局 / 環保局 / 刑事警察大隊
+    x: 973.4,
+    z: 514.4,
+    yaw: 1.059,
+    inferred: true,
+  }),
+  Object.freeze({
+    id: 'spray-huilai',
+    name: '七期惠來路汽車美容（推測）',
+    osmRoadId: 916105182, // 惠來路二段（residential，寬 12.8 m），近新光三越（七期商圈）
+    x: 549.8,
+    z: -81.7,
+    yaw: -2.130,
+    inferred: true,
+  }),
+]);

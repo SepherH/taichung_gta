@@ -796,6 +796,41 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ---
 
+## 27. Phase 8 噴漆廠（P8；接線點在 `src/main.js`，介面以 `src/wanted/spray.js` 檔頭為準）
+
+### 27.1 模組介面
+- `src/wanted/spray.js`：`createSprayShops({ bus, wanted, shops, config? })`（`police` 參數已移除；呼叫端多傳會被忽略）→ `{ update(dt, ctx) → { active, shopId, progress }, cancel(), shops, dispose() }`；純邏輯，不碰 DOM / three；訂閱 `bus` 的 `wanted:cleared`（`dispose()` 取消訂閱）
+  - `shops`：`src/wanted/places.js` 的 `SPRAY_SHOPS`（`{ id, name, x, z, yaw, inferred }[]`）；回傳的 `shops` 是加了計時器欄位的內部複本（`cooldown` / `hold` / `rejected` / `needExit` / `spraying` / `aborting` / `sprayT` / `fee` / `starsBefore`）
+  - `ctx = { player: { x, z }, vehicle, money, spend(n) → 實扣金額, refund?(n), seen? }`：`vehicle` = 玩家駕駛中的車或 `null`（非駕駛中）；非 null 時為 duck type `{ x, z, speed, isPolice, color, repaint(color), repair(), ref? }`（呼叫端用實際 Vehicle 包一層，spray.js 不 import vehicle.js；`ref` = 實體車識別，呼叫端重用同一 duck 物件時必填，省略時以 duck 物件本身識別）；`seen`：本幀 `police.update` 的 `seen`，main.js 只在有星時傳入（0 星一律 false，避免巡邏車視線擋下單純換色）（省略視為 false，`wanted.state === 'active'` 一樣視為被看見）
+  - 觸發：車速 `< SPEED_LIMIT`（2 m/s）在店 `TRIGGER_RADIUS`（6 m）內連續 `ENTER_HOLD_SEC`（1.5 s）→ 開始噴漆（`active: true`，`progress` 0→1 共 `SPRAY_DURATION_SEC` 2 s）；開始時只檢查 `money ≥ fee`，**不扣款**；`ctx.spend` 不是函式 → 不開始噴漆（`console.warn` 一次）；拒絕（`vehicle.isPolice` / 被看見 / 錢不夠）→ `emit('toast', { text })`，同一原因在離開範圍（`hold` 歸零、`rejected` / `needExit` 重置）前只 toast 一次（原因改變時再發）
+  - 費用 `sprayFee(stars)`：0 星 `BASE_FEE`（NT$50）；有星 `STAR_FEE_BASE + STAR_FEE_PER_STAR × stars`（NT$100 + 50 × 星數）；以開始時的星數計
+  - 中止：進行中若 `wanted.state === 'active'`（被看見）、收到 `wanted:cleared` 且 `reason` 不是 `'spray'` 或 `'evaded'`（被捕 / 送醫等；噴漆中自然擺脫不中止）、或 `ctx.vehicle` 為 null / `ref` 與開始時不同（下車 / 換車 / 車輛棄置）→ toast「噴漆中斷」，`progress` 跳到後半段同一不透明度後淡入收回；結束時不扣錢、不換色、不清星，須離開範圍才可再觸發（不進冷卻）
+  - 結束（`sprayT ≥ 2 s`）：此時才呼叫 `spend(fee)`；實扣 `< fee` 視為失敗（已扣部分以 `refund(paid)` 退回，若有提供；toast 錢不夠，不換色不清星，須離開範圍）；成功 → `vehicle.repaint(color)`（`pickPaintColor` 從 `PAINT_COLORS` 8 色排除目前色隨機挑一；目前色 number / THREE.Color 型 / 字串一律正規化成 `#rrggbb` 再比較）、`vehicle.repair()`、`wanted.clear('spray')`、`emit('spray:done', { shopId, fee: 實扣值, color, starsBefore })`、toast（`starsBefore > 0` 顯示「換色完成！警方失去你的蹤跡」，否則「煥然一新！」）、該店進入 `COOLDOWN_SEC`（30 s）冷卻，且須離開範圍才可再觸發；repaint / repair 拋錯時例外照常往外拋，但 `spraying` 等狀態以 try/finally 一定重置
+  - `cancel()`：立即取消進行中的噴漆並清各店停妥計時（不扣錢 / 不換色 / 不清星 / 不 toast；冷卻保留）
+- `src/wanted/wanted.js`：`CLEAR_REASONS` 新增 `'spray'`（`clear('spray')` 行為與既有 reason 相同，只是多一個合法值）
+- `src/wanted/places.js`：新增 `SPRAY_SHOPS`（3 處，`osm-city.json` 無「汽車 / 保養 / 修車 / 車業 / 輪胎 / 美容」商家 → 皆為推測位置，`inferred: true`，取七期 / 市政府周邊大路路緣外人行道點）
+- `src/vehicle.js`：`Vehicle.prototype.repaint(color)`（新增 export 方法，不改既有行為）：原地重建外觀網格換色（glb 走 `createVehicleModel` 的 paint 材質快取；程序化車材質由 `cachedStandardMaterial` 共用不可直接改色，故整台重建），保留位置 / 姿態，物理模式下重算 `_wheelIdx`；`src/vehicle-damage.js` 既有 `repair(vehicle)` 直接沿用（耐久回滿 / 停止冒煙 / 功率恢復），未新增 API
+- `src/missions/light-pillar.js`：`BEACON_COLORS` 新增 `spray: 0xe040fb`（洋紅）；整合層另建一個 `createBeaconPool` 實例，店門口各 `acquire('spray', x, z)` 一次、常駐不釋放
+- `src/map/marker-colors.js` / `src/map/big-map.js`：`MARKER_COLORS['spray-shop'] = '#e040fb'`、`MARKER_LABELS['spray-shop'] = '噴漆廠'`；小地圖沿用 `hud.js` 既有的 `_drawMarkers`（依 kind 著色圓點，不貼邊），大地圖圖例自動列出（`Object.keys(MARKER_COLORS)` 迴圈）
+- `src/vehicle.js` repaint 換網格與 `src/vehicle-damage.js`：後者只讀 `v.pos` / `v.spec`、煙霧粒子自建於 scene，不持有 `v.mesh` 或其子節點 → repaint 後不需 detach / attach；`player.js` / `traffic.js` 每幀即時讀 `v.mesh`，同樣不受影響
+- `src/hud.js`：`setSprayFade(frac)`（0 透明 → 1 全黑）操作新建的全螢幕 `div#spray-fade`（本檔動態建立，`index.html` / `style.css` 不動；找不到既有淡出工具時的簡單實作）；z-index 65：高於 HUD 上限 60、低於暫停選單 `tg-`（70–79），噴漆中暫停時選單不被黑幕蓋住
+
+### 27.2 接線（main.js）
+- 建立：`sprayShops = createSprayShops({ bus, wanted, police, shops: SPRAY_SHOPS })`；`sprayBeacons = createBeaconPool({ scene, heightAt })` 並對每間店 `acquire('spray', x, z)`；`sprayMarkers` 併入 `collectMarkers`（小地圖 / 大地圖共用）
+- 每幀（`updateGame`，手機開著時不跑）：`updateWanted` 之後呼叫 `updateSprayShops(dt)` → 組 `ctx`（`vehicle` 僅 `state.mode === 'drive' && state.vehicle && !state.respawn` 時提供，`ref` = 該 Vehicle；`repaint` / `repair` closure 只建一次、經 `sprayTarget` 指向本幀的車；`isPolice` 來自 `policeAdapters.isPoliceVehicle`，`seen` 沿用 `updateWanted` 本幀 `police.update` 的 `seen`，不重算）→ `sprayShops.update(...)`；`spend` 包 `economy.spend`（原子：不足整筆拒扣 → 回 0），不提供 `refund`
+- `active` 由 false → true：`state.spraying = shopId`、`input.enabled = false`、車輛 `setControls` 拉手煞車；噴漆期間 `updateGame` 套用駕駛輸入處（`braked = phoneOpen || state.spraying`）每幀維持手煞，不被 `driveControls(snap.move, …)` 覆寫；`true → false`：`state.spraying = null`、`hud.setSprayFade(0)`、（未被 respawn / 面板 / 手機搶占時）還原 `input.enabled = true`；過程中 `hud.setSprayFade(progress)`（三角波：前半淡出、後半淡入）
+- 互斥：`beginRespawn(kind)` 在 `state.spraying` 真值時直接 return（噴漆中不觸發 BUSTED / WASTED）；`state.respawn` 真值時 `updateSprayShops` 不建立新噴漆（`ctx.vehicle = null`、dt 傳 0）
+- 輸入還原：`resumeGame`（`if (!state.respawn && !state.spraying) input.enabled = true`）與 `syncPanels`（`input.enabled = !state.respawn && !state.spraying`）噴漆中都不開放輸入，由噴漆結束時解鎖
+- 取消：`cancelSpray()`（`sprayShops.cancel()`、`state.spraying = null`、`hud.setSprayFade(0)`）在 `quitToMenu` / `startGame` 中於 `cancelRespawn()` 之前呼叫（避免 `cancelRespawn` 的 `wanted.clear('debug')` 觸發「噴漆中斷」toast）
+- 除錯：`window.__game.sprayShops`（僅 dev，與既有 `wanted / police / policeAdapters / wantedUI` 同一批）
+
+### 27.3 回歸
+- `node tools/test/p8-spray.mjs`（純邏輯：觸發條件 / 拒絕條件各款 / 費用 / 冷卻 + 需離開範圍 / 噴完才扣款（重複扣款、部分扣款退回、無 spend）/ 中途被看見 / 被捕 / 下車 / 換車中止 / `cancel()` / 非字串車色 / repaint 拋錯後狀態重置 / `wanted.clear('spray')` / `spray:done` payload / 幀率無關）
+- `node tools/test/p7-wanted.mjs`（`CLEAR_REASONS` 含 `'spray'`）
+- `node tools/test/integration-p8.mjs`（接線靜態檢查：`main.js` 匯入 `createSprayShops` / `SPRAY_SHOPS`、呼叫 `updateSprayShops`、`beginRespawn` 的 `state.spraying` 互斥判斷存在、resume / syncPanels 看 `state.spraying`、`quitToMenu` / `startGame` 先 `cancelSpray()`、噴漆中每幀手煞、`#spray-fade` z-index 低於暫停選單、`vehicle-damage.js` 不持有 mesh）
+
+---
+
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
 ### 共通

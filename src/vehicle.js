@@ -211,6 +211,8 @@ function registerModelNight(type) {
 export class Vehicle {
   constructor(scene, type, color, x, z, yaw) {
     this.type = type;
+    this._scene = scene; // 噴漆廠換色（repaint）需要重建網格再 add 回場景
+    this.color = color || FALLBACK_PAINT;
     const model = createVehicleModel(type, color);
     if (model) registerModelNight(type);
     this.spec = { ...VEHICLE_TYPES[type], seat: FALLBACK_SEAT[type], doorSide: 1, ...(model ? model.spec : {}) };
@@ -512,6 +514,27 @@ export class Vehicle {
 
   speedKmh() {
     return Math.abs(this.speed) * 3.6;
+  }
+
+  // 噴漆廠換色（src/wanted/spray.js）：原地重建外觀網格（glb 走 createVehicleModel 的 paint 材質換色快取，
+  // 程序化車的 paint 材質由 cachedStandardMaterial 依色共用，不能直接改既有材質顏色，故整台重建）；
+  // 保留位置 / 姿態 / 物理模式的輪序對照（attachBody 後才需要），舊網格只移出場景（材質快取共用，不 dispose）
+  // 換掉 this.mesh 不需通知其他模組：vehicle-damage.js 只讀 pos / spec（煙霧粒子自建），player.js / traffic.js 每幀即時讀 v.mesh
+  repaint(color) {
+    if (!this._scene || !color) return;
+    const model = createVehicleModel(this.type, color);
+    if (model) registerModelNight(this.type);
+    const mesh = model ? model.root : createVehicleMesh(this.type, color);
+    mesh.rotation.order = 'YXZ';
+    this._scene.add(mesh);
+    const old = this.mesh;
+    this.mesh = mesh;
+    this.wheelRig = wheelRig(this.mesh);
+    this.color = color;
+    if (this.body) this._wheelIdx = wheelMeshMap(this.wheelRig.map((r) => r.holder.position), this.body.layout.wheels);
+    this.syncMesh();
+    this.animate(0);
+    old.removeFromParent();
   }
 }
 

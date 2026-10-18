@@ -368,7 +368,13 @@ const { canOpenPhone, createPhoneLink } = await import('../../src/ui/phone-link.
   const iMap = upd.indexOf('if (snap.pressed.map)');
   const iT = upd.indexOf("if (input.actions.pressed('phone') && openPhone()) phoneOpen = true;");
   check("T：input.actions.pressed('phone') → openPhone（在暫停 / 地圖判斷之後、駕駛控制之前）", iT > iPause && iT > iMap && iT < upd.indexOf("if (state.mode === 'drive')"));
-  check('手機開著駕駛：維持手煞、油門記 0', upd.includes('v.setControls(phoneOpen ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));') && upd.includes('lastThrottle = phoneOpen ? 0 : snap.move.y;'));
+  // P8 起手煞條件併入噴漆中（braked = phoneOpen || spraying）；兩種寫法皆接受，手機開著仍須手煞
+  const brakedForm = /const braked = phoneOpen \|\| !!state\.spraying;/.test(upd)
+    && upd.includes('v.setControls(braked ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));')
+    && upd.includes('lastThrottle = braked ? 0 : snap.move.y;');
+  const phoneForm = upd.includes('v.setControls(phoneOpen ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));')
+    && upd.includes('lastThrottle = phoneOpen ? 0 : snap.move.y;');
+  check('手機開著駕駛：維持手煞、油門記 0', brakedForm || phoneForm);
   const iFrame = upd.indexOf('phoneLink.frame(dt);');
   check('每幀 phoneLink.frame(dt)（渲染 dt；在 missions.update 之後）', iFrame > upd.indexOf('missions.update(worldStep.simDt, missionCtx);') && !/phoneLink\.frame\(worldStep/.test(m));
   const sp = block('const syncPanels = () => {');

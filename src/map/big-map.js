@@ -29,6 +29,7 @@ export const MARKER_LABELS = {
   'job-start': '打工接單點',
   'job-dest': '打工目的地',
   'job-car': '泊車指定車',
+  'spray-shop': '噴漆廠',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);

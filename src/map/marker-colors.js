@@ -13,6 +13,7 @@ export const MARKER_COLORS = {
   'job-start': '#9b7bff', // 打工接單點（missions/jobs.js：夜市攤位 / 泊車亭）
   'job-dest': '#d6c8ff', // 打工目的地（跑單客人 / 泊車車格；大地圖畫圖釘）
   'job-car': '#f4f4f4', // 代客泊車指定車（會移動，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
+  'spray-shop': '#e040fb', // 噴漆廠（Phase 8，src/wanted/places.js SPRAY_SHOPS；小地圖沿用既有畫法，不貼邊，同光柱洋紅色）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';
