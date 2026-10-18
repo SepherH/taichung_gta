@@ -3,6 +3,7 @@
 // 操作：pointer events 統一滑鼠 / 觸控——單指拖曳平移、雙指捏合縮放（以兩指中點為錨）、滾輪縮放（以指標為錨）；
 //   總位移 < 6 px 且全程單指 = 點擊 → onPick(x, z)（地圖範圍外忽略）；右側圖例、「回到自己」「清除目的地」、關閉鈕
 // 只在開啟且 dirty 時重繪（靜止不重繪）；外部狀態改變（玩家移動 / 路線更新）由整合層呼叫 draw() 標記重繪
+// V2 幫派：createBigMap({ zones })（gangs.js GANG_ZONES）→ 公園 / 水域之上、建築之下畫半透明地盤色塊與外框，圖例加「〇〇地盤」三列
 // 座標與縮放 / 平移沿用 src/ui/map-view.js 的純函式（世界 X 東、Z 南，北朝上）
 import { BOUNDS, MAJOR_TYPES, ATTRIBUTION, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from '../citymodel.js';
 import { screenToWorld, worldToScreen, clampView, zoomAt, panBy, fitScale } from '../ui/map-view.js';
@@ -71,7 +72,7 @@ function defaultLandmarks() {
 }
 
 // ---------- 繪製（純：只用傳入的 ctx 與 view）----------
-// data = { player:{x,z,yaw}|null, markers:[{x,z,kind,label?}]|null, route:[{x,z}]|null, landmarks:[{name,x,z}] }
+// data = { player:{x,z,yaw}|null, markers:[{x,z,kind,label?}]|null, route:[{x,z}]|null, landmarks:[{name,x,z}], zones?:[{ poly, bbox, color }] }
 export function drawBigMap(ctx, view, data = {}) {
   const k = view.scale;
   const hw = view.w / 2;
@@ -115,6 +116,23 @@ export function drawBigMap(ctx, view, data = {}) {
     if (!visible(w.bbox)) continue;
     polyPath(w.poly);
     ctx.fill();
+  }
+
+  // 幫派地盤：半透明色塊 + 外框
+  if (data.zones) {
+    for (const zn of data.zones) {
+      const b = zn.bbox;
+      if (b && !(b.x1 >= vx0 && b.x0 <= vx1 && b.z1 >= vz0 && b.z0 <= vz1)) continue;
+      polyPath(zn.poly);
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = zn.color;
+      ctx.fill();
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = zn.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
 
   // 建築：淡色填充（推測填充建築更淡）
@@ -235,7 +253,7 @@ export function drawBigMap(ctx, view, data = {}) {
 }
 
 // ---------- DOM 元件 ----------
-// createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus, landmarks?, onClear?, onClose? })
+// createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus, landmarks?, onClear?, onClose?, zones? })
 //   → { el, open(), close(), toggle(), isOpen(), draw(), destroy(), getView(), setView(v), zoomBy(f), recenter(), stats() }
 export function createBigMap({
   root = null,
@@ -247,6 +265,7 @@ export function createBigMap({
   landmarks = null,
   onClear = null,
   onClose = null,
+  zones = null,
 } = {}) {
   const doc = globalThis.document;
   const win = typeof window !== 'undefined' ? window : null;
@@ -307,6 +326,7 @@ export function createBigMap({
   addLegend('mp-sw-line', '#8d8a82', '巷弄');
   addLegend('mp-sw-dot', '#35643a', '公園');
   addLegend('mp-sw-dot', '#2f6f9e', '水域');
+  if (Array.isArray(zones)) for (const zn of zones) addLegend('mp-sw-sq', zn.color, zn.label || zn.name);
   el.appendChild(legend);
 
   const attr = mk('div', 'mp-attr', ATTRIBUTION);
@@ -324,7 +344,7 @@ export function createBigMap({
   let tap = null; // { x, y, moved, multi }
   let lastPinch = null;
   const _w = { x: 0, z: 0 };
-  const data = { player: null, markers: null, route: null, landmarks: lmList };
+  const data = { player: null, markers: null, route: null, landmarks: lmList, zones: Array.isArray(zones) ? zones : null };
 
   const dpr = () => (win && win.devicePixelRatio) || 1;
 

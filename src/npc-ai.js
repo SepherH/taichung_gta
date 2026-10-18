@@ -27,6 +27,9 @@
 // 被拖出的司機（traffic spawnEjectedDriver 起身後 onAttacked({ attacker, ejected: true })）：還手與否只看性格——
 //   搶車者當下倒地 / 起身中（例如被前一個還手者打倒）也照樣還手（不受「對象已倒地不再加入」限制），
 //   _fight 內面向對方等他起身再打（hp 歸零則照既有散去）；MAX_FIGHTERS 與玩家在車內照舊改逃跑
+// V2 幫派（src/gangs.js）：brain.override = (brain, dt, ctx, it) → boolean（預設 null，既有行為不變）；
+//   非倒地時每次 update 先問 override：回 true → 本次意圖由 override 寫入 it（mode 'gang'、狀態 'gang'），期間收到的刺激（被打 / 目擊 / 槍聲 / 喇叭 / 恐慌）丟棄；
+//   回 false 且原本在 'gang' → 回 wander（呼叫端投影回人行道）。倒地中照舊交給 combat
 
 export const FIGHT_CHANCE = 0.25; // 一般行人還手比例：多數人被打會逃
 export const FIGHT_CHANCE_HEAVY = 0.45; // 壯碩體型（pedestrian_heavy）還手比例較高
@@ -166,6 +169,7 @@ export class NpcBrain {
     this.filmStart = -1; // 站定開始拍的 this.t（< 0 = 還在走開）
     this.filmDur = 0;
     this.intent = { moveX: 0, moveZ: 0, run: false, faceYaw: null, wantPunch: false, jump: false, mode: 'wander' };
+    this.override = null; // V2 幫派 AI（見檔頭）
   }
 
   get films() {
@@ -490,6 +494,20 @@ export class NpcBrain {
       if (this.fleeFrom) this._startFlee(this.fleeFrom);
       else this._enter('wander');
     }
+    if (this.override) {
+      if (this.override(this, dt, ctx, it)) {
+        this.pending.length = 0;
+        this.shotPending = false;
+        this.hornPending = false;
+        this.relay = null;
+        this.fleeFrom = null;
+        if (this.state !== 'gang') this._enter('gang');
+        this.t += dt;
+        it.mode = 'gang';
+        return it;
+      }
+      if (this.state === 'gang') this._enter('wander');
+    } else if (this.state === 'gang') this._enter('wander');
 
     this._handleStimuli(ctx);
     if (this.shotPending) this._onGunshot();

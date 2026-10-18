@@ -33,6 +33,7 @@
 //   state.policeCars（[{ x, z }]，police.cars 的 pos）→ 小地圖紅藍交替閃爍點（每 POLICE_BLINK_SEC 秒換色，超出半徑不畫）
 // Phase 9（超商搶劫）：hud.setRobberyProgress(frac | null, label?) → 畫面中下（互動提示膠囊上方）進度條「搶劫中…」（.rob- 前綴，樣式在 style.css 末段）；
 //   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
+// V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
@@ -760,6 +761,7 @@ export class HUD {
     ctx.scale(k / MAP_SCALE, k / MAP_SCALE);
     ctx.translate(-(state.x - BOUNDS.minX) * MAP_SCALE, -(state.z - BOUNDS.minZ) * MAP_SCALE);
     ctx.drawImage(this.mapCanvas, 0, 0);
+    if (state.gangZones && state.gangZones.length) this._drawGangZones(ctx, state.gangZones, state.x, state.z, R / k, k);
     // 導航路線（世界座標系內畫，跟著小地圖縮放；線寬換算回螢幕 3 px）
     if (state.route && state.route.length > 1) this._drawRoute(ctx, state.route, state.x, state.z, R / k, k);
     ctx.restore();
@@ -807,6 +809,33 @@ export class HUD {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ff5a5a';
     ctx.fillText('N', R, 12);
+  }
+
+  // 幫派地盤：世界座標系內（底圖同一變換）畫半透明色塊與外框；bbox 與視野圓外接方形不相交者略過
+  _drawGangZones(ctx, zones, px, pz, viewR, k) {
+    const ox = BOUNDS.minX;
+    const oz = BOUNDS.minZ;
+    for (const zn of zones) {
+      const b = zn.bbox;
+      if (b && (b.x1 < px - viewR || b.x0 > px + viewR || b.z1 < pz - viewR || b.z0 > pz + viewR)) continue;
+      const p = zn.poly;
+      ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) {
+        const x = (p[i] - ox) * MAP_SCALE;
+        const z = (p[i + 1] - oz) * MAP_SCALE;
+        if (i === 0) ctx.moveTo(x, z);
+        else ctx.lineTo(x, z);
+      }
+      ctx.closePath();
+      ctx.fillStyle = zn.color;
+      ctx.globalAlpha = 0.2;
+      ctx.fill();
+      ctx.globalAlpha = 0.75;
+      ctx.strokeStyle = zn.color;
+      ctx.lineWidth = 2 / k;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
 
   // 路線：只畫與小地圖圓（半徑 viewR 公尺，外擴線寬）相交的段；連續可見段接成一條 path

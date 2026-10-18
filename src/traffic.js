@@ -37,6 +37,10 @@
 //   combat 'hit' / 'knockdown'、NPC 車互撞、bus 的 weapon:fire → ambient.notify({ type: 'incident' })（遠處漫步者拍片）；
 //   玩家衝刺擦撞由 context.player 位移自行偵測；遊戲時刻 / 持槍瞄準需 main.js 呼叫 traffic.ambient.setContext({ hour, aiming, aimDirX, aimDirZ })
 //
+// V2 幫派（src/gangs.js）：建構參數 gangs = createGangs(...).pedHooks（省略 → 既有行為不變）；
+//   市民生成（_spawnPed）後 gangs.onSpawn(c) 回傳同夥數 n → 同一路線、同方向同步速在其身後每 CREW_GAP m 補生成 n 名同夥（gangs.onCrew），成群閒晃；
+//     同夥受市民總數上限（crowdCap）與視野外檢查約束、路線端點不夠排前方、與既有行人間距 ≥ CREW_MIN_GAP，不合格略過；
+//   骨架掛上 / 回池時 gangs.onAttach(p) / onDetach(p)；持球棒 / 手槍的成員右手掛佔位武器（weapons/models.js placeholderBat / placeholderPistol）
 // 接線說明（整合單元 main.js；不改也能跑：crowd 字串 / 無號誌 / 無喇叭的舊行為）：
 // 1. 建構：const lights = createTrafficLights(); lights.buildMeshes(scene)；
 //    new Traffic(scene, { center: spawn, terrain, physics, combat, budget: qualityBudget(tier), lights, bus })（crowd 參數可刪）
@@ -68,6 +72,9 @@ import { PED_KNOCKBACK_DECAY, pathPoint, walkPed, returnPed, pedBlocked, pedMove
 import { yawOf } from './physics/vehicle-body.js';
 import { crowdPlan, createCrowdLod, createStagger, swapPolicy, createCrowdImpostors } from './crowd.js';
 import { createPedAmbient, createSpeechBubbles } from './ped-ambient.js';
+import { placeholderBat, placeholderPistol } from './weapons/models.js';
+import { attachWeapon, detachWeapon } from './character-animation.js';
+import { crewSlotS, crewRoom, CREW_MIN_GAP } from './gangs.js';
 
 const CAR_COLORS = ['#f2f2f2', '#1f1f22', '#8a8f94', '#b01e28', '#2d5fb0', '#d9d2c0', '#3f6b4a'];
 const SHIRTS = ['#d84a4a', '#3a6fd8', '#f2c14e', '#ffffff', '#6a4c93', '#2a9d8f', '#e76f51', '#8d99ae'];
@@ -79,6 +86,7 @@ const CRUISE = { primary: 13, secondary: 11, tertiary: 9 };
 const REALIGN_MAX_DIST = 30; // wrecked 恢復時離原道路超過此距離（m）就改找最近的車流道路
 const PED_VARIANTS = ['pedestrian', 'pedestrian_f', 'pedestrian_heavy']; // 角色 manifest 的三種 variant
 const PED_HEAVY = 'pedestrian_heavy'; // 壯碩體型：大腦還手比例較高
+const CREW_GAP = 1.3; // 幫派同夥沿路線的前後間距（m）
 const PED_HP = 100;
 // 密度管理（距離以 sync 的 center 計；半徑 / 人數 / 骨架池讀 crowdPlan）
 const CROWD_SLACK = 0.1; // radius 內超過目標此比例才回收多出來的人（視野外、near 外、漫步中者）
@@ -255,8 +263,10 @@ export class Traffic {
   // budget：core/quality.js qualityBudget(tier) 物件（cars / peds / pedNear / pedFar / motorbikeShare）；
   // crowd：舊參數 'high' | 'low'（budget 省略時對應 TRAFFIC_BUDGET_FALLBACK 兩列）
   // lights：createTrafficLights() 的回傳（省略 → 不管號誌）；bus：事件匯流排（省略 → 之後可 attachBus）
-  constructor(scene, { center = { x: 0, z: 0 }, terrain, physics, combat = null, crowd = 'high', budget = null, lights = null, bus = null }) {
+  // gangs：src/gangs.js 的 pedHooks（省略 → 不生成幫派成員）
+  constructor(scene, { center = { x: 0, z: 0 }, terrain, physics, combat = null, crowd = 'high', budget = null, lights = null, bus = null, gangs = null }) {
     const { pw, router } = physics;
+    this.gangs = gangs;
     this.pw = pw;
     this.terrain = terrain;
     this.center = center;
@@ -292,6 +302,7 @@ export class Traffic {
     this._seenRecycleAt = -Infinity; // 上次滿額退路回收「視野內」替身的時間（this.clock；SEEN_RECYCLE_COOLDOWN 冷卻）
     this._simAcc = 0; // 本幀物理子步已推進的模擬秒數（_step 累加、sync 取走）
     this._spawnSeq = 0;
+    this._lastCrew = 0; // 最近一次 _spawnPed 實際補生成的幫派同夥數
     this._spotQ = [];
     this._carQ = [];
     this._cand = [];
@@ -416,11 +427,16 @@ export class Traffic {
   }
 
   // 在生成點 spot 放出一個市民；分級為 near / mid 且拿得到骨架就掛骨架，否則顯示替身；回傳市民或 null（替身 slot 用完）
-  _spawnPed(spot) {
+  // leader / k：幫派同夥（同一路線、同方向同步速，排在 leader 身後第 k 位（路線端點不夠時排前方）；不再觸發 gangs.onSpawn）
+  //   同夥受市民總數上限約束、平常（非 initial）只在視野外生成、與既有行人間距 ≥ CREW_MIN_GAP，不合格就略過該名；
+  //   this._lastCrew = 本次實際補生成的同夥數（_spawnRing 計入生成數）
+  _spawnPed(spot, leader = null, k = 0, initial = false) {
+    const crewS = leader ? crewSlotS(leader.s, leader.dir, k, leader.s0, leader.s1, CREW_GAP) : 0;
+    if (leader && !Number.isFinite(crewS)) return null;
     const slot = this.freeSlots.pop();
     if (slot === undefined) return null;
     const rng = this.pedRng;
-    const route = spot.route;
+    const route = leader ? leader.route : spot.route;
     const variant = randPick(rng, PED_VARIANTS);
     const c = {
       id: `ped-${this._spawnSeq++}`,
@@ -430,9 +446,9 @@ export class Traffic {
       off: route.off,
       s0: route.s0,
       s1: route.s1,
-      s: spot.s,
-      dir: rng() < 0.5 ? 1 : -1,
-      speed: 1.1 + rng() * 0.5,
+      s: leader ? crewS : spot.s,
+      dir: leader ? leader.dir : rng() < 0.5 ? 1 : -1,
+      speed: leader ? leader.speed : 1.1 + rng() * 0.5,
       x: 0,
       y: Infinity,
       z: 0,
@@ -450,6 +466,23 @@ export class Traffic {
     };
     c.look = { shirt: randPick(rng, SHIRTS), pants: randPick(rng, PANTS), skin: randPick(rng, SKINS), hair: randPick(rng, HAIRS), height: variantHeight(variant) };
     this._walkPed(c, 0, true);
+    if (leader) {
+      const gap2 = CREW_MIN_GAP * CREW_MIN_GAP;
+      const blocked = this.citizens.some((o) => {
+        const q = o.ped || o;
+        return (q.x - c.x) ** 2 + (q.z - c.z) ** 2 < gap2;
+      });
+      if (blocked || (!initial && !this._hidden(c.x, c.z))) {
+        this.freeSlots.push(slot);
+        return null;
+      }
+    }
+    // 幫派：地盤內的生成點可能換成幫派成員（換配色），回傳要補的同夥數
+    let crew = 0;
+    if (this.gangs) {
+      if (leader) this.gangs.onCrew(c, leader);
+      else crew = this.gangs.onSpawn(c) || 0;
+    }
     this.citizens.push(c);
     const lc = this._lodCenter;
     c.level = this.lod.classify(null, Math.hypot(c.x - lc.x, c.z - lc.z), true, false);
@@ -459,6 +492,10 @@ export class Traffic {
       this._showImpostor(c);
     }
     this.stats.spawned++;
+    let made = 0;
+    const room = crew > 0 ? crewRoom(crew, crowdCap(this.plan.target), this.citizens.length, this.freeSlots.length) : 0;
+    for (let i = 1; i <= room; i++) if (this._spawnPed(null, c, i, initial)) made++;
+    this._lastCrew = made;
     return c;
   }
 
@@ -527,6 +564,10 @@ export class Traffic {
     this.brains.set(a.id, brain);
     p.brain = brain;
     this.ambient.attach(p);
+    if (this.gangs) {
+      this.gangs.onAttach(p);
+      this._gangWeapon(p, c.gang ? c.gang.weapon : null);
+    }
     p.alive = true;
     p.mesh.visible = true;
     this.peds.push(p);
@@ -539,6 +580,10 @@ export class Traffic {
   _releaseSkeleton(c, showImpostor = true) {
     const p = c.ped;
     this.ambient.detach(p);
+    if (this.gangs) {
+      this.gangs.onDetach(p);
+      this._gangWeapon(p, null);
+    }
     for (const k of ROUTE_KEYS) c[k] = p[k];
     this.combat.unregister(p.actor);
     this.brains.delete(p.actor.id);
@@ -561,6 +606,20 @@ export class Traffic {
       this._showImpostor(c);
     } else c.rep = null;
     this._swaps++;
+  }
+
+  // 幫派成員手上的武器外觀：'bat' / 'pistol' 掛佔位模型到右手（每副骨架各自快取一份），其他值拿下
+  _gangWeapon(p, kind) {
+    const want = kind === 'bat' || kind === 'pistol' ? kind : null;
+    if ((p.gangWeaponKind || null) === want) return;
+    if (p.gangWeaponObj) detachWeapon(p.character, p.gangWeaponObj);
+    p.gangWeaponObj = null;
+    p.gangWeaponKind = want;
+    if (!want) return;
+    const cache = p.gangWeapons || (p.gangWeapons = {});
+    const m = cache[want] || (cache[want] = want === 'bat' ? placeholderBat() : placeholderPistol());
+    attachWeapon(p.character, m.object, { gripOffset: m.grip.toArray(), rotation: m.socketQuaternion.toArray() });
+    p.gangWeaponObj = m.object;
   }
 
   // 回收市民（出回收半徑 / 密度過多）：放掉骨架、隱藏替身、釋放 slot
@@ -793,7 +852,10 @@ export class Traffic {
         if (!victim) break;
         this._recyclePed(victim);
       }
-      if (this._spawnPed(spot)) made++;
+      if (this._spawnPed(spot, null, 0, initial)) {
+        made += 1 + this._lastCrew; // 同夥計入生成數（不繞過本次 need / 總數上限）
+        need -= this._lastCrew;
+      }
     }
     return made;
   }

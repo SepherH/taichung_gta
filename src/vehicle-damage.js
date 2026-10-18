@@ -6,6 +6,7 @@
 //   K 讓 1400 kg 轎車 30 km/h 撞牆約 61、60 km/h 約 340（目標區間 60–90 / 250–350）
 // 事件（注入的 bus）：vehicle:damaged { vehicle, health, delta }、vehicle:crash { vehicle, relSpeed }（玩家駕駛且 ≥ 8 m/s，撞行人不算）、
 //   vehicle:disabled { vehicle }
+// addDamage(vehicle, amount)：直接扣耐久（V2 幫派掃射子彈），同樣發 vehicle:damaged、依門檻冒煙 / 熄火
 // 煙：全域共用 Sprite 池（≤ MAX_PARTICLES 顆，canvas 柔邊圓貼圖），從引擎蓋（車頭方向 length × 0.4、高 height × 0.8）冒出，
 //   只替離相機 SMOKE_RADIUS 內的車產生新粒子；池滿時不再產生（不搶舊粒子）
 // 熄火濃煙為深灰（SMOKE_STAGE 3），夜間在深色建築前會看不見：注入 isNight()（回傳 boolean 或 0–1 夜間程度，例 DayNight.night）時，
@@ -218,6 +219,18 @@ export function createVehicleDamage({ bus, THREE, scene, isNight = null } = {}) 
       if (e.health <= 0) return 0;
       const before = e.health;
       e.health = Math.max(0, e.health - extra);
+      const delta = before - e.health;
+      emit('vehicle:damaged', { vehicle, health: e.health, delta });
+      setStage(vehicle, e, stageOf(e.health));
+      return delta;
+    },
+
+    // 直接扣耐久（V2 幫派掃射：子彈打車身，不經碰撞去重）；回傳實扣值（未 attach / 已熄火 / 非正數 → 0）
+    addDamage(vehicle, amount) {
+      const e = entries.get(vehicle);
+      if (!e || !(amount > 0) || e.health <= 0) return 0;
+      const before = e.health;
+      e.health = Math.max(0, e.health - amount);
       const delta = before - e.health;
       emit('vehicle:damaged', { vehicle, health: e.health, delta });
       setStage(vehicle, e, stageOf(e.health));

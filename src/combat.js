@@ -30,6 +30,10 @@
 //     取代直接改 entries；emit 預設 false（不發 'knockdown'，同舊做法）；impulse 省略時不呼叫 body.knockdown
 //   'hit' 的 side：目標面向 ·（攻擊者 → 目標方向）> 0 = 被從背後打 → 'back'，否則 'front'；受擊動畫 anim.trigger('hit', { side })
 //   'knockdown' payload cause 擴充 'bat' | 'bullet'，另帶 weapon
+// V2 幫派（契約 §13 最小擴充）：applyHit 加選項 throughVehicle（預設 false）——目標 untargetable（玩家在車內）時照常回 null；
+//   throughVehicle: true 時改走「車內受擊」：只扣血（hp 歸零照常進 dying）、不硬直 / 不擊倒 / 不播受擊動畫 / 不擊退，
+//   'hit' payload 多 inVehicle: true、knockback null、knockdown false；回傳 { damage, hp, side: 'front', knockdown: false, inVehicle: true }
+//   （玩家車內 hp 歸零的下車倒地由整合層處理：main.js 以 combat.knockdownActor(…, { emit: true }) 接回既有 player:ko 流程）
 // 匯流排事件 ped:dead（行人 hp 歸零、判定死亡的當下發一次；recoverOnKo 的拳 / 棒歸零只倒地不算）：
 //   payload { ped, cause: 'punch'|'bat'|'bullet'|'vehicle', weapon, attacker（擊殺來源：出手者 / 駕駛 actor 或 null）, byPlayer, x, z }
 //   bus 由建構參數注入；省略時用 core/events 全域單例（main.js 用的同一個），給 bus: null 則不發
@@ -333,9 +337,10 @@ export class CombatSystem {
   }
 
   // 通用受擊入口（契約 §13）：回傳 { damage, hp, side, knockdown } 或 null（未註冊 / 倒地中 / 不可受擊 / 同一揮已命中）
-  applyHit({ attacker = null, target, damage, weapon = 'fist', dir = null, impulse = null, point = null, swingId = null } = {}) {
+  applyHit({ attacker = null, target, damage, weapon = 'fist', dir = null, impulse = null, point = null, swingId = null, throughVehicle = false } = {}) {
     const e = target && this.entries.get(target.id);
-    if (!e || (e.state !== 'normal' && e.state !== 'hit') || target.untargetable) return null;
+    if (!e || (e.state !== 'normal' && e.state !== 'hit')) return null;
+    if (target.untargetable && !throughVehicle) return null;
     if (!(damage >= 0) || !KNOCKDOWN_RULES[weapon]) return null;
     if (swingId !== null && attacker) {
       let rec = this.swingHits.get(attacker.id);
@@ -347,6 +352,7 @@ export class CombatSystem {
       if (rec.ids.has(target.id)) return null;
       rec.ids.add(target.id);
     }
+    if (target.untargetable) return this._hitOccupant(e, attacker, damage, weapon, dir);
     const att = attacker ? this.entries.get(attacker.id) || null : null;
     let dx = dir ? dir.x : 0;
     let dz = dir ? dir.z : 0;
@@ -356,6 +362,41 @@ export class CombatSystem {
     }
     const knock = this._hit(att, e, this.now(), attacker, damage, weapon, dx, dz, impulse, point, swingId);
     return { damage, hp: target.hp, side: this._lastSide, knockdown: knock };
+  }
+
+  // 車內受擊（throughVehicle）：只扣血與發 'hit'（inVehicle），不改 combat 狀態、不碰動畫 / 剛體
+  _hitOccupant(e, a, damage, weapon, dir) {
+    const target = e.actor;
+    const cause = WEAPON_CAUSE[weapon];
+    const died = this._damage(e, damage, this.now(), cause);
+    let dx = dir ? dir.x : 0;
+    let dz = dir ? dir.z : 0;
+    const d = Math.hypot(dx, dz);
+    if (d > 1e-6) {
+      dx /= d;
+      dz /= d;
+    }
+    this._lastSide = 'front';
+    this._emit('hit', {
+      attacker: a,
+      target,
+      weapon,
+      damage,
+      hp: target.hp,
+      punchId: null,
+      knockback: null,
+      x: target.pos.x,
+      y: target.pos.y + HIT_POINT_HEIGHT,
+      z: target.pos.z,
+      dirX: dx,
+      dirZ: dz,
+      side: 'front',
+      byPlayer: !!a && a.kind === 'player',
+      knockdown: false,
+      inVehicle: true,
+    });
+    if (died) this._emitPedDead(e, cause, weapon, a);
+    return { damage, hp: target.hp, side: 'front', knockdown: false, inVehicle: true };
   }
 
   // 受擊共用流程：(dx, dz) 為攻擊方向（攻擊者 → 目標，未正規化）；att 為攻擊者的 entry（可為 null）；回傳是否擊倒

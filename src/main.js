@@ -44,6 +44,10 @@
 //   生成點 traffic.spawnSpots、沿 findRoute 路網逃竄、制伏時 traffic.spawnEjectedDriver）+ 任務條 .vig-bar + 小地圖 / 大地圖 kind 'fugitive'；
 //   駕駛警車時互動鍵（E / 手把 B / tb-interact）優先給 vigilanteInteractable；每幀 updateVigilante 接在 updateRobberies 之後
 //   （手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆 / 搶劫中不推進）；任務中攻擊下車逃犯 / 射擊逃犯車不報案、beginRespawn 結束任務（皆經通緝段宣告的 vigHooks）
+// 幫派地盤（V2，§30）：createGangs（gangs.js 純邏輯，Traffic 之前建立、pedHooks 交給 Traffic 換裝成員）+ createGangCars（幫派車）；
+//   每幀 updateGangs 接在 updateVigilante 之後（手機 / BUSTED・WASTED / 噴漆 → frozen）；gang:enter / gang:hostile / gang:driveby → toast；
+//   小地圖 hud state.gangZones、大地圖 zones = GANG_ZONES；開新局 / 回主選單 → gangs.cancel()，被捕 / 送醫 → gangs 訂閱 player:busted / player:wasted 歸零；
+//   車內中彈 hp 歸零 → 強制下車倒地走 WASTED
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -60,7 +64,7 @@ import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles } from './places.js';
 import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, parks, surfaceFootways, surfaceRoads } from './citymodel.js';
 import { loadCharacterModels, getCharacterManifest, createCharacter, disposeCharacter, CharacterAnimator } from './characters/index.js';
-import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
+import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS, SEAT_HIPS_HEIGHT } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
 import { STALL_BASE_KEY, TAKEOUT_BAG_KEY, TAKEOUT_BAG_LOCAL, VALET_SITES, VALET_STAND_KEY, buildValetStandFallback, createSidewalkNear, runStallSpot, stallRow, valetSpots, valetStandBoxes } from './job-props.js';
 import { CombatSystem, pedKnockdownPayload } from './combat.js';
@@ -122,6 +126,7 @@ import { createBeaconPool } from './missions/light-pillar.js';
 import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
+import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -591,7 +596,9 @@ async function init() {
   });
 
   await progress('放出行人與車流…');
-  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat, budget, lights, bus });
+  // V2 幫派地盤（src/gangs.js）：須在 Traffic 之前建立，開場補滿的市民就會依地盤換成幫派成員（pedHooks）
+  const gangs = createGangs({ bus, rng: Math.random });
+  const traffic = new Traffic(scene, { center: spawn, terrain, physics, combat, budget, lights, bus, gangs: gangs.pedHooks });
 
   await progress('準備角色與鏡頭…');
   const player = new Player(scene, spawn);
@@ -941,6 +948,7 @@ async function init() {
   const bigMap = createBigMap({
     root: document.body,
     bus,
+    zones: GANG_ZONES,
     landmarks: landmarkPts,
     getPlayer: () => {
       mapPlayer.x = focus.x;
@@ -1826,6 +1834,58 @@ async function init() {
   };
   const ambientCtx = { hour: 12, aiming: false, aimDirX: 0, aimDirZ: 1 };
 
+  // ---------- V2 幫派地盤（src/gangs.js，純邏輯）+ 幫派車（createGangCars：一般車型換幫派車色、前座兩名幫派配色乘客）----------
+  // 每幀 updateGangs（updateVigilante 之後）；暫停 / 全螢幕面板（updateGame 不跑）、手機、BUSTED・WASTED、噴漆中 → frozen（成員停手、幫派車煞停）
+  // 開新局 / 回主選單 → gangs.cancel()；被捕 / 送醫由 gangs 自己訂閱 player:busted / player:wasted 歸零（finishRespawn 發；畫面期間 frozen）
+  // 生成點避開玩家視線（同警車 canSee）；被搶 / 正上車的幫派車交還一般車輛併入 adopted（玩家離開後遠了照一般搶來車回收），熄火殘骸由 cleanupVehicles 照報廢車回收
+  const gangCars = createGangCars({
+    vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng: Math.random, seatHips: SEAT_HIPS_HEIGHT,
+    characters: { createCharacter, disposeCharacter, CharacterAnimator, clips: getCharacterManifest()?.clips || [] },
+    canSee: (ax, az, bx, bz) => policeAdapters.canSee(ax, az, bx, bz),
+    isKept: (v) => v === state.vehicle || v === cj.vehicle,
+    onKeep: (v) => adopted.add(v),
+  });
+  const gangPlayer = { x: 0, z: 0, actor: player.actor, inVehicle: false, aiming: false, aimDirX: 0, aimDirZ: 1, disabled: false };
+  const gangCtx = {
+    frozen: false,
+    combat,
+    cars: gangCars,
+    player: gangPlayer,
+    damageVehicle: (n) => (state.mode === 'drive' && state.vehicle ? dmg.addDamage(state.vehicle, n) : 0),
+  };
+  // 車內中彈 hp 歸零：下一次 updateGangs 強制下車倒地（knockdownActor emit → 既有 combat 'knockdown' → player:ko → WASTED）
+  let gangCarKo = false;
+  combat.on('hit', (e) => {
+    if (e.inVehicle && e.target === player.actor && player.actor.hp <= 0) gangCarKo = true;
+  });
+  const updateGangs = (dt, skip) => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const p = playerPos();
+    gangPlayer.x = p.x;
+    gangPlayer.z = p.z;
+    gangPlayer.inVehicle = !!v;
+    gangPlayer.aiming = !v && aim.aiming;
+    gangPlayer.aimDirX = aim.dir.x;
+    gangPlayer.aimDirZ = aim.dir.z;
+    gangPlayer.disabled = state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor);
+    gangCtx.frozen = skip || !!state.respawn || !!state.spraying;
+    gangs.update(dt, gangCtx);
+    if (!gangCarKo) return;
+    gangCarKo = false;
+    if (state.mode !== 'drive' || state.respawn || state.koTimer > 0 || player.actor.hp > 0) return;
+    exitVehicle(true);
+    combat.knockdownActor(player.actor, { cause: 'bullet', emit: true });
+  };
+  bus.on('gang:enter', (e) => {
+    if (state.started && e) hud.toast(`⚠ 進入${e.name}地盤`, 3);
+  });
+  bus.on('gang:hostile', (e) => {
+    if (state.started && e && e.hostile) hud.toast(`${e.name}盯上你了！`, 3);
+  });
+  bus.on('gang:driveby', (e) => {
+    if (state.started && e && e.phase === 'start') hud.toast(`${e.name}開車來找你了！`, 3);
+  });
+
   // 車流停車判斷用：玩家（或玩家的車）與路邊車輛
   const blockers = [];
   const collectBlockers = () => {
@@ -2149,6 +2209,7 @@ async function init() {
     if (!phoneOpen) updateSprayShops(dt);
     updateRobberies(dt, phoneOpen);
     updateVigilante(dt, phoneOpen);
+    updateGangs(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2269,6 +2330,7 @@ async function init() {
       route: nav.route(),
       searchCircle: wanted.searchCircle,
       policeCars: collectPoliceDots(),
+      gangZones: GANG_ZONES,
       weatherIcon: weather.getState().icon,
       radio: radio.getState(),
     });
@@ -2492,6 +2554,7 @@ async function init() {
     resetExtraStats(save.stats);
     closePanels();
     cancelVigilante();
+    gangs.cancel();
     cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
@@ -2559,6 +2622,7 @@ async function init() {
     state.mode = 'walk';
     player.locked = false;
     cancelVigilante();
+    gangs.cancel();
     cancelRobbery();
     cancelSpray();
     cancelRespawn();
@@ -2633,7 +2697,7 @@ async function init() {
       physics: { RAPIER, world: pw, router, colliders: colliderStats, character, occluder },
       bus, settings, saveStore: store, autosave, menu, mapView, lights, damage: dmg, carjack: cj,
       // Phase 4：武器 / 音效 / 流血 / 委託 / 導航 / 大地圖 / 打卡 / 小吃（audio.stats()、blood.stats() 看音源數與血跡數）
-      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, stalls, valetSites, valetCars, phone, phoneLink,
+      weapons, audio, blood, missions, nav, bigMap, checkins, food, pickups, whud, truckMesh, stall, stalls, valetSites, valetCars, phone, phoneLink, gangs, gangCars,
       // Phase 5：天氣 / 環境 / 電台（weather.setWeather('rain', { instant: true })、radio.getState()）
       weather, env, radio,
       // Phase 7：通緝 / 警力（wanted.setStars(3)、police.cars / officers、policeAdapters.stats()）

@@ -910,6 +910,38 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ### 29.3 回歸
 - `node tools/test/p11-vigilante.mjs`（純邏輯 + createFugitiveWorld 替身）、`node tools/test/integration-p11.mjs`（main.js / hud / 標記 / CSS / 文件靜態檢查）
 
+## 30. V2 幫派地盤（罪惡之都；接線點在 `src/main.js`，介面以 `src/gangs.js` 檔頭為準）
+
+### 30.1 模組介面（`src/gangs.js`，純邏輯，只 import `geom.js`）
+- `GANGS`：三個虛構幫派 `{ id, name, area, color, carColor, carType, outfit: { shirts[], pants, shoes, hair? }, territory（扁平 [x, z, …]）, bbox }`——`nightmarket` 夜市角頭（紅黑花襯衫；新光三越．大遠百商圈，即夜市外送取餐點一帶，OSM 範圍內無逢甲 / 大墩夜市）、`qiuhonggu` 秋紅谷飆車族（螢光綠夾克；秋紅谷廣場周邊）、`suits` 七期西裝幫（黑西裝；臺灣大道市政大樓 / 市議會 / 捷運市政府站商辦區）；地盤互不重疊、全在 `BOUNDS` 內；`GANG_ZONES` = 地圖用 `{ id, name, label, color, poly, bbox }`
+- `createGangs({ bus, rng?, config? })`（另訂閱 `player:busted` / `player:wasted` → `cancel()`）→ `{ update(dt, ctx), territoryAt(x, z) → GANGS 一筆 | null, hostility(id?) → 0–100（省略 = 最大值）, cancel(), dispose(), pedHooks, zones, gangs, members, config, isHostile(id), car(id), territory, stats() }`
+  - `ctx = { frozen, combat, cars?（createGangCars）, damageVehicle?(n), player: { x, z, actor, inVehicle, aiming, aimDirX, aimDirZ, disabled } }`；`frozen` 時成員原地面向目標不出手、幫派車煞停、計時不前進
+  - `pedHooks`（給 `new Traffic(…, { gangs })`）：`onSpawn(c)` → 同夥數（地盤內生成點以 `leaderChance(memberShare 0.3, 2, 4)` 成為帶頭者，換幫派配色 `c.gang` / `c.look`）、`onCrew(c, leader)`、`onAttach(p)`（設 `p.brain.override`）、`onDetach(p)`
+  - 敵意（每幫 0–100）：地盤內步行離該幫成員 6 m 內累計 3 s +60、步行持槍瞄準成員（±10°、30 m）+70、攻擊成員（`combat:hit` / `ped:knockdown` / `ped:dead` 且 `byPlayer`）+100；≥ 50 圍攻（45 m 內 ≤ 8 人；近戰衝上來出拳 / 揮棒、持槍者保持 6–15 m 射擊）、≥ 85 派幫派車；地盤內最後挑釁 10 s 後 −2/s、離開地盤 −6/s，< 25 收手
+  - 開車掃射：幫派車追玩家，20 m 內乘客 5 連發 / 輪（間隔 0.35 s、換輪 2.5 s），最長 45 s，結束冷卻 40 s；命中走 `combat.applyHit`（玩家在車內 `throughVehicle: true`）+ `damageVehicle(25)`
+  - 幫派互毆：每 20 s 以 0.35 機率讓「入侵的敵對 crew」（`rivalChance` 0.1）與 25 m 內在地成員互毆 12 s
+  - 開槍一律 emit `weapon:fire { weapon: 'pistol', byPlayer: false, police: false, gang, shooter, hit, miss, ex, ey, ez, … }`（行人聽到槍聲、音效；通緝只認 byPlayer）
+- `createGangCars({ vehicles, dmg?, traffic, findRoute?, characters?, seatHips?, rng?, canSee?, isKept?, onKeep? })` → `{ spawn(def, px, pz), drive(car, x, z, hold?), brake(car), brakeAll(), alive(car), despawn(car, now?), muzzle(car), update(dt, px, pz), cancel(), count() }`：`vehicles.adopt({ type: def.carType, color: def.carColor })` + `dmg.attach`，前座兩名幫派配色角色掛在車身網格下（drive 坐姿）；生成點跳過 10 m 內有車（VehicleManager / `traffic.cars`）與 `canSee` 為真的點，全不合格回 null；`despawn` 時玩家 60 m 內先開走（90 m 外或 20 s 後回收）；被搶 / `isKept(v)` → `v.ai = false` + `onKeep(v)`，熄火 → `v.ai = false`、殘骸留給整合層照報廢車回收（兩者都不移除車體）；近距離（25 m）追玩家側邊 5 m 點並依接近速度煞車，`hold`（玩家步行 10 m）內煞停；`brakeAll()` = frozen 時含 leaving 全部煞停
+- 事件（bus）：`gang:enter { gang, name, area }` / `gang:leave { gang, name }`、`gang:hostile { gang, name, hostile, level, cause: 'linger'|'aim'|'attack'|'calm' }`、`gang:driveby { gang, name, phase: 'start'|'end', reason? }`、`gang:war { a, b, x, z }`
+
+### 30.2 跨檔最小擴充
+- `npc-ai.js`：`NpcBrain.override = (brain, dt, ctx, it) → boolean`（預設 null；回 true 時意圖由 override 決定、mode / state `'gang'`、刺激丟棄）
+- `combat.js`：`applyHit({ …, throughVehicle })`——目標 `untargetable`（玩家在車內）時只扣血、發 `hit { inVehicle: true, knockback: null }`，不硬直 / 不擊倒（NPC 用槍沿用既有 applyHit 'pistol'，不新增武器流程）
+- `vehicle-damage.js`：`addDamage(vehicle, amount)`（子彈直接扣耐久，發 `vehicle:damaged`、冒煙 / 熄火門檻照舊）
+- `traffic.js`：建構參數 `gangs`（pedHooks）；同夥在帶頭者身後同一路線每 1.3 m 生成、同方向同步速；持棒 / 槍成員右手掛 `placeholderBat` / `placeholderPistol`
+- `hud.js`：`state.gangZones` → 小地圖半透明地盤色塊；`map/big-map.js`：`createBigMap({ zones })` → 色塊 + 圖例「〇〇地盤」三列
+
+### 30.3 接線（main.js）
+- `gangs = createGangs({ bus })` 在 `new Traffic` 之前（`gangs: gangs.pedHooks`）；`gangCars = createGangCars(…)` 在車流 / 行人外部狀態段
+- 每幀 `updateGangs(dt, phoneOpen)` 接在 `updateVigilante` 之後（`updateWanted` → `updateSprayShops` 相鄰順序不變）：`frozen = 手機 || state.respawn || state.spraying`（暫停 / 全螢幕面板時 updateGame 不跑）；車內中彈 hp 歸零 → 強制下車 + `combat.knockdownActor(player.actor, { cause: 'bullet', emit: true })` 走既有 `player:ko` → WASTED
+- `gang:enter` → toast「⚠ 進入〇〇地盤」、`gang:hostile`（hostile）→「〇〇盯上你了！」、`gang:driveby` start →「〇〇開車來找你了！」
+- `startGame`、`quitToMenu` → `gangs.cancel()`（敵意歸零、收手、幫派車回收）；被捕 / 送醫：gangs 訂閱 `player:busted` / `player:wasted`（`finishRespawn` 發）自動 cancel，BUSTED・WASTED 畫面期間 `frozen`
+- 幫派段位置：`updateTrafficContext` / `ambientCtx` 之後（不落在 integration-p7 / p9 / p11 抽段範圍內）
+- 打幫派照常算犯行（既有 `combat:hit` / `ped:dead` byPlayer 規則不變）；除錯 `window.__game.gangs` / `gangCars`（僅 dev）
+
+### 30.4 回歸
+- `node tools/test/v2-gangs.mjs`（純邏輯 + 替身；含幀率無關、穩態無 GC、每幀成本 < 0.5 ms）
+
 ---
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
@@ -960,3 +992,9 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - weapons 的 `playAnim` → `layer.play(clip)`（回傳秒數或 false）；姿勢 `layer.setPose('bat_hold'|'pistol_hold'|'pistol_aim'|'none')`；`layer.on('hitWindow'|'fire'|'swap')`；開槍 `layer.addRecoil(settings.get('recoil'))`；`attachWeapon(character, weaponObj, weaponMount(entry))`（weaponMount 讀 FX1 後 models.js 的 socketQuaternion / grip）
 - `blood = createBloodFx({ scene, settings, heightAt })`；`combat:hit` → `blood.onHit(e)`、`ped:knockdown` → `blood.onKnockdown(e)`；每幀 `blood.update(dt, camera)`
 - 上半身層權重約 92%（非硬遮罩），腿不受影響
+
+## 霓虹夜色（V1，src/neon.js）
+- `buildBuildings(scene, opts)`（src/buildings.js）回傳值新增 `neon`：`buildNeon` 的結果（單一合併 mesh `neon-signs` + 店名貼圖集，固定種子擺放）；`dispose()` 釋放幾何、材質、貼圖與濕亮路面 envMap
+- 每幀由 `environment.update` 呼叫 `updateNeon`（重用參數物件，不配置）：日夜亮度走 `registerNight`、閃爍為 shader uniform；quality tier 經 `weather.getTier()` 帶入，low 關閉閃爍與濕亮路面
+- 濕亮路面：材質以 `registerWetSurface(material)` 登記（src/world.js 車道、src/street.js 路口），濕度 = max(夜間 × 0.85, 雨量)；envMap 只在 tier 切換時增減（重編譯一次）
+- 色調：黃昏洋紅 / 橘紫、夜晚深藍紫（src/daynight.js SKY_KEYS），白天數值與 V1 前相同（tools/test/v1-neon.mjs 逐點比對）
