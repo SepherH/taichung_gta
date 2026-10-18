@@ -40,6 +40,10 @@
 // 超商搶劫（Phase 9，§28）：createRobberies（wanted/robbery.js 純邏輯）+ 店員（pedestrian 角色綠制服、combat actor clerkOf = 店 id、行人膠囊剛體）
 //   + 門口小光柱（只在可搶時）+ 小地圖 / 大地圖 kind 'store'；每幀 updateRobberies 接在 updateSprayShops 之後（手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆中不推進），
 //   aiming / aimAt 取 fillAim 的 aim（aim.aiming = 按住瞄準且持手槍；aimAt = 鏡頭中心射線離店員胸口 ≤ 1.2 m）
+// 警車任務（Phase 11，§29 Vigilante）：createVigilante（missions/vigilante.js 純邏輯）+ createFugitiveWorld（逃犯車 = vehicles.adopt + dmg.attach、
+//   生成點 traffic.spawnSpots、沿 findRoute 路網逃竄、制伏時 traffic.spawnEjectedDriver）+ 任務條 .vig-bar + 小地圖 / 大地圖 kind 'fugitive'；
+//   駕駛警車時互動鍵（E / 手把 B / tb-interact）優先給 vigilanteInteractable；每幀 updateVigilante 接在 updateRobberies 之後
+//   （手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆 / 搶劫中不推進）；任務中攻擊下車逃犯 / 射擊逃犯車不報案、beginRespawn 結束任務（皆經通緝段宣告的 vigHooks）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -117,6 +121,7 @@ import { createSprayShops } from './wanted/spray.js';
 import { createBeaconPool } from './missions/light-pillar.js';
 import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
+import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -132,6 +137,8 @@ const CLERK_SPAWN_DIST = 120; // 超商店員（Phase 9）：玩家距櫃檯此�
 const CLERK_DESPAWN_DIST = 150; // 超過此距離回收店員（m；與生成距離留遲滯）
 const CLERK_COLORS = { shirt: '#2E7D32', pants: '#1B3A1F' }; // 店員綠色系制服（pedestrian 角色執行期換色，不改模型檔）
 const CLERK_HP = 100;
+const VIG_URGENT_SEC = 30; // 警車任務條剩此秒數內轉紅（.vig-urgent）
+const VIG_PRIORITY = 4; // 警車任務互動優先序（高於委託 3：駕駛警車時 E 優先開始警車任務）
 const STORE_BEACON = { height: 7, radius: 0.7, sink: 1 }; // 超商門口小光柱（createBeaconPool 選項；顏色 BEACON_COLORS.store 綠 #43a047）
 const AUTOSAVE_SEC = 15; // 自動存檔間隔（s）
 const MAX_STEP_DIST = 30; // 單幀位移超過此值（傳送 / 重生）不計入里程（m）
@@ -870,6 +877,7 @@ async function init() {
     spawnValetCar,
     releaseValetCar,
     healthOf: (v) => dmg.healthOf(v),
+    extraBusy: () => vigHooks.active(), // 警車任務進行中：委託 / 外送 / 垃圾車 / 打工都不開始（vigHooks 宣告在後，閉包取用）
   });
   const graph = buildRoadGraph(surfaceRoads);
   // 垃圾車車體：manifest garbage_truck 經 createVehicleModel 建立的純視覺模型（不建剛體、不進 VehicleManager / traffic → 不可上車 / 劫車、不進車流）；
@@ -925,7 +933,8 @@ async function init() {
     pushAll(out, pickups.markers());
     pushAll(out, sprayMarkers);
     pushAll(out, robberyMarkers);
-    if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven) out.push(c.pos);
+    pushAll(out, fugitiveMarkers());
+    if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
   const mapPlayer = { x: 0, z: 0, yaw: 0 };
@@ -949,7 +958,7 @@ async function init() {
   // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
   const interCands = [null, null, null, null];
   const nearestInteractable = (pos, walking) => {
-    interCands[0] = missions.nearest(pos);
+    interCands[0] = vigilante.active ? null : missions.nearest(pos); // 警車任務進行中不接委託（互斥）
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1254,6 +1263,8 @@ async function init() {
     if (e && e.stars > 0 && !(e.prev > 0) && settings.get('showHints')) wantedUI.showHint('wanted', WANTED_HINT_TEXT);
   });
   bus.on('wanted:state', () => syncStars());
+  // 警車任務（Phase 11）掛鉤：犯行豁免（下車逃犯 / 子彈落點在逃犯車旁）與被捕 / 送醫結束任務；預設無作用，警車任務段建立 vigilante 後覆寫
+  const vigHooks = { fugitiveActor: () => false, fugitiveShot: () => false, end: () => {}, active: () => false };
 
   // ---------- 噴漆廠（Phase 8）：src/wanted/spray.js（純邏輯）+ 入口光柱 + 小地圖 / 大地圖標記 ----------
   const sprayShops = createSprayShops({ bus, wanted, police, shops: SPRAY_SHOPS });
@@ -1274,7 +1285,8 @@ async function init() {
   let lastPoliceSeen = false; // updateWanted 本幀算出的 police.update seen，供噴漆廠「被看見」判定共用（不重算）
   const updateSprayShops = (dt) => {
     sprayBeacons.update(dt);
-    if (state.mode === 'drive' && state.vehicle && !state.respawn) {
+    // 警車任務進行中：視同未駕駛（不開始噴漆，互斥）
+    if (state.mode === 'drive' && state.vehicle && !state.respawn && !vigHooks.active()) {
       const v = state.vehicle;
       sprayVehicle.x = v.pos.x;
       sprayVehicle.z = v.pos.z;
@@ -1341,19 +1353,21 @@ async function init() {
   };
   bus.on('combat:hit', (e) => {
     if (!e || !e.byPlayer || !e.target || e.target === player.actor || e.weapon === 'vehicle') return; // 車撞走 ped:knockdown / ped:dead
+    if (vigHooks.fugitiveActor(e.target)) return; // 警車任務：攻擊下車的逃犯不算犯行
     reportCrime(isOfficer(e.target) ? CRIMES.assaultPolice : CRIMES.assault, e.x, e.z);
   });
   bus.on('ped:dead', (e) => {
-    if (!e || !e.byPlayer) return;
+    if (!e || !e.byPlayer || vigHooks.fugitiveActor(e.ped)) return;
     const crime = isOfficer(e.ped) ? CRIMES.killPolice : e.cause === 'vehicle' ? CRIMES.vehicleKill : CRIMES.kill;
     reportCrime(crime, e.x, e.z);
   });
   bus.on('ped:knockdown', (e) => {
-    if (e && e.byPlayer && e.cause === 'vehicle') reportCrime(CRIMES.vehicleHit, e.x, e.z);
+    if (e && e.byPlayer && e.cause === 'vehicle' && !vigHooks.fugitiveActor(e.ped)) reportCrime(CRIMES.vehicleHit, e.x, e.z);
   });
   bus.on('weapon:fire', (e) => {
     // 警員開槍（adapters：police true / byPlayer false）不算；玩家開槍要 CRIME_GUNFIRE_RANGE 內有行人或警員
     if (!e || !e.byPlayer || e.police) return;
+    if (vigHooks.fugitiveShot(e.ex, e.ez)) return; // 警車任務：射擊逃犯車（落點在逃犯車附近）不算 gunfire
     if (peopleNear(e.x, e.z, CRIME_GUNFIRE_RANGE, true)) reportCrime(CRIMES.gunfire, e.x, e.z);
   });
   // 搶警車：每台只算一次 policeVehicle；路邊上車開走警車（警車不走 carjack 流程）比照搶車另報 carjack
@@ -1455,6 +1469,7 @@ async function init() {
       shown = wantedUI.showWasted({ fee: koFee });
     }
     missions.failActive(kind);
+    vigHooks.end(kind);
     // 只有畫面正常結束（done / skipped）才重生；preempted / disposed 不重複傳送
     Promise.resolve(shown).then((r) => {
       if (r && (r.reason === 'done' || r.reason === 'skipped')) finishRespawn(kind, seq, x, z, paid);
@@ -1563,6 +1578,72 @@ async function init() {
         vehicles.remove(v);
       }
     }
+  };
+
+  // ---------- 警車任務（Phase 11，§29）：src/missions/vigilante.js（純邏輯）+ 逃犯車世界介面 + 任務條 + 小地圖 / 大地圖紅點 ----------
+  // 犯行豁免 / 被捕送醫結束經 vigHooks（宣告在通緝段，犯行監聽與 beginRespawn 只認掛鉤）
+  const vigilante = createVigilante({ bus, wanted, rng: Math.random });
+  // 回收時保留：玩家正駕駛 / 正上車 / 搶車中的逃犯車；保留下來的車併入 adopted（玩家離開後遠了照一般搶來車回收）
+  const fugitiveWorld = createFugitiveWorld({
+    vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng: Math.random, attacker: () => player.actor,
+    isKept: (v) => v === state.vehicle || v === cj.vehicle,
+    onKeep: (v) => adopted.add(v),
+  });
+  const vigBar = createVigilanteBar({ root: document.body });
+  vigHooks.fugitiveActor = (a) => vigilante.isFugitiveActor(a);
+  vigHooks.fugitiveShot = (x, z) => vigilante.shotAtFugitive(x, z);
+  vigHooks.end = (kind) => {
+    vigilante.end(kind);
+    vigBar.set(null); // BUSTED / WASTED：updateVigilante 在 respawn 期間早退，任務條在此收起
+  };
+  vigHooks.active = () => vigilante.active;
+  const vigMarkers = [];
+  const fugitiveMarkers = () => {
+    vigMarkers.length = 0;
+    return vigilante.markers(vigMarkers);
+  };
+  // 警車：警力生成的警車（policeAdapters，含被玩家開走的）或路邊停放的 police 車型
+  const isPoliceCar = (v) => !!v && (v.type === 'police' || policeAdapters.isPoliceVehicle(v));
+  // 其他任務進行中（委託 / 外送 / 追垃圾車 / 打工 / 搶劫 / 噴漆）→ 不可開始警車任務
+  const otherMissionBusy = () => !!(missions.active() || missions.eventActive() || missions.jobActive() || robberies.active || state.spraying);
+  const vigCtx = {
+    player: { x: 0, z: 0 },
+    inPolice: false,
+    policeWrecked: false,
+    busy: false,
+    world: fugitiveWorld,
+    earn: (n) => economy.add(n, 'vigilante'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    showHint: (id, text) => !!settings.get('showHints') && wantedUI.showHint(id, text),
+  };
+  const startVigilante = () => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    if (vigilante.canStart({ inPolice: isPoliceCar(v), busy: otherMissionBusy() })) vigilante.start();
+  };
+  const vigInter = { text: VIG_PROMPT, priority: VIG_PRIORITY, dist: 0, act: startVigilante };
+  // 駕駛警車且可開始 → 互動鍵優先給警車任務（回 null 時照常仲裁委託 / 打卡）
+  const vigilanteInteractable = (v) => (isPoliceCar(v) && vigilante.canStart({ inPolice: true, busy: otherMissionBusy() }) ? vigInter : null);
+  // 暫停 / 全螢幕面板（updateGame 不跑）、手機開著、BUSTED・WASTED、噴漆中、搶劫中：不推進（任務條維持上一幀）、逃犯車煞停（物理照跑）
+  const updateVigilante = (dt, skip) => {
+    if (skip || !!state.respawn || !!state.spraying || !!robberies.active) {
+      fugitiveWorld.brakeAll();
+      return;
+    }
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const p = playerPos();
+    vigCtx.player.x = p.x;
+    vigCtx.player.z = p.z;
+    vigCtx.inPolice = isPoliceCar(v);
+    vigCtx.policeWrecked = vigCtx.inPolice && dmg.healthOf(v) === 0;
+    vigCtx.busy = otherMissionBusy();
+    fugitiveWorld.update(dt);
+    const r = vigilante.update(dt, vigCtx);
+    vigBar.set(r.text, r.phase === 'running' && r.timeLeft <= VIG_URGENT_SEC);
+  };
+  // 回主選單 / 開局：無聲結束（逃犯車回收、任務條收起）；須在 cancelRespawn 之前（其 wanted.clear 與任務無關，但保持與搶劫同序）
+  const cancelVigilante = () => {
+    vigilante.cancel();
+    vigBar.set(null);
   };
 
   // ---------- 超商搶劫（Phase 9，§28）：src/wanted/robbery.js（純邏輯）+ 店員 + 門口小光柱 + 小地圖 / 大地圖標記 ----------
@@ -1709,7 +1790,7 @@ async function init() {
     robCtx.player.x = p.x;
     robCtx.player.z = p.z;
     robCtx.player.yaw = player.yaw;
-    robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor)); // 倒地 / KO / 送醫中不能搶
+    robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor) || vigilante.active); // 倒地 / KO / 送醫中 / 警車任務中不能搶
     robCtx.aiming = robCtx.onFoot && aim.aiming;
     setRobBar(robberies.update(dt, robCtx));
   };
@@ -2067,6 +2148,7 @@ async function init() {
     updateWanted(dt, phoneOpen);
     if (!phoneOpen) updateSprayShops(dt);
     updateRobberies(dt, phoneOpen);
+    updateVigilante(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2109,7 +2191,7 @@ async function init() {
       if (flipped) vehiclePrompt = '翻車了！按 F 扶起';
       else if (dmg.healthOf(v) === 0) vehiclePrompt = '車子熄火了，按 F 下車';
       // 駕駛中也可接委託 / 打卡（E）；小吃與彈藥只在步行
-      inter = nearestInteractable(v.pos, false);
+      inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
@@ -2409,6 +2491,7 @@ async function init() {
     economy = createEconomy({ bus, initial: save });
     resetExtraStats(save.stats);
     closePanels();
+    cancelVigilante();
     cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
@@ -2475,6 +2558,7 @@ async function init() {
     if (state.mode === 'drive') exitVehicle(true);
     state.mode = 'walk';
     player.locked = false;
+    cancelVigilante();
     cancelRobbery();
     cancelSpray();
     cancelRespawn();
@@ -2558,6 +2642,8 @@ async function init() {
       sprayShops,
       // Phase 9：超商搶劫（robberies.stores 看每間店 state / cooldown；clerks = 目前生成的店員）
       robberies, clerks,
+      // Phase 11：警車任務（vigilante.fugitives 看逃犯車狀態；fugitiveWorld.cars = 受控逃犯車）
+      vigilante, fugitiveWorld, vigBar,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

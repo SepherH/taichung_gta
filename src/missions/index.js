@@ -138,6 +138,8 @@ export function createMissions({
   releaseValetCar = null,
   healthOf = null,
   jobs: jobDefs = JOB_DEFS,
+  // 外部任務（警車任務等，不歸本模組管）進行中 → 併入互斥鎖：委託 / 外送 / 垃圾車 / 打工都不開始
+  extraBusy = null,
 } = {}) {
   const emit = (name, payload) => {
     if (bus && typeof bus.emit === 'function') bus.emit(name, payload);
@@ -154,13 +156,20 @@ export function createMissions({
   const evBeacons = new Map(); // 'start:<id>' / 'dest:<id>' → beacon
   let evWasActive = false;
   const evActive = () => !!(timed && timed.active());
+  const extBusy = () => {
+    try {
+      return typeof extraBusy === 'function' && !!extraBusy();
+    } catch {
+      return false;
+    }
+  };
   const truckBus = { emit: (name, payload) => {
     onTruckEvent(name, payload);
     emit(name, payload);
   } };
   const truck = garbageTruck === false || typeof routeFor !== 'function' ? null : createGarbageTruck({
     def: garbageTruck && typeof garbageTruck === 'object' ? garbageTruck : GARBAGE_TRUCK_EVENT,
-    getGameHour, routeFor, isBusy: () => !!run || evActive() || jobsEngaged(), addMoney, bus: truckBus, now, rng, interactLabel,
+    getGameHour, routeFor, isBusy: () => !!run || evActive() || jobsEngaged() || extBusy(), addMoney, bus: truckBus, now, rng, interactLabel,
   });
   const truckEngaged = () => !!(truck && truck.isEngaged());
   const jobBus = {
@@ -172,10 +181,11 @@ export function createMissions({
   };
   const jobs = jobDefs === false ? null : createJobs({
     bus: jobBus, now, rng, addMoney, getGameHour, spots: jobSpots, spawnValetCar, releaseValetCar, healthOf, routeLength,
-    isBusy: () => !!run || evActive() || truckEngaged(), defs: Array.isArray(jobDefs) ? jobDefs : JOB_DEFS, isTouch, interactLabel,
+    isBusy: () => !!run || evActive() || truckEngaged() || extBusy(), defs: Array.isArray(jobDefs) ? jobDefs : JOB_DEFS, isTouch, interactLabel,
   });
   const jobsEngaged = () => !!(jobs && jobs.isEngaged());
   // 互斥鎖（§23.4）：同時只能一個進行中
+  // 外部任務（extBusy）不併入：isBusy 也決定光柱顯示，外部任務結束時本模組不會收到通知、光柱會一直藏著；只在開始點（接委託 / 垃圾車 / 打工）另擋
   const isBusy = () => !!run || evActive() || truckEngaged() || jobsEngaged();
 
   let catalog = [];
@@ -295,7 +305,7 @@ export function createMissions({
   }
 
   function openCard(off) {
-    if (disposed || isBusy() || ui.isOpen() || offers.indexOf(off) < 0) return;
+    if (disposed || isBusy() || extBusy() || ui.isOpen() || offers.indexOf(off) < 0) return;
     pending = off.m;
     if (headless) {
       accept();

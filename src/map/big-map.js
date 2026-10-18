@@ -30,6 +30,7 @@ export const MARKER_LABELS = {
   'job-dest': '打工目的地',
   'job-car': '泊車指定車',
   'spray-shop': '噴漆廠',
+  fugitive: '逃犯車', // Phase 11：警車任務（src/missions/vigilante.js）
   store: '超商', // Phase 9：超商搶劫（src/wanted/robbery.js）
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點

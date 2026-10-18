@@ -53,7 +53,7 @@ const GROUPS = [
   ['每幀：updateRobberies 緊接 updateSprayShops（手機開著傳 skip）', [/if \(!phoneOpen\) updateSprayShops\(dt\);\s*\n\s*updateRobberies\(dt, phoneOpen\);/]],
   ['凍結條件：手機 / BUSTED・WASTED / 噴漆中', ['const frozen = skip || !!state.respawn || !!state.spraying;']],
   ['ctx：aiming / aimAt 取 fillAim 的 aim、earn = economy.add、步行判定', [
-    "robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor));",
+    "robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor) || vigilante.active);",
     'robCtx.aiming = robCtx.onFoot && aim.aiming;',
     'aimAt: (x, z) => aimNear(aim.origin, aim.dir, x, heightAt(x, z) + AIM_HEIGHT, z)',
     "earn: (n) => economy.add(n, 'robbery')",
@@ -173,6 +173,7 @@ function makeWorld() {
     PROGRESS_LABEL,
     playerPos: () => p,
     player: { yaw: 0, actor: { id: 'player' } },
+    vigilante: { active: false },
   };
   const names = Object.keys(deps);
   const body = `${consts}\n${slice}\nreturn { robberies, clerks, updateRobberies, cancelRobbery, storeBeaconOf };`;
@@ -229,6 +230,18 @@ const run = (w, sec, dt = 1 / 30, skip = false) => {
   w.updateRobberies(1 / 30, false);
   w.updateRobberies(1 / 30, false); // 光柱依上一幀狀態同步（晚 1 幀收起）
   check('再次瞄準 → 搶劫中光柱收起、店員保留', w.robberies.active === s.id && !w.storeBeaconOf.has(s.id) && w.clerks.has(s.id));
+}
+{
+  // 互斥（P11）：警車任務進行中下車瞄準店員 → 不開始搶劫；任務結束後照常
+  const w = makeWorld();
+  const s = STORES[0];
+  w.deps.vigilante.active = true;
+  w.aimAtStore(s, s.x, s.z);
+  run(w, 1);
+  const blocked = w.robberies.active === null && w.wanted.stars === 0;
+  w.deps.vigilante.active = false;
+  w.updateRobberies(1 / 30, false);
+  check('警車任務進行中：瞄準店員不開始搶劫；結束後照常開始', blocked && w.robberies.active === s.id);
 }
 {
   // 凍結：手機（skip）/ BUSTED・WASTED / 噴漆中 → 不推進、進度條收起

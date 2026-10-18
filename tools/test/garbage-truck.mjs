@@ -396,6 +396,18 @@ function setupMs(extra = {}, hour = 17) {
   const env5 = setupMs({ routeFor, garbageTruck: false });
   await env5.ms.ready;
   check('garbageTruck: false → 關閉', env5.ms.truck === null);
+  // 外部任務互斥（P11 警車任務，extraBusy）：進行中垃圾車不出現、委託不開始；結束後恢復
+  let ext = true;
+  const env6 = setupMs({ routeFor, extraBusy: () => ext });
+  await env6.ms.ready;
+  env6.step(0.2, FAR);
+  const off6 = env6.ms.catalog().find((c) => c.slug === env6.ms.offers()[0]);
+  const it6 = env6.ms.nearest(off6.from);
+  if (it6) it6.act();
+  const blocked = env6.ms.truckState() === null && env6.of('mission:start').length === 0 && !env6.ms.active();
+  ext = false;
+  env6.step(0.2, FAR);
+  check('extraBusy（警車任務中）：垃圾車不出現、委託不開始；結束後垃圾車出現', blocked && !!it6 && env6.ms.truckState() !== null);
 }
 // 5b. eventActive() / eventObjective() 也回垃圾車；目標列 / 字幕操作詞依注入的 isTouch / interactLabel
 {

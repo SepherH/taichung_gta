@@ -45,6 +45,10 @@
 | `robbery:start` | `{ storeId, x, z }`（開始搶劫；x, z = 櫃檯點；同一刻已 `wanted.report('robbery', { witnessed: false })`） | wanted/robbery.js（§28） |
 | `robbery:done` | `{ storeId, amount }`（搶劫成功；amount = 入帳金額 NT$300–800，已經 `ctx.earn` 入帳） | wanted/robbery.js |
 | `robbery:failed` | `{ storeId, reason: 'aim'\|'distance'\|'clerk'\|'cleared' }`（停止瞄準 > 1 s / 離店員 > 8 m / 店員倒地 / 清星中止） | wanted/robbery.js |
+| `vigilante:start` | `{}`（駕駛警車按互動鍵開始警車任務；下一次 update 開第 1 關） | missions/vigilante.js（§29） |
+| `vigilante:level` | `{ level, phase: 'start', count, timeSec, speed }`（每關開始）/ `{ level, phase: 'clear', reward, earned }`（全部制伏，賞金已 `ctx.earn`） | missions/vigilante.js |
+| `vigilante:end` | `{ reason: 'timeout'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'cancel', levels, earned, level }`（levels = 完成關數、earned = 本次共得 NT$） | missions/vigilante.js |
+| `vigilante:subdued` | `{ id, level, x, z, remaining }`（單台逃犯車制伏；附加事件） | missions/vigilante.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
 
 表外的新事件名稱必須先加進本表。
@@ -878,6 +882,33 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - `node tools/test/p7-wanted.mjs`（robbery 犯行：HEAT 2.5、保底 2 星）
 - `node tools/test/integration-p9.mjs`（main.js 接線靜態檢查 + 抽出超商段以替身執行）
 - `tools/build-city.mjs` 會把 places.js 點位列為不蓋建築區：新增 `STORES` 後 `osm-city.json` 需重建（check-city / p8b-infill 在重建前可能不一致）
+
+## 29. Phase 11 警車任務 Vigilante（P11；接線點在 `src/main.js`，介面以 `src/missions/vigilante.js` 檔頭為準）
+
+### 29.1 模組介面
+- `createVigilante({ bus, wanted?, rng?, config? })` → `{ update(dt, ctx) → { active, phase, level, remaining, timeLeft, text }, start() → boolean, cancel(), end(reason), canStart(ctx), markers(out), isFugitiveActor(actor), shotAtFugitive(x, z), dispose(), active, phase, level, levelsDone, earned, timeLeft, fugitives }`；純邏輯，不碰 DOM / three；`wanted` 保留未用（不呼叫 report）
+  - `ctx = { player: { x, z }, inPolice, policeWrecked, busy?, world, earn(n), toast?(text, sec), showHint?(id, text) → boolean }`；`world` = `{ spawnPoint(px, pz, rMin, rMax), spawn(pt, { level }), state(h) → { x, z, speed, health, exists, driven }, drive(h, { x, z, maxSpeed }), eject(h) → actor | null, remove(h) }`
+  - 啟動：`canStart(ctx)` = 未進行中 && `inPolice` && `!busy`（星數不限）；`start()` 後下一次 `update` 開第 1 關；首次 `inPolice` → `showHint('vigilante', '按 E 開始警車任務')`
+  - 每關：`min(關數, MAX_FUGITIVES 4)` 台，生成在玩家 `SPAWN_MIN`–`SPAWN_MAX`（150–300 m）的車道點；時限 `120 + 30 × 台數` s；逃竄目標 = 背離玩家方向 ± 0.6 rad、250 m（8 s 或接近 30 m 重選），速度 `min(16 + 2 × (關數 − 1), 30)` m/s（警車極速 42）
+  - 制伏：耐久 ≤ `SUBDUE_HEALTH`（= vehicle-damage `SMOKE_DARK_AT` 300，黑灰煙降功率）、玩家開走該車，或車速 < 1 m/s 持續 3 s 且玩家（在警車內）≤ 15 m → `world.eject`（駕駛座側車門外 `traffic.spawnEjectedDriver`）、toast「逃犯制伏」；全部制伏 → `earn(500 × 關數)`、toast、`NEXT_LEVEL_SEC` 5 s 後下一關（上一關的車此時回收）
+  - 結束：時限到 `timeout`、離開警車 > 10 s `left`、駕駛中警車耐久 0 `wrecked`、`end('busted'\|'wasted')`（整合層 beginRespawn；另訂閱 `player:busted` / `player:wasted` 保底）→ toast「警車任務結束：完成 N 關、共得 NT$X」；`cancel()` 無聲結束（不 toast，仍 emit `vigilante:end { reason: 'cancel' }`）；逃犯車全部 `world.remove`（玩家正駕駛者保留）、標記清空
+  - 不算犯行：`isFugitiveActor(a)`（任務中已下車的逃犯）、`shotAtFugitive(x, z)`（子彈落點距未制伏逃犯車 ≤ `SHOT_RADIUS` 4.5 m；已制伏的車不豁免）；任務結束即失效
+  - 時間吃呼叫端 dt（clamp ≤ 0.1 s），幀率無關
+- `createFugitiveWorld({ vehicles, dmg, traffic, findRoute, rng?, attacker?, isKept?, onKeep? })` → 上述 `world` + `update(dt)` / `brakeAll()`（凍結時煞停在逃的車）/ `dispose()` / `cars`；`remove` 對玩家正駕駛或 `isKept(v)` 為真的車保留並交 `onKeep(v)`：`vehicles.adopt`（sedan / taxi / suv、traffic 同色盤，`v.ai = true`、`v.fugitive = true`）+ `dmg.attach`；駕駛沿 `findRoute` 路線（同 adapters.js 警車控制，卡住倒車門檻 4 s > 制伏 3 s）
+- `createVigilanteBar({ root })` → `{ set(text | null, urgent), dispose() }`：`.vig-bar` / `.vig-text` / `.vig-urgent`（`style.css`），文字「警車任務 第 N 關｜剩 M 台｜mm:ss」，過關倒數顯示「第 N 關完成｜下一關 mm:ss」
+- 標記：`MARKER_COLORS.fugitive = '#ff1744'`、`MARKER_LABELS.fugitive = '逃犯車'`、`hud.js EDGE_KINDS` 含 `'fugitive'`（超出小地圖半徑貼邊）；入帳跳字 reason `vigilante` 前綴「警車任務」
+
+### 29.2 接線（main.js）
+- 建立（車輛回收段之後、超商段之前）：`vigilante = createVigilante({ bus, wanted, rng })`、`fugitiveWorld = createFugitiveWorld({ vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng, attacker: () => player.actor, isKept: v === state.vehicle \|\| v === cj.vehicle, onKeep: adopted.add })`（保留下來的逃犯車照搶來車回收）、`vigBar`；`fugitiveMarkers()` 併入 `collectMarkers`
+- 警車判定 `isPoliceCar(v)` = `v.type === 'police' \|\| policeAdapters.isPoliceVehicle(v)`；其他任務 `otherMissionBusy()` = 委託 / 外送 / 垃圾車 / 打工 / 搶劫 / 噴漆；反向：任務中 `robCtx.onFoot` 為假（不開始搶劫）、噴漆廠視同未駕駛、`createMissions({ extraBusy })` 擋接委託 / 垃圾車 / 打工
+- 互動：駕駛中 `inter = vigilanteInteractable(v) \|\| nearestInteractable(...)`（priority 4，E / 手把 B / tb-interact 同一路徑）；任務中 `nearestInteractable` 不列委託
+- 每幀 `updateVigilante(dt, phoneOpen)` 接在 `updateRobberies` 之後：手機 / `state.respawn` / `state.spraying` / 搶劫中不推進並 `fugitiveWorld.brakeAll()`；`fugitiveWorld.update(dt)` → `vigilante.update` → `vigBar.set`
+- 犯行：通緝段宣告 `vigHooks = { fugitiveActor, fugitiveShot, end, active }`（預設無作用，警車任務段覆寫為 vigilante 方法；integration-p7 抽段不需注入 vigilante）；`combat:hit` / `ped:dead` / `ped:knockdown` 對 `vigHooks.fugitiveActor` 不報；`weapon:fire` 落點 `vigHooks.fugitiveShot(ex, ez)` 不報 gunfire；撞一般市民車輛 / 行人照常
+- `beginRespawn` → `vigHooks.end(kind)`（在 `missions.failActive(kind)` 之後；同時收起任務條）；`quitToMenu` / `startGame` → `cancelVigilante()`（在 `cancelRobbery` 之前）
+- 除錯：`window.__game.vigilante` / `fugitiveWorld` / `vigBar`（僅 dev）
+
+### 29.3 回歸
+- `node tools/test/p11-vigilante.mjs`（純邏輯 + createFugitiveWorld 替身）、`node tools/test/integration-p11.mjs`（main.js / hud / 標記 / CSS / 文件靜態檢查）
 
 ---
 

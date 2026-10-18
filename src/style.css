@@ -1561,3 +1561,34 @@ body.touch .rob-bar {
   bottom: auto;
   transform-origin: top center;
 }
+
+/* 警車任務條（Phase 11，src/missions/vigilante.js createVigilanteBar）：上方中央，同委託目標列（.ms-objective）的膠囊風格；
+   與委託互斥（警車任務中不接委託）所以共用位置；剩 ≤ 30 s 轉紅（.vig-urgent） */
+.vig-bar {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 55;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: rgba(12, 16, 32, 0.72);
+  border: 1px solid rgba(79, 140, 255, 0.85);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--tg-ui-scale, 1));
+  font-weight: bold;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.vig-bar[hidden] {
+  display: none !important;
+}
+
+.vig-bar.vig-urgent {
+  border-color: rgba(255, 23, 68, 0.95);
+  color: #ffd0d8;
+}
