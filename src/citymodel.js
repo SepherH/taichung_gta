@@ -33,6 +33,7 @@ export const buildings = osm.B.map((b) => {
     levels: b.l || 0,
     height: b.h,
     estimated: !!b.s,
+    inferred: !!b.f, // 推測填充建築（tools/build-city.mjs 填充步驟，非 OSM；id 為負數）
     poly: b.p,
     bbox,
     center: polygonCentroid(b.p),

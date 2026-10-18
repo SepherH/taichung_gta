@@ -328,11 +328,11 @@ export class HUD {
       linePath(r.pts);
       ctx.stroke();
     }
-    // 建築輪廓
-    ctx.fillStyle = '#4c5560';
-    ctx.strokeStyle = '#2f353c';
+    // 建築輪廓（推測填充建築較淡，與 OSM 建築區分）
     ctx.lineWidth = 1;
     for (const b of buildings) {
+      ctx.fillStyle = b.inferred ? '#68717b' : '#4c5560';
+      ctx.strokeStyle = b.inferred ? '#4a525a' : '#2f353c';
       polyPath(b.poly);
       ctx.fill();
       ctx.stroke();

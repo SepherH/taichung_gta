@@ -9,6 +9,7 @@
 // 輸出鍵名（精簡）：
 //   v 版本、src 資料來源、o 投影 {lat, lon, kx, kz}（x = (lon - o.lon) * o.kx、z = -(lat - o.lat) * o.kz，執行期擺放 glb 用）、bounds {x0, z0, x1, z1}（bbox 投影後的矩形）
 //   B 建築：i id、n name、e name:en、t building 類型、l levels、h 高度（m）、s 1 = 高度為估算、p 輪廓 [x0, z0, x1, z1, …]
+//     f 1 = 推測填充建築（非 OSM；id 為負數、排在 OSM 建築之後，見「填充建築」段）
 //   R 車道路 / F 步道類：i id、n name、t highway 類型、w 寬度（m）、ln lanes、o oneway（1 / -1）、
 //     br 1 = bridge、tu 1 = tunnel、ly layer、u 1 = 地下（tunnel 或 layer<0，不畫在地面）、p 折線 [x0, z0, …]
 //   P 公園 / W 水域：i id、n name、p 輪廓
@@ -25,10 +26,15 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 填充建築要避開的遊戲固定點位（純資料模組，不依賴 three / JSON）
+import { POLICE_STATION, HOSPITAL, SPRAY_SHOPS } from '../src/wanted/places.js';
+import { FOOD_SPOTS } from '../src/collect/food-spots.js';
+import { NIGHT_MARKET_DELIVERY } from '../src/missions/events.js';
+import { VALET_SITES } from '../src/job-props.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = resolve(ROOT, 'data/osm/qiqi-raw-v2.json');
-const OUT = resolve(ROOT, 'src/data/osm-city.json');
+const OUT = process.env.CITY_OUT ? resolve(process.env.CITY_OUT) : resolve(ROOT, 'src/data/osm-city.json'); // CITY_OUT：改寫到別處（測試驗證可重現用）
 const VERSION = 2;
 
 // 資料擷取範圍（與 Overpass 查詢的 bbox 相同；v2 擴大到含臺中市政府、市議會、捷運市政府站）
@@ -812,6 +818,420 @@ const T = {
   note: '除 basins（秋紅谷，停車場不下凹）與 plazas（老虎城下沉廣場）外，全區地面 y = 0（reference §6.5：其餘大致平坦）',
 };
 
+// ---------- 填充建築（推測，f: 1） ----------
+// OSM 在七期一帶只畫了少數建築，大部分街廓是空地：以固定種子在空地上產生推測建築輪廓，寫進 B（f: 1、id 為負數），與 OSM 建築走同一條擠出管線。
+// 做法：INFILL_CELL 網格標出不可建區 → 沿道路兩側依道路等級排臨街地塊 → 街廓內部以網格取樣補中層公寓；部分地塊留空（停車場 / 工地，只佔位不輸出）。
+// 不可建：地面道路與橋（半寬 + 依等級的人行道退縮）、步道、公園 P、水域 W、L 綠地 / 廣場、秋紅谷外框、下沉廣場、OSM 建築外擴（具名建築 = 地標範圍再加大）、
+//   遊戲固定點位（重生點、噴漆廠、小吃點、夜市取餐點、泊車亭）周圍、bounds 內縮帶。
+// 類型（臺中七期與周邊街景，數字皆推測）：主要幹道（trunk / primary / secondary）= 15–35 層住宅 / 辦公大樓（退縮、約半數有 2–4 層裙樓、間距寬）；
+//   tertiary 與巷道 = 4–5 層透天厝連棟（面寬 4–6 m、進深 12–18 m、沿街連續）與 6–12 層公寓；街廓內部 = 6–12 層公寓為主、少數 13–18 層。
+// 裙樓上的塔樓輪廓完全落在裙樓輪廓內（同一棟的上下兩個量體）——這是填充建築之間唯一的重疊；其餘彼此至少隔 UNIT_GAP。
+const INFILL_SEED = 20261018;
+const INFILL_CELL = 1; // 網格（m）；格子是否可建以格心判定並外加半對角線，取樣點落在可建格即保證離障礙 ≥ 退縮量
+const INFILL_EDGE = 4; // bounds 內縮（m）
+const CELL_PAD = INFILL_CELL * Math.SQRT1_2;
+const ROAD_SETBACK = { trunk: 5, primary: 5, secondary: 4.5, tertiary: 4, residential: 3.5, unclassified: 3.5, living_street: 3.5, service: 1.5 };
+const ROAD_SETBACK_DEFAULT = 3; // *_link 等
+const FOOT_SETBACK = 1.5;
+const AREA_PAD = 2; // P / W / L 外擴
+const BASIN_PAD = 8;
+const PLAZA_PAD = 3;
+const OSM_PAD = 3;
+const LANDMARK_PAD = 12; // 具名 OSM 建築：地標 glb 可能超出輪廓，門口另有出生點 / 人流
+const KEEP_CLEAR_R = 15;
+// 選單巡覽建築看點（名稱規則抄自 src/ui/menu-tour.js STOP_DEFS，同名取面積最大者，與 tourStops 相同；老虎城 = 出生點；
+//   不直接 import：該檔另有單元在改，改動不應牽動城市資料）：
+//   VIEW_CLEAR_R 內不放填充建築（沿路低飛的鏡頭連 5 層透天都會擋）、LOW_RISE_R 內只放透天厝（≤ 5 層）；巡覽遮擋率上限 10%、鏡位會避開建築
+const VIEW_STOPS = [/^老虎城/, /^新光三越$/, /歌劇院/, /^臺中市政府臺灣大道市政大樓$/, /^捷運市政府站$/];
+const LOW_RISE_R = 170;
+const VIEW_CLEAR_R = 110;
+const L_BLOCK_KINDS = new Set(['park', 'garden', 'playground', 'pitch', 'grass', 'pedestrian', 'plaza', 'common', 'recreation_ground', 'dog_park']);
+const TOWER_ROADS = new Set(['trunk', 'primary', 'secondary']);
+const MID_ROADS = new Set(['tertiary']);
+// 七期主要道路在 OSM 多標 tertiary（市政路、河南路、朝富路等，寬 12 m 以上或雙向分隔）：沿線實景以大樓為主，與幹道同列「大樓路段」，但混入臨街公寓 / 透天
+const QIQI_MAIN_W = 12;
+const QIQI_MAIN_NAMES = ['臺灣大道', '河南路', '朝富路', '市政北七路', '惠來路', '市政路', '市政北一路', '惠中路'];
+const QIQI_TOWER_P = 0.55;
+const isQiqiMain = (r) => r.t === 'tertiary' && (r.w >= QIQI_MAIN_W || QIQI_MAIN_NAMES.some((n) => (r.n || '').startsWith(n)));
+const LANE_ROADS = new Set(['residential', 'unclassified', 'living_street']);
+const VACANT_P = { tower: 0.12, mid: 0.12, lane: 0.12, interior: 0.12 }; // 留空地塊機率（目標空地比例約 10–15%）
+const UNIT_GAP = 0.15; // 相鄰透天厝之間的縫（m）：共牆不共面，避免女兒牆與鄰棟外牆 z-fighting
+const GAP = { tower: 10, apartment: 5, row: 3, vacant: 0 }; // 佔位外擴（m）＝與後放建築的最小間距
+const FRONT_RETRY = [0, 3, 6, 10]; // 臨街地塊放不下時往內退的距離（m）
+const FAIL_STEP = 3; // 地塊放不下時沿線前進（m）；lot 回傳 ≤ 此值表示失敗
+const STOREY = 3.3;
+const PODIUM_STOREY = 4.5;
+
+function infillRng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 道路沿線 / 街廓內部的填充建築；回傳 { list: B 格式陣列, stats }
+function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, plazaRing) {
+  const rng = infillRng(INFILL_SEED);
+  const rand = (a, b) => a + (b - a) * rng();
+  const randInt = (a, b) => a + Math.floor(rng() * (b - a + 1));
+  const gx0 = bounds.x0 + INFILL_EDGE;
+  const gz0 = bounds.z0 + INFILL_EDGE;
+  const GW = Math.floor((bounds.x1 - INFILL_EDGE - gx0) / INFILL_CELL);
+  const GH = Math.floor((bounds.z1 - INFILL_EDGE - gz0) / INFILL_CELL);
+  const FREE = 0;
+  const BLOCKED = 1;
+  const TAKEN = 2;
+  const VACANT = 3;
+  const grid = new Uint8Array(GW * GH);
+  const cellOf = (x, z) => {
+    const i = Math.floor((x - gx0) / INFILL_CELL);
+    const j = Math.floor((z - gz0) / INFILL_CELL);
+    return i < 0 || j < 0 || i >= GW || j >= GH ? -1 : j * GW + i;
+  };
+  // bbox 內每個格心呼叫 hit(cx, cz)，為真則設為 value（只覆寫 FREE；BLOCKED 一律覆寫）
+  const stampWhere = (x0, z0, x1, z1, value, hit) => {
+    const i0 = Math.max(0, Math.floor((x0 - gx0) / INFILL_CELL));
+    const j0 = Math.max(0, Math.floor((z0 - gz0) / INFILL_CELL));
+    const i1 = Math.min(GW - 1, Math.floor((x1 - gx0) / INFILL_CELL));
+    const j1 = Math.min(GH - 1, Math.floor((z1 - gz0) / INFILL_CELL));
+    let n = 0;
+    for (let j = j0; j <= j1; j++) {
+      const cz = gz0 + (j + 0.5) * INFILL_CELL;
+      for (let i = i0; i <= i1; i++) {
+        const k = j * GW + i;
+        if (grid[k] !== FREE && value !== BLOCKED) continue;
+        if (grid[k] === BLOCKED) continue;
+        if (!hit(gx0 + (i + 0.5) * INFILL_CELL, cz)) continue;
+        grid[k] = value;
+        n++;
+      }
+    }
+    return n;
+  };
+  const segDist = (x, z, ax, az, bx, bz) => {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const l2 = dx * dx + dz * dz;
+    const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+    return Math.hypot(x - ax - t * dx, z - az - t * dz);
+  };
+  const blockCapsule = (ax, az, bx, bz, r) => {
+    const R = r + CELL_PAD;
+    stampWhere(Math.min(ax, bx) - R, Math.min(az, bz) - R, Math.max(ax, bx) + R, Math.max(az, bz) + R, BLOCKED, (x, z) => segDist(x, z, ax, az, bx, bz) <= R);
+  };
+  const blockRing = (ring, pad) => {
+    const R = pad + CELL_PAD;
+    let x0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let z1 = -Infinity;
+    for (const [x, z] of ring) {
+      x0 = Math.min(x0, x);
+      z0 = Math.min(z0, z);
+      x1 = Math.max(x1, x);
+      z1 = Math.max(z1, z);
+    }
+    stampWhere(x0 - R, z0 - R, x1 + R, z1 + R, BLOCKED, (x, z) => pointInRing(x, z, ring) || distToRing(x, z, ring) <= R);
+  };
+  const blockCircle = (cx, cz, r) => {
+    const R = r + CELL_PAD;
+    stampWhere(cx - R, cz - R, cx + R, cz + R, BLOCKED, (x, z) => Math.hypot(x - cx, z - cz) <= R);
+  };
+
+  // 1. 不可建區
+  const setbackOf = (t) => ROAD_SETBACK[t] ?? ROAD_SETBACK_DEFAULT;
+  for (const r of roads) {
+    if (r.u) continue;
+    const pts = unflat(r.p);
+    for (let k = 0; k < pts.length - 1; k++) blockCapsule(pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], r.w / 2 + setbackOf(r.t));
+  }
+  for (const f of foots) {
+    if (f.u) continue;
+    const pts = unflat(f.p);
+    for (let k = 0; k < pts.length - 1; k++) blockCapsule(pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], f.w / 2 + FOOT_SETBACK);
+  }
+  for (const a of [...parks, ...waters]) blockRing(unflat(a.p), AREA_PAD);
+  for (const l of landcover) if (L_BLOCK_KINDS.has(l.k)) blockRing(unflat(l.p), AREA_PAD);
+  blockRing(basinRing, BASIN_PAD);
+  blockRing(plazaRing, PLAZA_PAD);
+  for (const b of osmB) blockRing(unflat(b.p), b.n ? LANDMARK_PAD : OSM_PAD);
+  const keep = [
+    POLICE_STATION, HOSPITAL, ...SPRAY_SHOPS, ...FOOD_SPOTS, NIGHT_MARKET_DELIVERY.pickup,
+    ...VALET_SITES.flatMap((v) => [v.stand, v.car, v.slot]),
+  ];
+  for (const p of keep) blockCircle(p.x, p.z, KEEP_CLEAR_R);
+  const lowRiseAt = [];
+  for (const re of VIEW_STOPS) {
+    let best = null;
+    for (const b of osmB) if (b.n && re.test(b.n) && (!best || areaOf(unflat(b.p)) > areaOf(unflat(best.p)))) best = b;
+    if (best) lowRiseAt.push(centroid(unflat(best.p)));
+  }
+  const lowRise = (x, z) => lowRiseAt.some(([cx, cz]) => Math.hypot(x - cx, z - cz) < LOW_RISE_R);
+  for (const [cx, cz] of lowRiseAt) blockCircle(cx, cz, VIEW_CLEAR_R);
+  const openCells = grid.reduce((s, v) => s + (v === FREE ? 1 : 0), 0);
+
+  // 道路線段索引（夾在同名雙向車道之間的分隔島判定、街廓內部的朝向）
+  const SEG_BIN = 50;
+  const segBins = new Map();
+  const binKey = (i, j) => i * 100003 + j;
+  for (const r of roads) {
+    if (r.u) continue;
+    const pts = unflat(r.p);
+    for (let k = 0; k < pts.length - 1; k++) {
+      const s = { ax: pts[k][0], az: pts[k][1], bx: pts[k + 1][0], bz: pts[k + 1][1], hw: r.w / 2, n: r.n || '', t: r.t };
+      const pad = s.hw + 1;
+      for (let i = Math.floor((Math.min(s.ax, s.bx) - pad) / SEG_BIN); i <= Math.floor((Math.max(s.ax, s.bx) + pad) / SEG_BIN); i++) {
+        for (let j = Math.floor((Math.min(s.az, s.bz) - pad) / SEG_BIN); j <= Math.floor((Math.max(s.az, s.bz) + pad) / SEG_BIN); j++) {
+          const key = binKey(i, j);
+          if (!segBins.has(key)) segBins.set(key, []);
+          segBins.get(key).push(s);
+        }
+      }
+    }
+  }
+  const segsNear = (x, z, R) => {
+    const out = new Set();
+    for (let i = Math.floor((x - R) / SEG_BIN); i <= Math.floor((x + R) / SEG_BIN); i++) {
+      for (let j = Math.floor((z - R) / SEG_BIN); j <= Math.floor((z + R) / SEG_BIN); j++) for (const s of segBins.get(binKey(i, j)) || []) out.add(s);
+    }
+    return out;
+  };
+  // 地塊背後（沿 n 往內）不遠處又碰到同名道路 → 地塊夾在雙向分隔車道 / 側車道之間，不蓋
+  const betweenSameName = (name, cx, cz, nx, nz, hd) => {
+    if (!name) return false;
+    for (const d of [hd + 2, hd + 8, hd + 16]) {
+      const px = cx + nx * d;
+      const pz = cz + nz * d;
+      for (const s of segsNear(px, pz, 30)) if (s.n === name && segDist(px, pz, s.ax, s.az, s.bx, s.bz) <= s.hw + 4) return true;
+    }
+    return false;
+  };
+  // 最近道路方向（街廓內部朝向）；找不到回傳 null
+  const nearestDir = (x, z, R) => {
+    let best = null;
+    let bd = R;
+    for (const s of segsNear(x, z, R)) {
+      const d = segDist(x, z, s.ax, s.az, s.bx, s.bz);
+      if (d < bd) {
+        bd = d;
+        best = s;
+      }
+    }
+    if (!best) return null;
+    const L = Math.hypot(best.bx - best.ax, best.bz - best.az) || 1;
+    return [(best.bx - best.ax) / L, (best.bz - best.az) / L];
+  };
+
+  // 2. 矩形工具：中心 (cx, cz)、沿 t 半寬 hw、沿 n（n = t 轉 90°）半深 hd
+  const rectFree = (cx, cz, tx, tz, hw, hd) => {
+    const nx = -tz;
+    const nz = tx;
+    const nu = Math.max(1, Math.ceil((2 * hw) / (INFILL_CELL / 2)));
+    const nv = Math.max(1, Math.ceil((2 * hd) / (INFILL_CELL / 2)));
+    for (let a = 0; a <= nu; a++) {
+      const u = -hw + (2 * hw * a) / nu;
+      for (let b = 0; b <= nv; b++) {
+        const v = -hd + (2 * hd * b) / nv;
+        const k = cellOf(cx + tx * u + nx * v, cz + tz * u + nz * v);
+        if (k < 0 || grid[k] !== FREE) return false;
+      }
+    }
+    return true;
+  };
+  const rectStamp = (cx, cz, tx, tz, hw, hd, gap, value) => {
+    const nx = -tz;
+    const nz = tx;
+    const H = hw + gap + CELL_PAD;
+    const D = hd + gap + CELL_PAD;
+    const ext = Math.abs(tx) * H + Math.abs(nx) * D;
+    const ezt = Math.abs(tz) * H + Math.abs(nz) * D;
+    return stampWhere(cx - ext, cz - ezt, cx + ext, cz + ezt, value, (x, z) => {
+      const u = (x - cx) * tx + (z - cz) * tz;
+      const v = (x - cx) * nx + (z - cz) * nz;
+      return Math.abs(u) <= H && Math.abs(v) <= D;
+    });
+  };
+  const rectRing = (cx, cz, tx, tz, hw, hd) => {
+    const nx = -tz;
+    const nz = tx;
+    const ring = [
+      [cx - tx * hw - nx * hd, cz - tz * hw - nz * hd],
+      [cx + tx * hw - nx * hd, cz + tz * hw - nz * hd],
+      [cx + tx * hw + nx * hd, cz + tz * hw + nz * hd],
+      [cx - tx * hw + nx * hd, cz - tz * hw + nz * hd],
+    ].map(([x, z]) => [r1(x), r1(z)]);
+    return signedAreaNorthUp(ring) > 0 ? ring : ring.reverse();
+  };
+
+  // 3. 產生
+  const list = [];
+  const stats = { towers: 0, podiums: 0, apartments: 0, rows: 0, houses: 0, interior: 0, vacantLots: 0, vacantArea: 0, footprint: 0, openArea: openCells * INFILL_CELL * INFILL_CELL };
+  let nextId = -1;
+  const emit = (t, levels, storey, ring) => {
+    const b = { i: nextId--, t, l: levels, h: r1(levels * storey), s: 1, f: 1, p: flat(ring) };
+    list.push(b);
+    stats.footprint += areaOf(ring);
+    return b;
+  };
+  // 留空地塊（停車場 / 工地）：已確認可建的地塊整塊佔位、不輸出建築；回傳 0（呼叫端加上前進量）
+  const vacant = (cx, cz, tx, tz, hw, hd) => {
+    stats.vacantLots++;
+    stats.vacantArea += rectStamp(cx, cz, tx, tz, hw, hd, GAP.vacant, VACANT) * INFILL_CELL * INFILL_CELL;
+    return 0;
+  };
+  // 臨街地塊：frame = { ax, az, tx, tz, nx, nz }（n 指向地塊內側）、s = 沿線起點、front = 地塊前緣離中心線距離；回傳前進量
+  const at = (f, s, d) => [f.ax + f.tx * s + f.nx * d, f.az + f.tz * s + f.nz * d];
+  // 大樓地塊：依序試「裙樓 + 塔樓」/ 標準塔樓 / 瘦高塔樓（窄街廓），都放不下 → 臨街公寓
+  const towerLot = (r, f, s, front) => {
+    const variants = [
+      rng() < 0.5 ? { tw: rand(20, 28), td: rand(18, 26), podium: true } : null,
+      { tw: rand(20, 28), td: rand(18, 26), podium: false },
+      { tw: rand(15, 20), td: rand(14, 18), podium: false, slim: true },
+    ];
+    for (const v of variants) {
+      if (!v) continue;
+      const { tw, td, podium } = v;
+      const fw = podium ? tw + rand(8, 16) : tw;
+      const fd = podium ? td + rand(8, 14) : td;
+      const back = podium ? rand(2, 4) : v.slim ? rand(3, 5) : rand(5, 9); // 臨街退縮（人行空間 / 前庭）
+      const [cx, cz] = at(f, s + fw / 2, front + back + fd / 2);
+      if (lowRise(cx, cz)) return rowLot(r, f, s, front, VACANT_P.tower) || FAIL_STEP;
+      if (!rectFree(cx, cz, f.tx, f.tz, fw / 2, fd / 2)) continue;
+      if (betweenSameName(r.n, cx, cz, f.nx, f.nz, fd / 2)) return FAIL_STEP;
+      if (rng() < VACANT_P.tower) return vacant(cx, cz, f.tx, f.tz, fw / 2, fd / 2) + fw + rand(6, 12);
+      rectStamp(cx, cz, f.tx, f.tz, fw / 2, fd / 2, GAP.tower, TAKEN);
+      const levels = v.slim ? randInt(15, 25) : randInt(15, 35);
+      const type = rng() < 0.62 ? 'apartments' : 'office';
+      if (podium) {
+        emit('commercial', randInt(2, 4), PODIUM_STOREY, rectRing(cx, cz, f.tx, f.tz, fw / 2, fd / 2));
+        stats.podiums++;
+        // 塔樓：沿街置中、往後退（離裙樓前緣 ≥ 3 m、後緣 ≥ 2 m、兩側 ≥ 4 m）
+        const room = fd - td - 5;
+        const off = -fd / 2 + 3 + td / 2 + room * rng();
+        emit(type, levels, STOREY, rectRing(cx + f.nx * off, cz + f.nz * off, f.tx, f.tz, tw / 2, td / 2));
+      } else {
+        emit(type, levels, STOREY, rectRing(cx, cz, f.tx, f.tz, tw / 2, td / 2));
+      }
+      stats.towers++;
+      return fw + rand(12, 24);
+    }
+    return apartmentLot(r, f, s, front, VACANT_P.tower) || FAIL_STEP;
+  };
+  const apartmentLot = (r, f, s, front, pVacant) => {
+    const w = rand(18, 30);
+    const d = rand(12, 18);
+    const [cx, cz] = at(f, s + w / 2, front + rand(1, 3) + d / 2);
+    if (lowRise(cx, cz) || !rectFree(cx, cz, f.tx, f.tz, w / 2, d / 2)) return 0;
+    if (betweenSameName(r.n, cx, cz, f.nx, f.nz, d / 2)) return 0;
+    if (rng() < pVacant) return vacant(cx, cz, f.tx, f.tz, w / 2, d / 2) + w + rand(3, 6);
+    rectStamp(cx, cz, f.tx, f.tz, w / 2, d / 2, GAP.apartment, TAKEN);
+    emit('apartments', randInt(6, 12), STOREY, rectRing(cx, cz, f.tx, f.tz, w / 2, d / 2));
+    stats.apartments++;
+    return w + rand(6, 12);
+  };
+  const rowLot = (r, f, s, front, pVacant) => {
+    const n = randInt(4, 10);
+    const d = rand(12, 18);
+    const back = rand(0, 1);
+    const base = rand(4.3, 5.5);
+    const units = [];
+    let u = 0;
+    let lv = rng() < 0.5 ? 4 : 5;
+    for (let k = 0; k < n; k++) {
+      const w = Math.max(4, Math.min(6, base + rand(-0.5, 0.5)));
+      const [cx, cz] = at(f, s + u + w / 2, front + back + d / 2);
+      if (!rectFree(cx, cz, f.tx, f.tz, (w - UNIT_GAP) / 2, d / 2)) break;
+      if (k === 0 && betweenSameName(r.n, cx, cz, f.nx, f.nz, d / 2)) break;
+      if (rng() < 0.35) lv = lv === 4 ? 5 : 4;
+      units.push({ cx, cz, w, lv });
+      u += w;
+    }
+    if (units.length < 2) return 0;
+    const [rcx, rcz] = at(f, s + u / 2, front + back + d / 2);
+    if (rng() < pVacant) return vacant(rcx, rcz, f.tx, f.tz, u / 2, d / 2) + u + rand(3, 6);
+    rectStamp(rcx, rcz, f.tx, f.tz, u / 2, d / 2, GAP.row, TAKEN);
+    for (const q of units) emit('house', q.lv, STOREY, rectRing(q.cx, q.cz, f.tx, f.tz, (q.w - UNIT_GAP) / 2, d / 2));
+    stats.rows++;
+    stats.houses += units.length;
+    return u + rand(3, 8);
+  };
+  const smallLot = (r, f, s, front, pApartment) => {
+    const pVacant = MID_ROADS.has(r.t) ? VACANT_P.mid : VACANT_P.lane;
+    const first = rng() < pApartment ? apartmentLot : rowLot;
+    const second = first === apartmentLot ? rowLot : apartmentLot;
+    return first(r, f, s, front, pVacant) || second(r, f, s, front, pVacant) || FAIL_STEP;
+  };
+  const frontage = (pick, lot) => {
+    for (const r of roads) {
+      if (r.u || r.br || !pick(r)) continue;
+      const front = r.w / 2 + setbackOf(r.t) + 2 * CELL_PAD + 0.1; // 前緣取樣點所在格的格心離退縮線 > CELL_PAD，才不會被判為不可建
+      const pts = unflat(r.p);
+      for (let k = 0; k < pts.length - 1; k++) {
+        const [ax, az] = pts[k];
+        const [bx, bz] = pts[k + 1];
+        const L = Math.hypot(bx - ax, bz - az);
+        if (L < 10) continue;
+        const tx = (bx - ax) / L;
+        const tz = (bz - az) / L;
+        for (const side of [1, -1]) {
+          // n = t 轉 90°（rectRing 的深方向）× side；side = −1 時 t 反向讓 n 仍為 t 轉 90°
+          const f = side === 1 ? { ax, az, tx, tz, nx: -tz, nz: tx } : { ax: bx, az: bz, tx: -tx, tz: -tz, nx: tz, nz: -tx };
+          let s = rand(0, 6);
+          while (s < L - 4) {
+            // 前緣貼退縮線放不下（平行步道 / 側車道 / 停車場出入口）時，整塊往內退再試
+            let adv = 0;
+            for (const back of FRONT_RETRY) {
+              adv = lot(r, f, s, front + back);
+              if (adv > FAIL_STEP) break;
+            }
+            s += adv;
+          }
+        }
+      }
+    }
+  };
+  frontage((r) => TOWER_ROADS.has(r.t), towerLot);
+  frontage(isQiqiMain, (r, f, s, front) => (rng() < QIQI_TOWER_P ? towerLot(r, f, s, front) : smallLot(r, f, s, front, 0.6)));
+  frontage((r) => MID_ROADS.has(r.t) && !isQiqiMain(r), (r, f, s, front) => smallLot(r, f, s, front, 0.5));
+  frontage((r) => LANE_ROADS.has(r.t), (r, f, s, front) => smallLot(r, f, s, front, 0.3));
+
+  // 街廓內部：剩餘空地以 8 m 格點取樣（固定種子洗牌），朝向取最近道路
+  const STEP = 8;
+  const pts = [];
+  for (let z = gz0 + STEP / 2; z < gz0 + GH * INFILL_CELL; z += STEP) for (let x = gx0 + STEP / 2; x < gx0 + GW * INFILL_CELL; x += STEP) pts.push([x, z]);
+  for (let i = pts.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [pts[i], pts[j]] = [pts[j], pts[i]];
+  }
+  for (const [x, z] of pts) {
+    const k = cellOf(x, z);
+    if (k < 0 || grid[k] !== FREE || lowRise(x, z)) continue;
+    const dir = nearestDir(x, z, 150);
+    if (!dir) continue;
+    const [tx, tz] = dir;
+    for (const [w, d] of [[rand(20, 30), rand(13, 17)], [rand(12, 18), rand(10, 13)]]) {
+      if (!rectFree(x, z, tx, tz, w / 2, d / 2)) continue;
+      if (rng() < VACANT_P.interior) {
+        vacant(x, z, tx, tz, w / 2, d / 2);
+        break;
+      }
+      rectStamp(x, z, tx, tz, w / 2, d / 2, GAP.apartment, TAKEN);
+      const levels = rng() < 0.2 ? randInt(13, 18) : randInt(6, 12);
+      emit('apartments', levels, STOREY, rectRing(x, z, tx, tz, w / 2, d / 2));
+      stats.interior++;
+      break;
+    }
+  }
+  return { list, stats };
+}
+
+const infill = buildInfill(B, R, F, P, W, L, basinInfo.ring, plazaInfo.ring);
+B.push(...infill.list);
+
 const out = {
   v: VERSION,
   src: '© OpenStreetMap contributors (ODbL)',
@@ -843,6 +1263,12 @@ console.log(`原點（老虎城輪廓中心）：lat ${out.o.lat}, lon ${out.o.l
 console.log(`世界邊界：x ${bounds.x0} ~ ${bounds.x1}，z ${bounds.z0} ~ ${bounds.z1}（${r1(bounds.x1 - bounds.x0)} m × ${r1(bounds.z1 - bounds.z0)} m）`);
 console.log(`建築 ${stats.buildings} 棟（height ${stats.fromHeight}、levels ${stats.fromLevels}、估算 ${stats.estimated}）`);
 console.log(`  類型：${sortObj(stats.buildingTypes)}`);
+{
+  const s = infill.stats;
+  const vacantRatio = s.vacantArea / (s.vacantArea + s.footprint);
+  console.log(`填充建築（推測，f: 1）${infill.list.length} 棟：大樓 ${s.towers}（裙樓 ${s.podiums}）、臨街公寓 ${s.apartments}、透天厝 ${s.houses}（${s.rows} 排）、街廓內部公寓 ${s.interior}`);
+  console.log(`  可建空地 ${Math.round(s.openArea)} m²、建築投影 ${Math.round(s.footprint)} m²、留空地塊 ${s.vacantLots} 塊 ${Math.round(s.vacantArea)} m²（空地 /（空地 + 投影）${(vacantRatio * 100).toFixed(1)}%）`);
+}
 console.log(`車道路 ${stats.roads} 段：${sortObj(stats.roadTypes)}`);
 console.log(`步道類 ${stats.footways} 段：${sortObj(stats.footTypes)}`);
 console.log(`地下（tunnel / layer<0）${stats.underground} 段；橋樑 / layer>0 ${stats.bridges} 段（貼地處理）`);

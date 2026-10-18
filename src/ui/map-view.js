@@ -159,11 +159,12 @@ export function drawMap(ctx, view, player) {
     ctx.stroke();
   }
 
-  ctx.fillStyle = '#8b9096';
-  ctx.strokeStyle = '#5b6066';
   ctx.lineWidth = 1;
   for (const b of buildings) {
     if (!visible(b.bbox)) continue;
+    // 推測填充建築較淡，與 OSM 建築區分
+    ctx.fillStyle = b.inferred ? '#a4a8ad' : '#8b9096';
+    ctx.strokeStyle = b.inferred ? '#7f848a' : '#5b6066';
     polyPath(b.poly);
     ctx.fill();
     if (k >= 0.6) ctx.stroke();

@@ -75,6 +75,12 @@ const BALCONY_MIN_W = 2.5;
 const BALCONY_MAX_W = 7;
 const BALCONY_PAIR_EDGE = 28; // 邊長 ≥ 此值時一層放兩座
 const BALCONY_MAX = 20; // 每棟上限
+// 推測填充建築（buildings[].inferred）：數量是 OSM 建築的數倍，細節從簡以守住三角形預算
+const INFERRED_BALCONY_MAX = 6;
+// 填充透天厝：不做騎樓柱列，臨路邊只貼首層店面帶（招牌色塊）；面寬 4–6 m，臨路邊長門檻放寬
+const SHOPFRONT_TYPES = new Set(['house']);
+const SHOPFRONT_MIN_EDGE = 3.5;
+const SHOPFRONT_H = 3.2;
 const SHOP_SEED = 0x5a0f7e11; // 店面格挑選亂數的種子混合值
 
 const COLORS = {
@@ -339,11 +345,11 @@ function roofUnits(w, p, yRoof, rng, stats) {
 }
 
 // 臨路邊：邊長夠、外側不是鄰棟（共用牆）、外法線朝向 15 m 內的道路
-function roadFacingEdges(b, E, ctx) {
+function roadFacingEdges(b, E, ctx, minEdge = MIN_EDGE) {
   const out = [];
   const near = {};
   for (const e of E) {
-    if (e.L < MIN_EDGE) continue;
+    if (e.L < minEdge) continue;
     const mx = (e.ax + e.bx) / 2;
     const mz = (e.az + e.bz) / 2;
     if (ctx.bldIdx.at(mx + e.nx * 1.2, mz + e.nz * 1.2, 0, b)) continue;
@@ -406,6 +412,16 @@ function arcade(w, wShop, e, base, arcH, shopRng) {
   }
   seg(e.L - COL_END_INSET, e.L, frame(first));
   return m + 1;
+}
+
+// 首層店面帶（無柱列 / 樓板）：整條邊一格店面（填充透天厝的招牌色塊），寫進 wShop（退台共用材質，不新增 draw call）
+function shopfront(wShop, e, base, h, shopRng) {
+  const i = Math.floor(shopRng() * 8) % 8;
+  const u0 = i / 8 + 0.5 / TEX_SIZE;
+  const u1 = (i + 1) / 8 - 0.5 / TEX_SIZE;
+  const bx = e.nx * BAND_OFFSET;
+  const bz = e.nz * BAND_OFFSET;
+  wall(wShop, e.ax + bx, e.az + bz, e.bx + bx, e.bz + bz, base, base + h, e.nx, e.nz, COLORS.band, [u0, SHOP_ROW_V0, u1, SHOP_ROW_V0, u1, SHOP_ROW_V1, u0, SHOP_ROW_V1]);
 }
 
 // 高樓挑高雨棚：懸挑 1.5 m 薄板
@@ -534,7 +550,7 @@ export function buildFacadeDetails(buildingList, {
   group.name = 'facade-details';
   const stats = {
     enabled, parapets: 0, setbacks: 0, setbackSkipped: 0, roofUnits: 0, waterTanks: 0,
-    arcadeBuildings: 0, arcadeEdges: 0, arcadeColumns: 0, canopyBuildings: 0, canopyEdges: 0, balconies: 0,
+    arcadeBuildings: 0, arcadeEdges: 0, arcadeColumns: 0, canopyBuildings: 0, canopyEdges: 0, balconies: 0, shopfronts: 0,
   };
   if (!enabled) return { group, stats: { ...stats, ...geometryStats(group) }, bodies: new Map() };
 
@@ -594,10 +610,18 @@ export function buildFacadeDetails(buildingList, {
     if (parapet(W.parapets, p, bodyTop, ph, COLORS.parapet)) stats.parapets++;
     parapetSpans.push({ id: b.id, top: bodyTop, start, end: W.parapets.pos.length / 3 });
 
-    // 首層：中低層住商騎樓 / 高樓雨棚（只在臨路邊）
+    // 首層：中低層住商騎樓 / 高樓雨棚（只在臨路邊）；填充透天厝只貼店面帶
     const tower = h >= TOWER_H;
     const out = tower ? CANOPY_OUT : ARCADE_SLAB_OUT;
-    const facing = roadFacingEdges(b, E, ctx).filter((e) => clearOutside(e, 0, e.L, out, ctx));
+    const inferred = !!b.inferred;
+    if (inferred && SHOPFRONT_TYPES.has(b.type) && !tower) {
+      const shopRng = mulberry32((b.id ^ SHOP_SEED) >>> 0);
+      for (const e of roadFacingEdges(b, E, ctx, SHOPFRONT_MIN_EDGE)) {
+        shopfront(W.setbacks, e, base, Math.min(SHOPFRONT_H, h * 0.4), shopRng);
+        stats.shopfronts++;
+      }
+    }
+    const facing = inferred && SHOPFRONT_TYPES.has(b.type) ? [] : roadFacingEdges(b, E, ctx).filter((e) => clearOutside(e, 0, e.L, out, ctx));
     if (facing.length) {
       if (tower) {
         for (const e of facing) canopy(W.canopies, e, base);
@@ -622,14 +646,15 @@ export function buildFacadeDetails(buildingList, {
         .slice(0, 2);
       const step = rng() < 0.5 ? 2 : 3;
       let count = 0;
-      for (let f = 2; f <= floors - 1 && count < BALCONY_MAX; f += step) {
+      const maxCount = inferred ? INFERRED_BALCONY_MAX : BALCONY_MAX;
+      for (let f = 2; f <= floors - 1 && count < maxCount; f += step) {
         const y = base + f * FLOOR_H;
         if (y + BALCONY_SLAB_T + RAIL_H > bodyTop - 0.5) break;
         for (const e of longEdges) {
           const pair = e.L >= BALCONY_PAIR_EDGE;
           const width = clamp(e.L * (pair ? 0.28 : 0.35), BALCONY_MIN_W, BALCONY_MAX_W);
           for (const fr of pair ? [0.27, 0.73] : [0.5]) {
-            if (count >= BALCONY_MAX) break;
+            if (count >= maxCount) break;
             const c = e.L * fr;
             if (!clearOutside(e, c - width / 2, c + width / 2, BALCONY_DEPTH, ctx)) continue;
             balcony(W.balconies, e, c, width, y);

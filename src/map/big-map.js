@@ -115,10 +115,10 @@ export function drawBigMap(ctx, view, data = {}) {
     ctx.fill();
   }
 
-  // 建築：淡色填充
-  ctx.fillStyle = 'rgba(170,176,186,0.28)';
+  // 建築：淡色填充（推測填充建築更淡）
   for (const b of buildings) {
     if (!visible(b.bbox)) continue;
+    ctx.fillStyle = b.inferred ? 'rgba(170,176,186,0.18)' : 'rgba(170,176,186,0.28)';
     polyPath(b.poly);
     ctx.fill();
   }
