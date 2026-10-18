@@ -8,7 +8,8 @@
 // 鏡頭型態（SHOT_TYPES）依序輪替：環繞 orbit / 推軌 dolly / 升降 crane / 沿道路低空飛行 road，每段 8–12 s（SHOT_SEC）；
 //   段間以三次 Hermite 曲線滑行（端點位置與速度連續 = C1，弧頂加高越過市區），秒數 = 距離 ÷ GLIDE_SPEED（夾在 GLIDE_MIN–GLIDE_MAX）
 // 路徑建立（buildTour，載入時一次）：整輪以 SAMPLE_HZ 取樣 → 水平 / 看點以 SMOOTH_SEC 窗口循環平滑 →
-//   高度下限 floor = max(地形（含湖面）+ SAFE_CLEAR, 水平 BUILDING_PAD 內建築頂 + ROOF_CLEAR) → 上升率 ≤ CLIMB_RATE 的前後向包絡（提早爬升）；
+//   高度下限 floor = max(地形（含湖面）+ SAFE_CLEAR, 水平 BUILDING_PAD 內建築頂 + ROOF_CLEAR, 街道雜物範圍地面 + STREET_CLEAR) → 上升率 ≤ CLIMB_RATE 的前後向包絡（提早爬升）；
+//   建築頂含具名建築名稱牌、地標 glb 實際量體（LANDMARK_SOLIDS；如捷運市政府站懸空站體與外延軌道梁，OSM 高度只有 9.1 m）；
 //   執行期以 Catmull-Rom 在樣本間內插（不配置物件），末樣本接回首樣本（循環）
 // 時間（§20 / §25）：巡覽計時吃渲染 dt（屬「相機」），與 simDt 無關——卡頓丟子步時運鏡不變慢；暫停 / 切背景時 loop 不呼叫 update，計時停住
 // 減少動態效果（reducedMotion() 為 true，main.js 接 matchMedia('(prefers-reduced-motion: reduce)')）：改走老虎城慢速環繞 REDUCED_OMEGA rad/s；
@@ -50,6 +51,30 @@ export const OCC_FRAMES = 7; // 看點視線遮擋：每段取樣幀數
 export const DOLLY_GAP_MIN = 70; // 推軌：鏡頭軌道離建物立面的最小水平距離（m；且 ≥ 2 × 建物高）
 export const DOLLY_ALT_K = 0.8; // 推軌：鏡頭高度 = 地面 + max(8, 建物高 × 此值)（m）
 export const STALL_SIZE = { ext: 3, top: 2.5 }; // 夜市攤車無 OSM 輪廓：鏡位用的外徑 / 高度（m，同 prop manifest 攤車尺寸量級）
+// 地標 glb 實際量體（public/models manifest footprint = true 者取代通用擠出，模型常比 OSM 高度高、且有伸出輪廓外的部分）：
+//   OSM id → [[外伸 pad（離 OSM 輪廓的水平距離 m）, 頂高（離 buildingBase m）], ...]——輪廓外 pad 內的模型部分都不高於該頂高；
+//   只計離地 > 2.5 m 的部分（更低的在 SAFE_CLEAR 下方）。由 glb 頂點量得後無條件進位，tools/test/p8c-tour-clip.mjs 以 glb 實際三角形驗證涵蓋
+//   捷運市政府站：OSM 高 9.1 m，模型站體 9–24.5 m（底面懸空、跨文心路），兩端隔音罩與軌道梁沿線外延 25 m（高 16.6 m）
+export const LANDMARK_SOLIDS = {
+  853807906: [[14, 161]], // 寶輝秋紅谷（頂部冠體跨過 S 形輪廓凹口，離輪廓 13.84 m）
+  865367994: [[1, 165]], // 聯聚中雍大廈
+  456488572: [[1, 104]], // 林酒店
+  862750722: [[1, 25], [26, 17]], // 捷運市政府站
+  222636759: [[1, 46]], // 臺中國家歌劇院
+  148849083: [[3, 68]], // 新光三越
+  222636758: [[1, 71]], // 臺中市議會
+  222413435: [[1, 47], [26, 13]], // 臺中市政府臺灣大道市政大樓（前廣場旗桿）
+  150999799: [[2, 46], [37, 11]], // 老虎城（輪廓外的景觀塔 / 招牌）
+  224955652: [[5, 70]], // Top City 台中大遠百
+};
+// 具名建築屋頂名稱牌（buildings.js platePlacement）：底離屋頂 PLATE_LIFT、寬 = clamp(最長邊 × 0.6, 5, 36)、高 = 寬 ÷ PLATE_ASPECT；牌頂上方留 PLATE_CLEAR
+export const PLATE_LIFT = 0.6;
+export const PLATE_ASPECT = 512 / 112;
+export const PLATE_CLEAR = 2;
+// 街道雜物（行道樹冠頂約 7.6 m、路燈 7 m、號誌桿 6.4 m 含伸向路內的懸臂）：主要道路與寬 ≥ 8 m 道路中心線 hw + STREET_REACH 內，
+//   以及綠地（秋紅谷 basins 輪廓，公園樹木）外擴 STREET_REACH 內，高度下限 = 地面 + STREET_CLEAR（m）
+export const STREET_CLEAR = 9.5;
+export const STREET_REACH = 5;
 
 // 鏡位定義：key、顯示名、比對 namedBuildings 名稱的規則（basin / stall 另由專屬資料推導）
 export const STOP_DEFS = [
@@ -74,21 +99,74 @@ function makeGround(terrain) {
   };
 }
 
-// 高度下限函式：floor(x, z) = max(地面 + SAFE_CLEAR, BUILDING_PAD 內建築頂 + ROOF_CLEAR)
-export function makeFloor(terrain, buildings) {
+// 名稱牌頂離屋頂的高度（m）
+function plateTop(b) {
+  const p = b.poly;
+  const n = p.length / 2;
+  let L = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    L = Math.max(L, Math.hypot(p[j * 2] - p[i * 2], p[j * 2 + 1] - p[i * 2 + 1]));
+  }
+  return PLATE_LIFT + clamp(L * 0.6, 5, 36) / PLATE_ASPECT;
+}
+
+// 綠地輪廓（公園樹木範圍）：basins（秋紅谷）輪廓
+const greenPolys = (basins) => (basins || []).filter((b) => b && Array.isArray(b.p)).map((b) => b.p);
+
+// 高度下限函式：floor(x, z) = max(地面 + SAFE_CLEAR, BUILDING_PAD 內建築頂 + ROOF_CLEAR, 街道雜物範圍內地面 + STREET_CLEAR)
+//   建築頂：一般建築 = OSM 高度（具名者含名稱牌 + PLATE_CLEAR）；地標 glb = LANDMARK_SOLIDS 各層（輪廓外 pad + BUILDING_PAD 內）
+//   roads = citymodel 道路（{ type, width, hw, pts }）、greens = 綠地輪廓（扁平 [x0, z0, x1, z1, …]）
+export function makeFloor(terrain, buildings, roads = [], greens = []) {
   const ground = makeGround(terrain);
   const grid = new SpatialGrid(25);
-  for (const b of buildings) grid.insert(b, b.bbox.x0, b.bbox.z0, b.bbox.x1, b.bbox.z1);
+  for (const b of buildings) {
+    const tiers = LANDMARK_SOLIDS[b.id];
+    if (tiers) {
+      for (const [pad, h] of tiers) grid.insert({ b, pad, h }, b.bbox.x0 - pad, b.bbox.z0 - pad, b.bbox.x1 + pad, b.bbox.z1 + pad);
+      continue;
+    }
+    const h = b.name ? b.height + Math.max(0, plateTop(b) + PLATE_CLEAR - ROOF_CLEAR) : b.height;
+    grid.insert({ b, pad: 0, h }, b.bbox.x0, b.bbox.z0, b.bbox.x1, b.bbox.z1);
+  }
+  const rgrid = new SpatialGrid(25);
+  for (const r of roads) {
+    if (!(ROAD_TYPES.has(r.type) || (r.type !== 'service' && r.width >= 8))) continue;
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const a = r.pts[i];
+      const c = r.pts[i + 1];
+      const m = r.hw + STREET_REACH;
+      rgrid.insert({ r, a, c }, Math.min(a.x, c.x) - m, Math.min(a.z, c.z) - m, Math.max(a.x, c.x) + m, Math.max(a.z, c.z) + m);
+    }
+  }
+  const greenBoxes = greens.map((p) => ({ p, bb: polygonBBox(p) }));
   const list = [];
   const cp = {};
+  const seg = { x: 0, z: 0, d2: 0, t: 0 };
   const base = (b) => (typeof terrain.buildingBase === 'function' ? terrain.buildingBase(b.id) : 0);
+  const R = STREET_REACH;
+  const inClutter = (x, z) => {
+    rgrid.query(x, z, x, z, list);
+    for (const s of list) {
+      const m = s.r.hw + R;
+      if (closestOnSegment(x, z, s.a.x, s.a.z, s.c.x, s.c.z, seg).d2 < m * m) return true;
+    }
+    for (const { p, bb } of greenBoxes) {
+      if (x < bb.x0 - R || x > bb.x1 + R || z < bb.z0 - R || z > bb.z1 + R) continue;
+      if (pointInPolygon(x, z, p) || closestOnPolygon(x, z, p, cp).d2 < R * R) return true;
+    }
+    return false;
+  };
   return (x, z) => {
-    let f = ground(x, z) + SAFE_CLEAR;
-    const p = BUILDING_PAD;
-    grid.query(x - p, z - p, x + p, z + p, list);
-    for (const b of list) {
-      const top = base(b) + b.height + ROOF_CLEAR;
+    const g = ground(x, z);
+    let f = g + (inClutter(x, z) ? STREET_CLEAR : SAFE_CLEAR);
+    const P = BUILDING_PAD;
+    grid.query(x - P, z - P, x + P, z + P, list);
+    for (const e of list) {
+      const b = e.b;
+      const top = base(b) + e.h + ROOF_CLEAR;
       if (top <= f) continue;
+      const p = P + e.pad;
       if (x < b.bbox.x0 - p || x > b.bbox.x1 + p || z < b.bbox.z0 - p || z > b.bbox.z1 + p) continue;
       if (pointInPolygon(x, z, b.poly) || closestOnPolygon(x, z, b.poly, cp).d2 < p * p) f = top;
     }
@@ -571,7 +649,7 @@ export function samplePathAt(path, t, pos, look) {
 
 // 完整巡覽：{ stops, segments, duration, ... } —— deps = { terrain, buildings, namedBuildings, roads, basins, stall }
 export function buildTour(deps) {
-  const floorAt = makeFloor(deps.terrain, deps.buildings || []);
+  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins));
   const stops = orderStops(tourStops(deps));
   if (stops.length === 0) return null;
   const roads = deps.roads || [];
@@ -595,7 +673,7 @@ export function buildTour(deps) {
 
 // 減少動態效果：老虎城（第一個鏡位）固定高度慢速環繞一整圈為一輪
 export function buildReducedTour(deps) {
-  const floorAt = makeFloor(deps.terrain, deps.buildings || []);
+  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins));
   const stops = tourStops(deps);
   const c = stops.find((s) => s.key === 'tiger') || stops[0] || { x: 0, z: 0, base: 0, top: 10, name: '原點' };
   const sec = (2 * Math.PI) / REDUCED_OMEGA;
