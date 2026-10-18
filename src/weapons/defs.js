@@ -43,6 +43,7 @@ export const WEAPONS = {
     fireInterval: 0.22, // 最短射擊間隔（秒，半自動按住連發）
     reloadSec: 1.4,
     range: 80, // 射程（m）
+    vehicleDamage: 34, // V4：每發打到車的耐久傷害（滿耐久 1000：25 發起火，再 4–6 s 或續射數發爆炸）
     recoilPitch: -0.035, // 每發後座：鏡頭 pitch 增量（rad，負 = 往上抬），再乘 settings.recoil
     recoilYaw: 0.012, // 每發水平後座最大值（rad，左右隨機）
     muzzleHeight: 1.35, // 整合層沒給 aim.muzzle 時：槍口高度（m，腳底往上）

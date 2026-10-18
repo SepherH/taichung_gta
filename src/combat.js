@@ -34,8 +34,13 @@
 //   throughVehicle: true 時改走「車內受擊」：只扣血（hp 歸零照常進 dying）、不硬直 / 不擊倒 / 不播受擊動畫 / 不擊退，
 //   'hit' payload 多 inVehicle: true、knockback null、knockdown false；回傳 { damage, hp, side: 'front', knockdown: false, inVehicle: true }
 //   （玩家車內 hp 歸零的下車倒地由整合層處理：main.js 以 combat.knockdownActor(…, { emit: true }) 接回既有 player:ko 流程）
+// V4 爆炸（explosions.js）：applyHit 的 weapon 加 'explosion'（cause 'explosion'；一下即倒、hp 歸零進 dying；攻擊者不頓幀），
+//   impulse 由爆炸依距離給；玩家在車內時以 throughVehicle 只扣血
+//   damageDown(actor, damage, { weapon, attacker, impulse }) → { damage, hp, knockdown, down: true } | null：爆炸核心必死用的強制扣血入口，
+//     只受理倒地 / 起身中（applyHit 不受理的狀態）且尚未判定死亡者；hp 歸零 → 進 dying 並重發 'knockdown'（玩家接 player:ko → WASTED）
+//     + ped:dead；起身中未死 → 再次倒地；倒地中未死 → 只扣血
 // 匯流排事件 ped:dead（行人 hp 歸零、判定死亡的當下發一次；recoverOnKo 的拳 / 棒歸零只倒地不算）：
-//   payload { ped, cause: 'punch'|'bat'|'bullet'|'vehicle', weapon, attacker（擊殺來源：出手者 / 駕駛 actor 或 null）, byPlayer, x, z }
+//   payload { ped, cause: 'punch'|'bat'|'bullet'|'vehicle'|'explosion', weapon, attacker（擊殺來源：出手者 / 駕駛 actor 或 null）, byPlayer, x, z }
 //   bus 由建構參數注入；省略時用 core/events 全域單例（main.js 用的同一個），給 bus: null 則不發
 
 import { bus as globalBus } from './core/events.js';
@@ -75,12 +80,13 @@ export const KNOCKDOWN_RULES = {
   fist: { hits: COMBO_HITS, window: COMBO_WINDOW },
   bat: { hits: 2, window: COMBO_WINDOW },
   pistol: { hits: 2, window: 1.5 },
+  explosion: { hits: 1, window: 1 }, // V4 爆炸：一律倒地（擊飛衝量由 explosions.js 依距離給）
 };
 // 武器 → knockdown 事件的 cause
-export const WEAPON_CAUSE = { fist: 'punch', bat: 'bat', pistol: 'bullet' };
+export const WEAPON_CAUSE = { fist: 'punch', bat: 'bat', pistol: 'bullet', explosion: 'explosion' };
 // 各武器受擊擊退位移（m）與擊倒水平衝量（N·s，手感設定：推測值）
-export const WEAPON_KNOCKBACK = { fist: KNOCKBACK_DIST, bat: 0.8, pistol: 0.25 };
-export const WEAPON_KNOCKDOWN_IMPULSE = { fist: PUNCH_KNOCKDOWN_IMPULSE, bat: 170, pistol: 90 };
+export const WEAPON_KNOCKBACK = { fist: KNOCKBACK_DIST, bat: 0.8, pistol: 0.25, explosion: 1.5 };
+export const WEAPON_KNOCKDOWN_IMPULSE = { fist: PUNCH_KNOCKDOWN_IMPULSE, bat: 170, pistol: 90, explosion: 300 };
 // 受擊點高度（m，腳底往上）：hit 事件沒有給 point 時的 y
 export const HIT_POINT_HEIGHT = 1.2;
 
@@ -445,7 +451,7 @@ export class CombatSystem {
       byPlayer,
       knockdown: knock,
     });
-    if (a && a.anim && a.anim.hitStop) a.anim.hitStop(HIT_STOP);
+    if (weapon !== 'explosion' && a && a.anim && a.anim.hitStop) a.anim.hitStop(HIT_STOP); // 爆炸的「攻擊者」不在現場，不頓幀
     if (target.anim.hitStop) target.anim.hitStop(HIT_STOP);
     if (knock) {
       const imp = WEAPON_KNOCKDOWN_IMPULSE[weapon];
@@ -460,6 +466,20 @@ export class CombatSystem {
     }
     if (died) this._emitPedDead(e, cause, weapon, a);
     return knock;
+  }
+
+  // 倒地 / 起身中強制扣血（爆炸核心必死；見檔頭 damageDown）
+  damageDown(actor, damage, { weapon = 'explosion', attacker = null, impulse = null } = {}) {
+    const e = actor && this.entries.get(actor.id);
+    if (!e || (e.state !== 'knockdown' && e.state !== 'getup') || e.dying) return null;
+    if (!(damage > 0) || !KNOCKDOWN_RULES[weapon]) return null;
+    const t = this.now();
+    const cause = WEAPON_CAUSE[weapon];
+    const died = this._damage(e, damage, t, cause);
+    const knock = died || e.state === 'getup';
+    if (knock) this._knockdown(e, impulse, t, { cause, weapon, attacker, damage });
+    if (died) this._emitPedDead(e, cause, weapon, attacker);
+    return { damage, hp: actor.hp, knockdown: knock, down: true };
   }
 
   // 外部直接讓角色倒地（契約 §13；取代直接改 entries）：已倒地 / dead / 未註冊回 false

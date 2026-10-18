@@ -380,7 +380,7 @@ body.touch-drive #touch-look { display: none; }
 | `weapon:dryFire` | `{ weapon }` | weapons |
 | `weapon:reload` | `{ weapon, phase: 'start'\|'end', mag, reserve }` | weapons |
 | `weapon:ammo` | `{ weapon, mag, magSize, reserve }` | weapons（任何彈藥變動） |
-| `weapon:impact` | `{ x, y, z, nx, ny, nz, surface: 'world'\|'vehicle' }` | weapons（子彈打到非角色） |
+| `weapon:impact` | `{ x, y, z, nx, ny, nz, surface: 'world'\|'vehicle', vehicle?, damage?, byPlayer? }`（V4：打到車時 `vehicle` = 車輛物件、`damage` = `WEAPONS.pistol.vehicleDamage`） | weapons（子彈打到非角色） |
 | `combat:hit` | `{ attacker, target, weapon: 'fist'\|'bat'\|'pistol'\|'vehicle', damage, hp, x, y, z, dirX, dirZ, side: 'front'\|'back', byPlayer, knockdown: boolean }` | 整合（由 combat 'hit' 轉發） |
 | `ped:knockdown` | §1 原欄位，`cause` 擴充為 `'punch'\|'bat'\|'bullet'\|'vehicle'`，另加 `weapon` | 整合 |
 | `pickup:ammo` | `{ amount, x, z }` | weapons/pickups |
@@ -394,6 +394,10 @@ body.touch-drive #touch-look { display: none; }
 | `collect:checkin` | `{ landmarkId, slug, name, reward }` | collect |
 | `collect:food` | `{ id, name, total, found }` | collect |
 | `ui:sound` | `{ kind: 'click'\|'confirm'\|'cancel'\|'reward'\|'fail'\|'open'\|'close' }` | 任何 UI |
+| `vehicle:fire` | `{ vehicle, x, y, z（引擎蓋）, fuse（秒）}`（V4，§31） | explosions |
+| `vehicle:explode` | `{ vehicle, x, y, z, source（actor \| null）, byPlayer }`（V4，§31） | explosions |
+| `explosion` | `{ x, y, z, radius, power, source, byPlayer, vehicle（車爆 = 該車；直接 explode = null）}`（V4，§31） | explosions |
+| `explosion:shake` | `{ x, y, z, radius, power }`（鏡頭震動；整合層以 `shakeTrauma(距離, radius, power)` 換算 trauma） | explosions |
 
 `combat:hit.side`：目標面向 · (攻擊者 → 目標方向) > 0 = 被從背後打 → `'back'`，否則 `'front'`。
 
@@ -943,6 +947,35 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - `node tools/test/v2-gangs.mjs`（純邏輯 + 替身；含幀率無關、穩態無 GC、每幀成本 < 0.5 ms）
 
 ---
+
+## 31. V4 車輛起火爆炸（罪惡之都；接線點在 `src/main.js`，介面以 `src/explosions.js` 檔頭為準）
+
+### 31.1 模組介面（`src/explosions.js`，純邏輯，不 import three；THREE 注入）
+- `createExplosions({ THREE, scene, bus, combat, physics, config })` → `{ explode(x, y, z, { radius, power, source, vehicle? }), update(dt, simDt = dt, camX?, camZ?), damageVehicle(v, amount, { source }), setSource(v, actor), transfer(from, to, restore?), stateOf(v) → 'ok'|'smoke'|'fire'|'wreck', fuseOf(v), isWreck(v), nearestFire(x, z), cancel(v), forget(v), clear(), stats(), dispose }`
+  - `config = { healthOf(v), maxHealthOf?(v), addDamage(v, n) → 實扣, vehicles?() → iterable, actors?() → iterable（省略 = combat.entries 全部）, onWreck?(v), quality?() → tier（'low' 粒子 / 池減半）, pointScale?() → 像素比例, rng? }`；`physics = { radialImpulse(x, y, z, radius, power) }`（可省略）
+  - 車輛狀態依損壞比（1 − health / maxHealth，耐久即 vehicle-damage.js 那份）：≥ 70% `'smoke'`（煙沿用 vehicle-damage）、≥ 85% `'fire'`（引擎蓋火焰 + 黑煙，引信 4–6 s，起火中每 1 點傷害縮短 0.02 s，點燃當下下限 0.35 s；修好回門檻下自動熄火）→ 爆炸 `'wreck'`：耐久扣到 0（熄火）、`vehicle.burnt = true`、材質複製後變黑、`onWreck(v)`、殘骸冒黑煙 14 s
+  - `explode`：角色 `combat.applyHit({ weapon: 'explosion', impulse（依距離擊飛）, throughVehicle: true })`，傷害 = power × (1 − d / radius)，核心（0.3 × radius）必死（倒地 / 起身中者 applyHit 不受理 → `combat.damageDown`），車內（非核心）× 0.5；車輛 `damageVehicle(power × 10 × 衰減)`（約 3.5 m 內起火 → 連鎖爆炸）；`physics.radialImpulse`；預設 radius 9 m / power 140（公車等 > 5 t × 1.35、機車 × 0.7）
+  - 殘骸以 `v.burnt` 為準（`clear` / `forget` 後再受損也不會重新起火）；`setSource` 的來源 `SOURCE_TTL`（10 s 模擬時間）內有效，爆炸只採用有效來源；`transfer` 把起火狀態搬到新 Vehicle（搶車），`restore(to)` 期間的 `vehicle:damaged` 不觸發起火判斷
+  - 池化：同時爆炸紀錄 ≤ 6（滿了回收最舊）、閃光 PointLight ≤ 2（常駐場景、intensity 0 = 關）、粒子兩個 `Points` 圖層（火：加色 320 / 煙與碎片：256，low 減半；池滿丟新粒子）；每幀路徑不配置物件
+- 匯出純函式：`blastFalloff`、`actorBlastDamage`、`vehicleBlastDamage`、`shakeTrauma(dist, radius, power)`、`fireStage(ratio)`、`charMesh(root)`；常數 `SMOKE_AT / FIRE_AT / FUSE_* / BLAST_* / MAX_EXPLOSIONS / MAX_LIGHTS / PARTICLE_CAPS / BURST`
+- 事件：`vehicle:fire`、`vehicle:explode`、`explosion`、`explosion:shake`（payload 見 §10 表）
+
+### 31.2 跨檔最小擴充
+- `combat.js`：武器 `'explosion'`（`KNOCKDOWN_RULES` 一下即倒、`WEAPON_CAUSE` `'explosion'`、擊退 1.5 m / 預設衝量 300；攻擊者不頓幀）；`ped:dead` / `knockdown` 的 cause 多 `'explosion'`；`damageDown(actor, damage, { weapon, attacker, impulse })`：只受理倒地 / 起身中、未判定死亡者，強制扣血（hp 歸零 → dying + 重發 'knockdown' + `ped:dead`；起身中 → 再倒地）
+- 槍擊車輛：`weapons/defs.js` `pistol.vehicleDamage = 34`；`aim.js resolveShot` 把 raycast 的 `vehicle` 抄進 `out.vehicle`；`weapons.js` 的 `weapon:impact` 多帶 `vehicle / damage / byPlayer`；main.js raycast 以 collider → `VehicleBody.owner` / 車流 `car.v` 填 `vehicle`
+- `vehicle-damage.js`：`maxHealthOf(v)`；`vehicle.js`：`findNearby` / `findOverturned` 跳過 `v.burnt`；`traffic.js`：`car.v.burnt` 的 wrecked 車流車不交還車道、遠了照回收；`_step` / `carjackCandidates` / 喇叭反應跳過 `car.v.burnt`（停用中爆炸未轉 wrecked 也不再行駛、不可搶）
+- 音效：`voices.js` `RECIPES.explosion` / `fire_ignite`、`LOOPS.fire`；`audio/index.js` 訂閱 `explosion` / `vehicle:fire`，`state.fireDist` < 35 m 開燃燒聲；`combat:hit` 的 explosion 不另發擊中聲
+
+### 31.3 接線（main.js）
+- `explosions = createExplosions(…)` 在幫派段之後：`config.addDamage` 先 `ensureDamageable`（車流車第一次被打 / 波及才 `dmg.attach`，被 traffic 回收後 detach + `forget`）、`vehicles()` = VehicleManager 的車 + 啟用中的車流車、`onWreck` 把車流車 `body.hit` 成殘骸剛體（停用中先 `setActive(true)`）；`physics` = `createExplosionImpulse`（Rapier 球形查詢：停放車轉 dynamic、車流車 wreck、動態雜物，Δv 9 m/s × 衰減）
+- `weapon:impact`（帶 vehicle）→ `explosions.damageVehicle(e.vehicle, e.damage, { source: 玩家 })`；碰撞 `impact()` 中玩家駕駛的車實扣耐久 > 0 → `setSource(v, player.actor)`（別人打 / 炸玩家的車不算玩家）；搶車 `releaseCar` 記下舊車耐久，`adopt` 以 `explosions.transfer(舊, 新, 扣耐久)` 帶過損壞與起火；`vehicle:fire`（玩家的車）→ toast 提示下車
+- `explosion:shake` → `rig.shake(shakeTrauma(鏡頭距離, radius, power))` + 手把震動；`explosion` → 45 m 內行人 `hear({ type: 'gunshot' })`
+- 通緝：沿用既有犯行（`p7-wanted` 鎖定 HEAT 10 鍵，不新增 explosion）——爆炸致死 `ped:dead`（cause 'explosion'，byPlayer）→ `kill` / `killPolice`、傷人 `combat:hit` → `assault` / `assaultPolice`、玩家炸警車（`vehicle:explode` byPlayer）→ `policeVehicle`（警車任務逃犯車豁免）
+- 每幀 `updateExplosions(dt)` 接在 `updateGangs` 之後（`explosions.update(dt, worldStep.simDt, focus.x, focus.z)`）；車內爆炸 hp 歸零沿用 V2 的 `gangCarKo`，由 `handleCarKo()` 在 `updateGangs` 結尾與 `updateExplosions` 之後各處理一次（強制下車 + `player:ko`；同幀已按 F 下車也照樣倒地 WASTED）
+- `startGame`、`quitToMenu` → `clearExplosions()`（熄火、終止爆炸 / 閃光、清粒子與殘骸冒煙；殘骸車本身照 `cleanupVehicles` 報廢車回收）
+
+### 31.4 回歸
+- `node tools/test/v4-explode.mjs`（純邏輯，無 three：門檻 / 時序 / 加速 / 範圍傷害 / 擊飛 / 連鎖 / 殘骸 / 槍擊累積 / 犯行 / 池化 / cancel・dispose / 幀率無關 / 每幀成本）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

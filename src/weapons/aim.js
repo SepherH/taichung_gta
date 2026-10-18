@@ -65,9 +65,10 @@ export function pickAimAssist(origin, dir, candidates, out, opts = {}) {
 //      瞄點本身或之後的命中（遠距擦邊、視差）一律採鏡頭命中，不會因槍口射線剛好擦過目標而判為未命中
 //   3) 射程一律由槍口起算：落點離槍口 > range + SHOT_RANGE_TOL → 未命中（hit false、不扣血）
 //   4) 鏡頭射線沒打到東西時瞄點 = 射程盡頭；槍口射線在射程內打到東西就是落點，否則未命中（落點 = 射程末端）
-// raycast(origin, dir, maxDist, { excludeActor }) → { point, normal, actor|null, surface } | null
+// raycast(origin, dir, maxDist, { excludeActor }) → { point, normal, actor|null, surface, vehicle? } | null
+//   vehicle（V4）：surface 'vehicle' 時被打中的車輛物件（整合層給；可省略），原樣抄進 out.vehicle
 //   注入的 raycast 可回傳重用物件（main.js 即是）：鏡頭命中的欄位先抄進區域變數再做第二次查詢
-// out：{ hit, point:{x,y,z}, normal:{x,y,z}, actor, surface, dir:{x,y,z}（槍口 → 落點單位方向）, dist }，回傳 out
+// out：{ hit, point:{x,y,z}, normal:{x,y,z}, actor, surface, vehicle（null 或車輛物件）, dir:{x,y,z}（槍口 → 落點單位方向）, dist }，回傳 out
 export const SHOT_THROUGH = 0.6; // 確認射線越過瞄點的長度（m）：> 行人膠囊直徑
 export const SHOT_OCCLUDE_GAP = 0.1; // 槍口射線命中點比瞄點近這麼多（m）以上才算遮擋
 export const SHOT_RANGE_TOL = 0.25; // 射程容差（m）：鏡頭 / 槍口視差造成的些微超出
@@ -76,6 +77,7 @@ function missShot(out, muzzle, mx, my, mz, range) {
   out.hit = false;
   out.actor = null;
   out.surface = null;
+  out.vehicle = null;
   out.point.x = muzzle.x + mx * range;
   out.point.y = muzzle.y + my * range;
   out.point.z = muzzle.z + mz * range;
@@ -113,6 +115,7 @@ export function resolveShot(raycast, origin, dir, muzzle, range, excludeActor, o
   let camHasN = false;
   let camActor = null;
   let camSurface = null;
+  let camVehicle = null;
   if (camHit) {
     cam = true;
     ax = camHit.point.x;
@@ -126,6 +129,7 @@ export function resolveShot(raycast, origin, dir, muzzle, range, excludeActor, o
     }
     camActor = camHit.actor || null;
     camSurface = camHit.surface || null;
+    camVehicle = camHit.vehicle || null;
   } else {
     ax = o.x + fx * range;
     ay = o.y + fy * range;
@@ -160,6 +164,7 @@ export function resolveShot(raycast, origin, dir, muzzle, range, excludeActor, o
     out.hit = true;
     out.actor = conf.actor || null;
     out.surface = conf.surface || (conf.actor ? 'actor' : 'world');
+    out.vehicle = conf.vehicle || null;
     out.point.x = conf.point.x;
     out.point.y = conf.point.y;
     out.point.z = conf.point.z;
@@ -174,6 +179,7 @@ export function resolveShot(raycast, origin, dir, muzzle, range, excludeActor, o
   out.hit = true;
   out.actor = camActor;
   out.surface = camSurface || (camActor ? 'actor' : 'world');
+  out.vehicle = camVehicle;
   out.point.x = ax;
   out.point.y = ay;
   out.point.z = az;

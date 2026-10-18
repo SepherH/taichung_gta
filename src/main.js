@@ -74,6 +74,7 @@ import { Traffic } from './traffic.js';
 import { createTrafficLights } from './traffic-lights.js';
 import { createCarjack } from './carjack.js';
 import { DAMAGE_EXP, DAMAGE_MIN_SPEED, createVehicleDamage, impactDamage } from './vehicle-damage.js';
+import { createExplosions, shakeTrauma } from './explosions.js';
 import { CameraRig } from './camera.js';
 import { HUD } from './hud.js';
 import { DayNight, nightMaterials, registerNight } from './daynight.js';
@@ -98,6 +99,7 @@ import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
 import { ACTIVE_RADIUS, createPedestrianBody } from './physics/npc-bodies.js';
+import { NPC_WRECK_IMPULSE } from './physics/npc-bodies.js';
 import { createWorldStep, createFrameLoop } from './core/loop.js';
 import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS } from './weapons/index.js';
 import { makeBatSegment } from './weapons/models.js';
@@ -154,6 +156,9 @@ const WRECK_FAR = 150; // 熄火報廢的車超過此距離就回收（m）
 const FPS_SAMPLE_SEC = 0.5; // FPS 顯示更新間隔（s）
 const PERF_FRAMES = 120; // __game.perf() 統計的最近幀數
 const CRASH_SHAKE_SPEED = 25; // 撞擊相對速度（m/s）達此值時鏡頭震動 trauma = 1
+const EXPLOSION_HEAR_RADIUS = 45; // m：爆炸聲驚嚇行人半徑（V4）
+const EXPLOSION_DV = 9; // m/s：爆心處剛體的速度變化（依距離線性衰減、依 power 縮放；V4 explosionImpulse）
+const EXPLOSION_SPIN = 0.6; // 角衝量比例（翻滾感）
 const HINT_ATTACK_SEC = 8; // 步行幾秒後出現「攻擊」提示卡
 const HINT_PAUSE_SEC = 30; // 遊玩幾秒後出現「暫停選單」提示卡
 const FOG_NEAR_RATIO = 0.25; // 畫質視距縮短時霧的起點（相對霧終點）
@@ -293,6 +298,73 @@ function impactSpeedFromDamage(vehicle, delta) {
   const k = impactDamage(vehicle, DAMAGE_MIN_SPEED + 1, 'static'); // = K × 質量係數（relSpeed − 4 = 1）
   if (!(k > 0) || !(delta > 0)) return 0;
   return DAMAGE_MIN_SPEED + Math.pow(delta / k, 1 / DAMAGE_EXP);
+}
+
+// V4 爆炸物理衝量（explosions.js 的 physics.radialImpulse）：球形查詢半徑內的車（停放車先轉 dynamic）/ 車流車（轉 wrecked）/ 動態雜物，
+//   依距離給速度變化（Δv = EXPLOSION_DV × 衰減 × power / 140，與質量無關）+ 少量翻滾；行人剛體由 combat 擊倒流程處理，這裡不碰
+// 查詢期間只收集 collider，結束後才改剛體型別 / 施力；每次爆炸配置一個 Set（事件層級，非每幀）
+function createExplosionImpulse({ RAPIER, pw, router, groups, flags }) {
+  const ball = new RAPIER.Ball(1);
+  const pos = { x: 0, y: 0, z: 0 };
+  const rot = { x: 0, y: 0, z: 0, w: 1 };
+  const query = { flags, groups };
+  const found = [];
+  const collect = (c) => {
+    found.push(c);
+    return true;
+  };
+  const imp = { x: 0, y: 0, z: 0 };
+  const spin = { x: 0, y: 0, z: 0 };
+  const UP = { x: 0, y: 1, z: 0 };
+  return {
+    radialImpulse(x, y, z, radius, power) {
+      found.length = 0;
+      ball.radius = Math.max(0.5, radius);
+      pos.x = x;
+      pos.y = y;
+      pos.z = z;
+      pw.intersections(pos, rot, ball, collect, query);
+      const seen = new Set();
+      for (const c of found) {
+        const ent = router.entityOf(c.handle);
+        let body = null;
+        if (ent && ent.kind === 'vehicle') {
+          if (!ent.active) continue;
+          if (ent.kinematic) {
+            ent.setKinematic(false);
+            if (ent.owner) ent.owner.rest = 0;
+          }
+          body = ent.body;
+        } else if (ent && ent.kind === 'npcCar') {
+          if (!ent.active) continue;
+          if (!ent.isWrecked) ent.hit({ impulse: NPC_WRECK_IMPULSE, dir: UP });
+          if (!ent.isWrecked) continue;
+          body = ent.body;
+        } else if (!ent || ent.kind === 'world') {
+          body = c.parent();
+          if (!body || !body.isDynamic()) continue;
+        } else continue;
+        if (!body || seen.has(body.handle)) continue;
+        seen.add(body.handle);
+        const t = body.translation();
+        const dx = t.x - x;
+        const dz = t.z - z;
+        const d = Math.hypot(dx, t.y - y, dz);
+        const k = Math.max(0, 1 - d / radius);
+        if (k <= 0) continue;
+        const hd = Math.hypot(dx, dz) || 1;
+        const J = body.mass() * EXPLOSION_DV * k * (power / 140);
+        imp.x = (dx / hd) * J;
+        imp.y = J * 0.8;
+        imp.z = (dz / hd) * J;
+        body.applyImpulse(imp, true);
+        spin.x = (dz / hd) * J * EXPLOSION_SPIN;
+        spin.y = 0;
+        spin.z = (-dx / hd) * J * EXPLOSION_SPIN;
+        body.applyTorqueImpulse(spin, true);
+      }
+    },
+  };
 }
 
 // 老虎城玻璃等材質的反射環境：scene.environment 已有就沿用；否則以 PMREM 從簡單天空漸層場景產生一張
@@ -631,7 +703,14 @@ async function init() {
     return ent && ent.kind === 'pedestrian' && ent.owner && ent.owner.actor ? ent.owner.actor : null;
   };
   // 射線：槍口射線排除玩家自己的膠囊；回傳物件重用（weapons / aim.js 讀完即用，不長期持有）
-  const rayHit = { point: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 }, actor: null, surface: 'world' };
+  const rayHit = { point: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 }, actor: null, surface: 'world', vehicle: null };
+  // V4 槍擊車輛：車身 collider → Vehicle（停放 / 玩家車 = VehicleBody.owner；車流車 = traffic.cars 的 car.v，只在命中時線性查找）
+  const vehicleOfEntity = (ent) => {
+    if (!ent) return null;
+    if (ent.kind === 'vehicle') return ent.owner || null;
+    if (ent.kind === 'npcCar') for (const c of traffic.cars) if (c.body === ent) return c.v;
+    return null;
+  };
   const rayQuery = { flags: QF_NO_SENSOR, groups: shotGroups, excludeCollider: undefined };
   const raycast = (origin, dir, maxDist, opts) => {
     const self = opts && opts.excludeActor === player.actor;
@@ -653,6 +732,7 @@ async function init() {
     rayHit.normal.z = h.nz;
     rayHit.actor = actor && !(opts && opts.excludeActor === actor) ? actor : null;
     rayHit.surface = ent && (ent.kind === 'vehicle' || ent.kind === 'npcCar') ? 'vehicle' : 'world';
+    rayHit.vehicle = rayHit.surface === 'vehicle' ? vehicleOfEntity(ent) : null;
     return rayHit;
   };
   // 膠囊掃掠：from–to 為軸（半長 = |to − from| / 2、半徑 r），與行人剛體重疊者 → actor 陣列（重用）
@@ -1179,12 +1259,27 @@ async function init() {
 
   // ---------- 搶車 ----------
   const cj = createCarjack({ bus });
+  // 搶走受損 / 起火中的車流車：耐久與起火狀態（引信 / 來源）帶到新 Vehicle（不因轉手變回滿血無火）
+  let jackFrom = null;
+  let jackHealth = null;
   const carjackAdapters = {
-    releaseCar: (car) => traffic.releaseCar(car),
+    releaseCar: (car) => {
+      jackFrom = car ? car.v : null;
+      jackHealth = jackFrom ? dmg.healthOf(jackFrom) : null;
+      return traffic.releaseCar(car);
+    },
     adopt: (pose) => {
       const v = vehicles.adopt(pose);
       dmg.attach(v);
       adopted.add(v);
+      if (v && jackHealth !== null) {
+        const lost = dmg.maxHealthOf(v) - jackHealth;
+        explosions.transfer(jackFrom, v, () => {
+          if (lost > 0) dmg.addDamage(v, lost);
+        });
+      }
+      jackFrom = null;
+      jackHealth = null;
       return v;
     },
     spawnEjectedDriver: (o) => traffic.spawnEjectedDriver({ ...o, attacker: player.actor }),
@@ -1521,6 +1616,7 @@ async function init() {
 
   // ---------- 車輛耐久：contacts router → onImpact（以 body.owner 找 Vehicle，未 attach 的車流車由 dmg 忽略）----------
   const byPlayer = (v) => state.mode === 'drive' && state.vehicle === v;
+  let blastSource = null; // explosions.setSource（V4 段建立後綁定）
   // 易碎貨物：玩家駕駛車輛的每次碰撞（≥ IMPACT_MIN = 4 m/s）都通知委託；不依賴 vehicle:crash（只在 ≥ 8 m/s 發出）
   // 兩個來源：contacts 的 relSpeed（先於耐久計算，不受 dmg 去重 / 未 attach 影響）與 vehicle:damaged 的 delta（反推等效速度）；
   // 同一次碰撞兩路都回報時，missions 以 IMPACT_MERGE_SEC 視窗只取最大值，不會重複累積
@@ -1535,7 +1631,9 @@ async function init() {
     if (!v) return;
     const mine = byPlayer(v);
     if (mine) reportImpact(relSpeed);
-    dmg.onImpact(v, { relSpeed, kind, byPlayer: mine });
+    const d = dmg.onImpact(v, { relSpeed, kind, byPlayer: mine });
+    // V4：只有玩家駕駛的這次碰撞實際扣到耐久才記為玩家造成（爆炸致死照犯行計算）；explosions 於下方建立，執行期才會呼叫
+    if (mine && d > 0 && typeof blastSource === 'function') blastSource(v, player.actor); // typeof：integration-p4 抽段執行時 blastSource 不在範圍內
   };
   bus.on('vehicle:damaged', ({ vehicle, delta }) => {
     if (!byPlayer(vehicle) || !(delta > 0)) return;
@@ -1853,11 +1951,20 @@ async function init() {
     player: gangPlayer,
     damageVehicle: (n) => (state.mode === 'drive' && state.vehicle ? dmg.addDamage(state.vehicle, n) : 0),
   };
-  // 車內中彈 hp 歸零：下一次 updateGangs 強制下車倒地（knockdownActor emit → 既有 combat 'knockdown' → player:ko → WASTED）
-  let gangCarKo = false;
+  // 車內中彈 / 被炸 hp 歸零：handleCarKo（updateGangs 結尾、updateExplosions 之後各一次）強制下車倒地
+  // （knockdownActor emit → 既有 combat 'knockdown' → player:ko → WASTED）；同一幀已按 F 下車（walk）也照樣倒地
+  let gangCarKo = null; // null | 倒地 cause
   combat.on('hit', (e) => {
-    if (e.inVehicle && e.target === player.actor && player.actor.hp <= 0) gangCarKo = true;
+    if (e.inVehicle && e.target === player.actor && player.actor.hp <= 0) gangCarKo = e.weapon === 'explosion' ? 'explosion' : 'bullet';
   });
+  const handleCarKo = () => {
+    if (!gangCarKo) return;
+    const cause = gangCarKo;
+    gangCarKo = null;
+    if (state.respawn || state.koTimer > 0 || player.actor.hp > 0) return;
+    if (state.mode === 'drive') exitVehicle(true);
+    combat.knockdownActor(player.actor, { cause, emit: true });
+  };
   const updateGangs = (dt, skip) => {
     const v = state.mode === 'drive' ? state.vehicle : null;
     const p = playerPos();
@@ -1870,11 +1977,7 @@ async function init() {
     gangPlayer.disabled = state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor);
     gangCtx.frozen = skip || !!state.respawn || !!state.spraying;
     gangs.update(dt, gangCtx);
-    if (!gangCarKo) return;
-    gangCarKo = false;
-    if (state.mode !== 'drive' || state.respawn || state.koTimer > 0 || player.actor.hp > 0) return;
-    exitVehicle(true);
-    combat.knockdownActor(player.actor, { cause: 'bullet', emit: true });
+    handleCarKo();
   };
   bus.on('gang:enter', (e) => {
     if (state.started && e) hud.toast(`⚠ 進入${e.name}地盤`, 3);
@@ -1885,6 +1988,101 @@ async function init() {
   bus.on('gang:driveby', (e) => {
     if (state.started && e && e.phase === 'start') hud.toast(`${e.name}開車來找你了！`, 3);
   });
+
+  // ---------- V4 車輛起火爆炸（src/explosions.js；介面見 docs/dev/interfaces.md §31）----------
+  // 耐久沿用 dmg（vehicle-damage.js）；車流車平時不 attach，第一次被槍擊 / 爆炸波及時才 dmg.attach（trafficDamaged，回收時 detach）
+  const trafficDamaged = new Set();
+  const trafficCarOfVehicle = (v) => {
+    for (const c of traffic.cars) if (c.v === v) return c;
+    return null;
+  };
+  const ensureDamageable = (v) => {
+    if (dmg.healthOf(v) !== null) return true;
+    if (!trafficCarOfVehicle(v)) return false;
+    dmg.attach(v);
+    trafficDamaged.add(v);
+    return true;
+  };
+  const blastVehicles = []; // 範圍效果候選（重用）：VehicleManager 的車 + 啟用中的車流車
+  const explosionImpulse = createExplosionImpulse({ RAPIER, pw, router, groups: queryGroups(G_VEHICLE | G_NPC_CAR | G_DEBRIS), flags: QF_NO_SENSOR });
+  const explosions = createExplosions({
+    THREE,
+    scene,
+    bus,
+    combat,
+    physics: explosionImpulse,
+    config: {
+      healthOf: (v) => dmg.healthOf(v),
+      maxHealthOf: (v) => dmg.maxHealthOf(v),
+      addDamage: (v, n) => (ensureDamageable(v) ? dmg.addDamage(v, n) : 0),
+      vehicles: () => {
+        blastVehicles.length = 0;
+        for (const v of vehicles.vehicles) blastVehicles.push(v);
+        for (const c of traffic.cars) if (c.body.active) blastVehicles.push(c.v);
+        return blastVehicles;
+      },
+      // 殘骸：車流車轉成殘骸剛體（dynamic、不再交還車道，遠了照 traffic 回收）；玩家正在開的車由車內 hp 歸零流程（gangCarKo）下車
+      onWreck: (v) => {
+        // 停用中（ACTIVE_RADIUS 外）的剛體 hit 不受理：先啟用再轉殘骸（traffic 另以 v.burnt 停駛 / 不給搶）
+        const c = trafficCarOfVehicle(v);
+        if (c && !c.body.isWrecked) {
+          if (!c.body.active) c.body.setActive(true);
+          c.body.hit({ impulse: NPC_WRECK_IMPULSE * 1.5, dir: { x: 0, y: 1, z: 0 } });
+        }
+      },
+      quality: () => tier,
+      pointScale: () => renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)),
+      rng: Math.random,
+    },
+  });
+  // 玩家槍擊車輛：weapon:impact 帶 vehicle（main.js raycast → aim.js → weapons.js）→ 車輛損壞（約 25 發起火）
+  bus.on('weapon:impact', (e) => {
+    if (!e || !e.vehicle || !(e.damage > 0)) return;
+    explosions.damageVehicle(e.vehicle, e.damage, { source: e.byPlayer ? player.actor : null });
+  });
+  // 玩家駕駛撞到起火 / 爆炸：記為玩家造成——只在 impact() 由玩家駕駛的碰撞設定（別人打 / 炸玩家的車不算玩家）
+  blastSource = explosions.setSource;
+  bus.on('vehicle:fire', (e) => {
+    if (e && byPlayer(e.vehicle)) hud.toast('🔥 車子起火了！快按 F 下車！', 3);
+  });
+  // 鏡頭震動：依鏡頭到爆炸點的距離換算 trauma；手把同步震動
+  bus.on('explosion:shake', (e) => {
+    const k = shakeTrauma(Math.hypot(camera.position.x - e.x, camera.position.y - e.y, camera.position.z - e.z), e.radius, e.power);
+    if (!(k > 0)) return;
+    rig.shake(k);
+    gamepad.rumble(k, k, 200 + 400 * k);
+  });
+  // 爆炸聲驚嚇：45 m 內行人 hear（同槍聲反應）
+  const boomEvt = { type: 'gunshot', x: 0, z: 0 };
+  bus.on('explosion', (e) => {
+    boomEvt.x = e.x;
+    boomEvt.z = e.z;
+    for (const b of traffic.brains.values()) {
+      const p = b && b.actor && b.actor.pos;
+      if (p && (p.x - e.x) ** 2 + (p.z - e.z) ** 2 <= EXPLOSION_HEAR_RADIUS * EXPLOSION_HEAR_RADIUS) b.hear(boomEvt);
+    }
+  });
+  // 通緝：爆炸致死 / 傷人走既有 ped:dead（cause 'explosion' → kill / killPolice）與 combat:hit（assault）；炸警車 = policeVehicle
+  bus.on('vehicle:explode', (e) => {
+    if (!e || !e.byPlayer || !isPoliceCar(e.vehicle) || stolenPolice.has(e.vehicle)) return;
+    if (vigHooks.fugitiveShot(e.x, e.z)) return;
+    reportCrime(CRIMES.policeVehicle, e.x, e.z);
+  });
+  // 每幀：引信吃模擬時間（worldStep.simDt），粒子 / 閃光吃渲染 dt；殘骸車流車被 traffic 回收後 detach
+  let explodeScanT = 0;
+  const updateExplosions = (dt) => {
+    explosions.update(dt, worldStep.simDt, focus.x, focus.z);
+    explodeScanT += dt;
+    if (explodeScanT < CLEANUP_SEC) return;
+    explodeScanT = 0;
+    for (const v of trafficDamaged) {
+      if (trafficCarOfVehicle(v)) continue;
+      dmg.detach(v);
+      explosions.forget(v);
+      trafficDamaged.delete(v);
+    }
+  };
+  const clearExplosions = () => explosions.clear();
 
   // 車流停車判斷用：玩家（或玩家的車）與路邊車輛
   const blockers = [];
@@ -2100,7 +2298,7 @@ async function init() {
   // 音效每幀狀態（重用）：聆聽點 = 鏡頭；rpm01 = |速度| / 最高速、skid01 = 側滑速度 / SKID_REF、nearJunction = 最近號誌路口距離
   const audioState = {
     x: 0, z: 0, yaw: 0, driving: false, speedKmh: 0, rpm01: 0, throttle: 0, skid01: 0, twoWheeler: false,
-    walkSpeed: 0, grounded: true, nearJunction: null, paused: false, rain: 0, garbageTruckDist: Infinity,
+    walkSpeed: 0, grounded: true, nearJunction: null, paused: false, rain: 0, garbageTruckDist: Infinity, fireDist: Infinity,
   };
   let junctionT = JUNCTION_SCAN_SEC;
   let junctionDist = null;
@@ -2139,6 +2337,7 @@ async function init() {
     st.grounded = player.onGround;
     st.nearJunction = state.started ? nearestJunction(dt, focus.x, focus.z) : null;
     st.rain = weather.getState().rain; // 雨聲（Phase 5）：state.rain > 0.01 時 audio 開 LOOPS.rain
+    st.fireDist = state.started ? explosions.nearestFire(focus.x, focus.z) : Infinity; // V4 燃燒聲：最近起火車 / 冒煙殘骸距離
     // 垃圾車音樂：玩家到垃圾車距離（missions.truckState().distM；無車 / 未知 = Infinity）；< 220 m 時 audio 開 LOOPS.garbage_truck（music 群組）
     const tk = state.started ? missions.truckState() : null;
     st.garbageTruckDist = tk && Number.isFinite(tk.distM) ? tk.distM : Infinity;
@@ -2210,6 +2409,8 @@ async function init() {
     updateRobberies(dt, phoneOpen);
     updateVigilante(dt, phoneOpen);
     updateGangs(dt, phoneOpen);
+    updateExplosions(dt);
+    handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2555,6 +2756,7 @@ async function init() {
     closePanels();
     cancelVigilante();
     gangs.cancel();
+    clearExplosions();
     cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
@@ -2623,6 +2825,7 @@ async function init() {
     player.locked = false;
     cancelVigilante();
     gangs.cancel();
+    clearExplosions();
     cancelRobbery();
     cancelSpray();
     cancelRespawn();

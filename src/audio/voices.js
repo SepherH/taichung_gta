@@ -101,6 +101,22 @@ export const RECIPES = {
     noiseHit(v, t + 0.02, { buf: nb.white, type: 'highpass', freq: 3200, gain: 0.35 * k, a: 0.002, d: 0.3 });
     return 0.8;
   },
+  // V4 爆炸：低頻 boom（正弦下滑）+ 粉噪轟鳴長尾 + 白噪碎裂高頻；o.k = 0–1 力道（距離已由 play 的 3D 衰減處理）
+  explosion(v, t, o, nb) {
+    const k = o && Number.isFinite(o.k) ? o.k : 1;
+    const p = vary(0.06);
+    toneHit(v, t, { type: 'sine', freq: 70 * p, freqEnd: 24, gain: 1 * k, a: 0.003, d: 0.9 });
+    noiseHit(v, t, { buf: nb.pink, type: 'lowpass', freq: 1400 * p, freqEnd: 120, gain: 1 * k, a: 0.004, d: 1.6 });
+    noiseHit(v, t, { buf: nb.white, type: 'highpass', freq: 2500, gain: 0.45 * k, a: 0.002, d: 0.35 });
+    noiseHit(v, t + 0.12, { buf: nb.white, type: 'bandpass', freq: 3800 * p, Q: 3, gain: 0.2 * k, a: 0.002, d: 0.5 }); // 碎片 / 玻璃
+    return 1.7;
+  },
+  // V4 起火：「呼」一聲點燃（帶通噪聲由低往高掃 + 低頻悶響）
+  fire_ignite(v, t, o, nb) {
+    noiseHit(v, t, { buf: nb.pink, type: 'bandpass', freq: 300, freqEnd: 1500, Q: 0.9, gain: 0.55, a: 0.06, d: 0.6 });
+    toneHit(v, t, { type: 'sine', freq: 90, freqEnd: 55, gain: 0.35, a: 0.02, d: 0.4 });
+    return 0.7;
+  },
   // 喇叭：兩個方波和弦 → 低通 → 維持包絡
   horn(v, t, o) {
     const ctx = v.ctx;
@@ -239,6 +255,22 @@ export const LOOPS = {
   },
   // 雨聲（p5-s1）：粉噪高通（雨幕沙沙）+ 白噪帶通（近處水花嘶聲）；內部 level 增益隨 s.rain（0–1）→ rainLevel，
   // 雨勢大時高通截止往下、聲音較厚；外層 gain 仍由呼叫端控制（sfx 群組、paused 靜音），s.rain 為 0 時本身就靜音
+  // V4 燃燒：低通粉噪「轟轟」+ 帶通白噪劈啪；音量由呼叫端（index.js 依 state.fireDist）以 gain 控制，set 不調音色
+  fire(v, nb) {
+    const ctx = v.ctx;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const roar = noiseLoop(v, nb.pink, 'lowpass', 520, 0.8);
+    roar.filter.connect(gain);
+    const crackle = noiseLoop(v, nb.white, 'bandpass', 2600, 2.5);
+    const cg = ctx.createGain();
+    cg.gain.value = 0.18;
+    crackle.filter.connect(cg);
+    cg.connect(gain);
+    roar.src.start(0, Math.random());
+    crackle.src.start(0, Math.random());
+    return { gain, set() {} };
+  },
   rain(v, nb) {
     const ctx = v.ctx;
     const gain = ctx.createGain();

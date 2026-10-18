@@ -3,6 +3,7 @@
 // - AudioContext 延到 unlock()（首次使用者手勢）才建立並 resume；未解鎖前 play 靜默略過；無 AudioContext（node）時整個模組 no-op
 // - 音量：master × sfx（一次性音效、引擎、輪胎）、master × music（路口聲景）；settings.subscribe 即時生效
 // - 音源池 ≤ MAX_VOICES（持續音源算在內）；滿了停掉最舊的一次性音源
+// - V4：state.fireDist（最近起火車 m）< FIRE_ON 時開 LOOPS.fire（sfx 群組，音量隨距離）；vehicle:fire → fire_ignite、explosion → explosion（低頻 boom + 轟鳴長尾）；combat:hit 的 weapon 'explosion' 不另發擊中聲
 // - weapon:impact → ricochet（world 石面「啾」/ vehicle 金屬「鏘」，配方在 voices.js RECIPES）
 // - 一次性音效帶 opts.x / z 時以上一幀 update 的 state.x / z / yaw 為聆聽點：距離衰減（> MAX_DIST 不播）+ 左右聲像
 // - 雨聲（Phase 5）：state.rain（weather.getState().rain，0–1）> RAIN_ON 時開 LOOPS.rain（sfx 群組），≤ RAIN_OFF 關；
@@ -31,6 +32,8 @@ export const RAIN_ON = 0.01; // state.rain 超過才開雨聲
 const RAIN_OFF = 0.005; // 遲滯：低於才關
 export const TRUCK_ON = 220; // m：垃圾車距離小於此值開旋律（= voices.js GARBAGE_TRUCK_FAR_M，再遠音量本來就是 0）
 const TRUCK_OFF = 235; // m：遲滯，超過才關
+export const FIRE_ON = 35; // m：最近的起火車小於此距離開燃燒聲（V4）
+const FIRE_OFF = 40; // m：遲滯
 
 // 距離 → 音量倍率（近處 1，60 m 前 12 m 內淡到 0）
 export function distanceGain(d) {
@@ -86,7 +89,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
   const outRef = { ctx: null, out: null }; // getOutput() 回傳（重用，每幀呼叫不配置）
 
   const voices = []; // { ctx, out, sources, end, loop, panner }
-  const loops = { engine: null, tire: null, ambience: null, rain: null, garbage_truck: null }; // { v, ctrl, last }
+  const loops = { engine: null, tire: null, ambience: null, rain: null, garbage_truck: null, fire: null }; // { v, ctrl, last }
   // 聆聽點（上一幀 state）
   let hasListener = false;
   let lx = 0;
@@ -325,6 +328,13 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
       loopGain(loops.rain, paused ? 0 : 1, now);
     }
 
+    // 燃燒聲（V4，LOOPS.fire，sfx 群組）：state.fireDist = 最近起火車 / 殘骸距離（m；無 = Infinity / 缺）< FIRE_ON 開、≥ FIRE_OFF 關
+    const fd = state.fireDist;
+    const hasFd = typeof fd === 'number' && Number.isFinite(fd);
+    if (hasFd && fd < FIRE_ON && !loops.fire) loops.fire = startLoop('fire', sfx);
+    else if (loops.fire && (!hasFd || fd >= FIRE_OFF)) stopLoop('fire');
+    if (loops.fire) loopGain(loops.fire, paused || !hasFd ? 0 : 0.5 * Math.max(0, 1 - fd / FIRE_OFF), now);
+
     // 垃圾車音樂（LOOPS.garbage_truck，music 群組；距離遲滯；音量由 voices.js 依 garbageTruckDist 調整，暫停時外層增益 0 且不排程音符）
     const td = state.garbageTruckDist;
     const hasTd = typeof td === 'number' && Number.isFinite(td);
@@ -401,6 +411,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
   on('weapon:impact', (e) => play('ricochet', { x: e.x, z: e.z, surface: e.surface, volume: IMPACT_VOLUME }));
   on('weapon:swing', (e) => play('bat_swing', { x: e.x, z: e.z, weapon: e.weapon }));
   on('combat:hit', (e) => {
+    if (e.weapon === 'explosion') return; // 爆炸受擊不另發擊中聲（爆炸聲已涵蓋）
     const name = e.weapon === 'bat' ? 'bat_hit' : 'punch';
     play(name, { x: e.x, z: e.z, volume: e.weapon === 'pistol' ? 0.5 : 1 });
   });
@@ -409,6 +420,9 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
     const rel = Number.isFinite(e.relSpeed) ? e.relSpeed : 8;
     play('crash', { k: Math.min(1, Math.max(0.25, (rel - 4) / 20)) });
   });
+  // V4 起火 / 爆炸（explosions.js）：爆炸 3D 定位、力道依 power（同樣受 MAX_DIST 與音源上限約束）
+  on('vehicle:fire', (e) => play('fire_ignite', { x: e.x, z: e.z }));
+  on('explosion', (e) => play('explosion', { x: e.x, z: e.z, k: Math.min(1, Math.max(0.5, (e.power || 140) / 140)) }));
   on('mission:complete', () => play('ui_reward'));
   on('mission:fail', () => play('ui_fail'));
   on('collect:checkin', () => play('ui_reward'));
@@ -435,7 +449,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
         disconnect(v);
       }
       voices.length = 0;
-      loops.engine = loops.tire = loops.ambience = loops.rain = loops.garbage_truck = null;
+      loops.engine = loops.tire = loops.ambience = loops.rain = loops.garbage_truck = loops.fire = null;
       try {
         const p = ctx.close && ctx.close();
         if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -456,7 +470,7 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
       voices: voices.length,
       maxVoices: MAX_VOICES,
       unlocked: running(),
-      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0) + (loops.rain ? 1 : 0) + (loops.garbage_truck ? 1 : 0),
+      loops: (loops.engine ? 1 : 0) + (loops.tire ? 1 : 0) + (loops.ambience ? 1 : 0) + (loops.rain ? 1 : 0) + (loops.garbage_truck ? 1 : 0) + (loops.fire ? 1 : 0),
       garbageTruck: !!loops.garbage_truck,
       plays: playCount,
       last: lastPlayed,

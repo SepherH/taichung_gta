@@ -206,7 +206,7 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
   // FX3-2：易碎貨物 = 玩家駕駛車輛的每次碰撞（≥ 4 m/s）；不經 vehicle:crash（只在 ≥ 8 m/s 發出）
   check('main.js：易碎碰撞接線（contacts relSpeed 先於耐久計算回報、vehicle:damaged delta 反推、門檻 IMPACT_MIN、不經 vehicle:crash）',
     /import \{[^}]*IMPACT_MIN as MISSION_IMPACT_MIN[^}]*\} from '\.\/missions\/index\.js';/.test(mainSrc)
-    && /if \(mine\) reportImpact\(relSpeed\);\s*dmg\.onImpact\(/.test(code)
+    && /if \(mine\) reportImpact\(relSpeed\);\s*(?:const \w+ = )?dmg\.onImpact\(/.test(code)
     && /bus\.on\('vehicle:damaged', \(\{ vehicle, delta \}\) => \{[\s\S]*?byPlayer\(vehicle\)[\s\S]*?reportImpact\(impactSpeedFromDamage\(vehicle, delta\)\)/.test(code)
     && !/bus\.on\('vehicle:crash'[^\n]*onVehicleImpact/.test(code));
   check('main.js + core/loop.js：暫停時世界停止更新但照常渲染（tick 結構保留）、音效暫停中也 update',

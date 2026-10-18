@@ -733,7 +733,7 @@ export class VehicleManager {
     let best = null;
     let bestD = maxDist;
     for (const v of this.vehicles) {
-      if (v.driven || v.fallen || v.isOverturned()) continue; // 翻覆 / 倒地的車要先扶起（findOverturned）
+      if (v.driven || v.fallen || v.isOverturned() || v.burnt) continue; // 翻覆 / 倒地的車要先扶起（findOverturned）；燒焦殘骸（V4 burnt）不能開
       if (v.ai && Math.abs(v.speed || 0) > AI_BOARD_MAX_SPEED) continue; // 行駛中的 AI 警車不可直接上車（比照車流 CARJACK_MAX_SPEED）
       for (const c of v.circles()) {
         const d = Math.hypot(pos.x - c.x, pos.z - c.z) - c.r;
@@ -751,7 +751,7 @@ export class VehicleManager {
     let best = null;
     let bestD = maxDist;
     for (const v of this.vehicles) {
-      if (!v.isOverturned()) continue;
+      if (!v.isOverturned() || v.burnt) continue; // 燒焦殘骸不給扶起
       for (const c of v.circles()) {
         const d = Math.hypot(pos.x - c.x, pos.z - c.z) - c.r;
         if (d < bestD) {

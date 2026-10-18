@@ -1049,7 +1049,7 @@ export class Traffic {
     const far2 = CAR_RECYCLE * CAR_RECYCLE;
     for (const car of this.cars) {
       if (ops >= CAR_MAX_PER_TICK) break;
-      if (car.body.isWrecked) continue;
+      if (car.body.isWrecked && !car.v.burnt) continue; // 燒焦殘骸不會恢復：遠了照回收
       const d2 = (car.v.pos.x - center.x) ** 2 + (car.v.pos.z - center.z) ** 2;
       if (d2 > far2 && this._hidden(car.v.pos.x, car.v.pos.z)) {
         this._removeCar(car);
@@ -1323,7 +1323,7 @@ export class Traffic {
   _step(dt) {
     this._simAcc += dt; // 本幀已推進的模擬秒數（sync 取走後歸零）
     for (const car of this.cars) {
-      if (car.body.isWrecked) continue;
+      if (car.body.isWrecked || car.v.burnt) continue; // V4 燒焦殘骸（停用中爆炸沒轉成 wrecked 也一樣）不再沿車道行駛
       this._driveCar(car, dt, this.blockers);
       const v = car.v;
       car.body.setTargetPose(v.pos.x, v.pos.y, v.pos.z, v.yaw, dt);
@@ -1339,7 +1339,7 @@ export class Traffic {
       b.update(dt);
       const pose = b.getPose();
       car.v.pos.set(pose.x, pose.y, pose.z);
-      if (b.canRecover && b.recover()) this._realign(car);
+      if (!car.v.burnt && b.canRecover && b.recover()) this._realign(car); // V4 燒焦殘骸（explosions.js 設 v.burnt）不交還車道
     }
     afterStepPeds(this, dt);
   }
@@ -1408,11 +1408,11 @@ export class Traffic {
 
   // ---------- 轉接器（契約 §5）----------
 
-  // 搶車候選：(x, z) 的 maxDist 內、車速 ≤ CARJACK_MAX_SPEED、非殘骸的車流車，依距離排序
+  // 搶車候選：(x, z) 的 maxDist 內、車速 ≤ CARJACK_MAX_SPEED、非殘骸（含 V4 燒焦 v.burnt）的車流車，依距離排序
   carjackCandidates(x, z, maxDist) {
     const list = [];
     for (const car of this.cars) {
-      if (car.body.isWrecked || Math.abs(car.speed) > CARJACK_MAX_SPEED) continue;
+      if (car.body.isWrecked || car.v.burnt || Math.abs(car.speed) > CARJACK_MAX_SPEED) continue;
       const v = car.v;
       const d = Math.hypot(v.pos.x - x, v.pos.z - z);
       if (d > maxDist) continue;
@@ -1573,7 +1573,7 @@ export class Traffic {
     }
     let cars = 0;
     for (const car of this.cars) {
-      if (car.body.isWrecked) continue;
+      if (car.body.isWrecked || car.v.burnt) continue;
       const v = car.v;
       const dx = v.pos.x - x;
       const dz = v.pos.z - z;

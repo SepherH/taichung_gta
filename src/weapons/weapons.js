@@ -26,7 +26,8 @@
 //     update 時一可切就套用（後來的請求覆蓋前面的；選回目前的槽 = 取消）；切換後 EQUIP_SEC 內不能攻擊
 //   球棒：命中窗內每幀以握把–棒頭膠囊與「上一幀棒頭 → 本幀棒頭」各掃掠一次，碰到的角色走 combat.applyHit（同一揮 swingId 去重）
 //   手槍：鏡頭射線取瞄點 → 槍口確認遮擋（aim.js resolveShot）；命中角色 → combat.applyHit（weapon 'pistol'），
-//     命中其他（或角色倒地中不受理）→ weapon:impact；射程（由槍口起算 80 m）內沒打到東西 → weapon:fire.miss = true（不發 impact）；
+//     命中其他（或角色倒地中不受理）→ weapon:impact（V4：raycast 給了 vehicle 時 payload 帶 vehicle / damage（def.vehicleDamage）/ byPlayer，
+//     整合層據此對車造成損壞，見 explosions.js damageVehicle）；射程（由槍口起算 80 m）內沒打到東西 → weapon:fire.miss = true（不發 impact）；
 //     每發 weapon:fire（另帶 miss / ex, ey, ez 落點或射程末端 / dist，供彈道特效）；打空彈匣後自動裝填一次；彈匣空且無備彈 → weapon:dryFire（DRY_FIRE_INTERVAL 節流）
 //     def.infiniteAmmo：備彈無限（裝填不扣備彈、不會沒子彈、addAmmo 回 0）；ammo() / 事件的 reserve 為 Infinity，serialize 仍存數字 reserve
 //     裝填中不能射、不能切；裝填中被打倒 → 取消（彈藥不變，發 reload end）
@@ -170,7 +171,7 @@ export function createWeapons({
   const hitDir = { x: 0, z: 0 };
   const muzzle = vec();
   const aimDir = vec();
-  const shot = { hit: false, point: vec(), normal: vec(), actor: null, surface: null, dir: vec(), dist: 0 };
+  const shot = { hit: false, point: vec(), normal: vec(), actor: null, surface: null, vehicle: null, dir: vec(), dist: 0 };
   const rayOpts = { excludeActor: actor };
   const sweepOpts = { excludeActor: actor };
   const visOpts = { excludeActor: actor };
@@ -433,6 +434,7 @@ export function createWeapons({
         x: shot.point.x, y: shot.point.y, z: shot.point.z,
         nx: shot.normal.x, ny: shot.normal.y, nz: shot.normal.z,
         surface: shot.surface === 'vehicle' ? 'vehicle' : 'world',
+        vehicle: shot.vehicle || null, damage: shot.vehicle ? P.vehicleDamage : 0, byPlayer: actor.kind === 'player',
       });
     }
     emit('weapon:fire', {

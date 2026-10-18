@@ -7,6 +7,7 @@
 // 事件（注入的 bus）：vehicle:damaged { vehicle, health, delta }、vehicle:crash { vehicle, relSpeed }（玩家駕駛且 ≥ 8 m/s，撞行人不算）、
 //   vehicle:disabled { vehicle }
 // addDamage(vehicle, amount)：直接扣耐久（V2 幫派掃射子彈），同樣發 vehicle:damaged、依門檻冒煙 / 熄火
+// 起火 / 爆炸不在本檔：V4 src/explosions.js 依本檔耐久（healthOf / maxHealthOf）與 vehicle:damaged 判斷起火、爆炸後扣到 0 熄火
 // 煙：全域共用 Sprite 池（≤ MAX_PARTICLES 顆，canvas 柔邊圓貼圖），從引擎蓋（車頭方向 length × 0.4、高 height × 0.8）冒出，
 //   只替離相機 SMOKE_RADIUS 內的車產生新粒子；池滿時不再產生（不搶舊粒子）
 // 熄火濃煙為深灰（SMOKE_STAGE 3），夜間在深色建築前會看不見：注入 isNight()（回傳 boolean 或 0–1 夜間程度，例 DayNight.night）時，
@@ -254,6 +255,12 @@ export function createVehicleDamage({ bus, THREE, scene, isNight = null } = {}) 
     healthOf(vehicle) {
       const e = entries.get(vehicle);
       return e ? e.health : null;
+    },
+
+    // 滿耐久（V4 explosions.js 換算損壞比用）；未 attach → null
+    maxHealthOf(vehicle) {
+      const e = entries.get(vehicle);
+      return e ? e.maxHealth : null;
     },
 
     // 模擬時間推進去重時鐘（每個物理子步一次）
