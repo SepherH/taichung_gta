@@ -393,6 +393,8 @@ function runCrowd(tier, head = PATH_MAIN, assert = true) {
   const counts = [];
   let nearNotSkel = 0;
   let impInside = 0;
+  let prevLag = new Set();
+  let curLag = new Set();
   let impPoolFull = 0; // 骨架池已滿（poolMax）時 far 內改用替身：crowd.js 設計如此，只記錄
   let activeFar = 0;
   let bodyFar = 0;
@@ -419,11 +421,21 @@ function runCrowd(tier, head = PATH_MAIN, assert = true) {
     maxTotal = Math.max(maxTotal, traffic.citizens.length);
     maxShown = Math.max(maxShown, traffic.peds.length + traffic.impostors.count);
     if (f % 60 === 0) {
+      prevLag = curLag;
+      curLag = new Set();
       counts.push(traffic.citizens.filter((c) => distOf(c, player) <= 80).length);
       for (const c of traffic.citizens) {
         const d = distOf(c, player);
         if (d < plan.near && c.rep !== 'skeleton') nearNotSkel++;
-        if (c.rep === 'impostor' && d < plan.far - 0.5) (traffic.peds.length < plan.poolMax ? impInside++ : impPoolFull++);
+        if (c.rep === 'impostor' && d < plan.far - 0.5) {
+          // 池未滿卻在 far 內用替身：每幀切換 / 新建骨架有額度（traffic.js _swapLimit 等），單次取樣可能剛好排隊中；
+          // 連續兩次取樣（60 幀）都如此才算未升級
+          if (traffic.peds.length < plan.poolMax) {
+            curLag.add(c.id);
+            if (prevLag.has(c.id)) impInside++;
+            else impPoolFull++;
+          } else impPoolFull++;
+        }
         const skel = c.rep === 'skeleton' && c.ped.mesh.visible;
         const imp = traffic.impostors.isShown(c.slot);
         if (skel === imp) bothOrNone++;
@@ -456,7 +468,7 @@ function runCrowd(tier, head = PATH_MAIN, assert = true) {
   for (const s of spawns) kinds[s.kind] = (kinds[s.kind] || 0) + 1;
   console.log(`INFO  [${tier}] 補生成類型：${JSON.stringify(kinds)}；回收 ${traffic.stats.recycled}、池中 ${traffic.pedPool.length}、借骨架 ${traffic.stats.stolen}、骨架同時最多 ${maxSkel}`);
   check(`[${tier}] 骨架池：新建 ${traffic.stats.pedCreated} ≤ poolMax ${plan.poolMax}（掛骨架 ${traffic.stats.spawned} 人次以上重用）`, traffic.stats.pedCreated <= plan.poolMax && traffic.pedPool.every((p) => p.body === null && !p.mesh.visible));
-  check(`[${tier}] 分層：pedNear ${plan.near} m 內一律骨架、替身只在 pedFar ${plan.far} m 外（骨架池未滿時）、骨架 / 替身每人恰好顯示一種`, nearNotSkel === 0 && impInside === 0 && bothOrNone === 0, `近處非骨架 ${nearNotSkel}、far 內替身 ${impInside}（池滿時 ${impPoolFull} 人次）、顯示衝突 ${bothOrNone}`);
+  check(`[${tier}] 分層：pedNear ${plan.near} m 內一律骨架、替身只在 pedFar ${plan.far} m 外（骨架池未滿時）、骨架 / 替身每人恰好顯示一種`, nearNotSkel === 0 && impInside === 0 && bothOrNone === 0, `近處非骨架 ${nearNotSkel}、far 內替身 ${impInside}（池滿或單次排隊 ${impPoolFull} 人次）、顯示衝突 ${bothOrNone}`);
   check(`[${tier}] 物理分層：啟用中的行人剛體只在 physicsRadius ${plan.physicsRadius} m（+ 遲滯 15）內、pedFar 外沒有行人剛體`, activeFar === 0 && bodyFar === 0, `超出 ${activeFar} / ${bodyFar}`);
   const variants = new Set(traffic.peds.map((p) => p.character.variant));
   const shirts = new Set();

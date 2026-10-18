@@ -3,7 +3,8 @@
 // 項目：填充建築數量（≥ 1000）與欄位（f 1、負數 id 不重複、排在 OSM 建築之後、l / h / s）、類型組成（大樓 / 公寓 / 透天厝）、
 //   輪廓合法（逆時針、在 bounds 內）、不壓道路（依等級留人行道）/ 步道 / 公園 / 水域 / L 綠地廣場 / 秋紅谷 / 下沉廣場 / OSM 建築（外擴 3 m）、
 //   填充建築彼此不重疊（裙樓上的塔樓完全落在裙樓內除外）、透天厝面寬 / 進深、空地比例、
-//   同一種子產出完全相同且與 repo 內 osm-city.json 一致、遊戲固定點位（出生點一帶、重生點、噴漆廠、小吃點、夜市取餐點、泊車亭、地標 / 光柱點）不被覆蓋。
+//   同一種子產出完全相同且與 repo 內 osm-city.json 一致、遊戲固定點位（出生點一帶、重生點、噴漆廠、小吃點、夜市取餐點、泊車亭、地標 / 光柱點）不被覆蓋、
+//   選單巡覽看點（src/data/view-stops.js，build-city 與 menu-tour 共用）VIEW_CLEAR_R 內無填充建築、局部穩定（加一個不可建點只影響附近，LOCAL_R 外輪廓與 id 不變）。
 // 任一項不符 exit 1。
 import { register } from 'node:module';
 import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -16,6 +17,7 @@ import { FOOD_SPOTS } from '../../src/collect/food-spots.js';
 import { NIGHT_MARKET_DELIVERY } from '../../src/missions/events.js';
 import { VALET_SITES } from '../../src/job-props.js';
 import { TIGER_CITY_ID } from '../../src/data/city.js';
+import { STOP_DEFS } from '../../src/data/view-stops.js';
 
 // src 內的 JSON import（landmark-points.js → osm-city.json）以 loader hook 轉成 ES module
 const JSON_HOOK = `
@@ -54,6 +56,8 @@ const POINT_CLEAR = 15;
 const SPAWN_ZONE = 12; // 出生點在老虎城外牆 3–8 m 帶（places.js computeSpawn）
 const L_BLOCK_KINDS = new Set(['park', 'garden', 'playground', 'pitch', 'grass', 'pedestrian', 'plaza', 'common', 'recreation_ground', 'dog_park']);
 const VACANT_RATIO = [0.08, 0.17]; // 空地 /（空地 + 投影），建置輸出的統計
+const VIEW_CLEAR_R = 110; // build-city.mjs VIEW_CLEAR_R（巡覽看點周圍不放填充建築）
+const LOCAL_R = 200; // 局部穩定：額外不可建點此距離外的填充建築不變
 
 // ---------- 幾何 ----------
 const ring = (p) => {
@@ -294,20 +298,72 @@ if (existsSync(manifestPath)) {
   console.log('SKIP  地標 / 光柱點：public/models/manifest.json 不存在（具名 OSM 建築外擴 12 m 已涵蓋地標輪廓）');
 }
 
+// 選單巡覽看點（build-city 與 menu-tour 共用 STOP_DEFS；同名取面積最大者形心、秋紅谷 = T.basins 外框形心、夜市攤車 = 取餐點）
+const areaCentroid = (r) => {
+  let a = 0;
+  let cx = 0;
+  let cz = 0;
+  for (let i = 0; i < r.length; i++) {
+    const [x1, z1] = r[i];
+    const [x2, z2] = r[(i + 1) % r.length];
+    const f = x1 * z2 - x2 * z1;
+    a += f;
+    cx += (x1 + x2) * f;
+    cz += (z1 + z2) * f;
+  }
+  return [cx / (3 * a), cz / (3 * a), Math.abs(a / 2)];
+};
+{
+  const stops = [];
+  for (const d of STOP_DEFS) {
+    if (d.source === 'stall') stops.push({ key: d.key, c: [NIGHT_MARKET_DELIVERY.pickup.x, NIGHT_MARKET_DELIVERY.pickup.z] });
+    else if (d.source === 'basin') {
+      const b = city.T.basins.find((s) => s.n && d.re.test(s.n));
+      if (b) stops.push({ key: d.key, c: areaCentroid(ring(b.p)) });
+    } else {
+      let best = null;
+      for (const b of osmB) if (b.n && d.re.test(b.n) && (!best || areaCentroid(ring(b.p))[2] > best[2])) best = areaCentroid(ring(b.p));
+      if (best) stops.push({ key: d.key, c: best });
+    }
+  }
+  const bad = [];
+  for (const { key, c: [x, z] } of stops) {
+    const R = VIEW_CLEAR_R - 1; // 格網半對角線 + 四捨五入容差
+    for (const b of nearInf({ x0: x - R, z0: z - R, x1: x + R, z1: z + R })) if (pointPolyDist(x, z, rings.get(b)) < R) bad.push(`${key}↔${b.i}`);
+  }
+  check(`選單巡覽看點 ${stops.length} / ${STOP_DEFS.length} 處（含秋紅谷 basin、夜市攤車 stall）${VIEW_CLEAR_R} m 內無填充建築`, stops.length === STOP_DEFS.length && bad.length === 0, bad.slice(0, 5).join('、'));
+}
+
 // ---------- 可重現 ----------
 const tmp = mkdtempSync(join(tmpdir(), 'p8b-infill-'));
 const outs = [];
 let log = '';
-for (let k = 0; k < 2; k++) {
+// 第 3 次：複本加一個不可建點（第 11 棟填充建築的形心，INFILL_EXTRA_KEEP）重建，驗證局部穩定
+const probe = areaCentroid(rings.get(inf[10]));
+for (let k = 0; k < 3; k++) {
   const out = join(tmp, `city-${k}.json`);
-  const r = spawnSync(process.execPath, [resolve(ROOT, 'tools/build-city.mjs')], { cwd: ROOT, env: { ...process.env, CITY_OUT: out }, encoding: 'utf8' });
+  const env = { ...process.env, CITY_OUT: out };
+  if (k === 2) env.INFILL_EXTRA_KEEP = `${probe[0]},${probe[1]}`;
+  const r = spawnSync(process.execPath, [resolve(ROOT, 'tools/build-city.mjs')], { cwd: ROOT, env, encoding: 'utf8' });
   if (r.status === 0) outs.push(readFileSync(out, 'utf8'));
   else outs.push(null);
-  log = r.stdout || '';
+  if (k === 0) log = r.stdout || '';
 }
 rmSync(tmp, { recursive: true, force: true });
 check('同一種子兩次產出完全相同', outs[0] !== null && outs[0] === outs[1], `${outs[0] ? (outs[0].length / 1024).toFixed(1) : '-'} KB`);
 check('repo 內 src/data/osm-city.json = 建置輸出（未手改、已重新產生）', outs[0] === readFileSync(CITY, 'utf8'));
+{
+  const sig = (b) => `${b.i}|${b.p.join(',')}`;
+  const moved = outs[2] ? new Set(JSON.parse(outs[2]).B.filter((b) => b.f === 1).map(sig)) : new Set();
+  const far = inf.filter((b) => {
+    const [x, z] = areaCentroid(rings.get(b));
+    return Math.hypot(x - probe[0], z - probe[1]) > LOCAL_R;
+  });
+  const changed = far.filter((b) => !moved.has(sig(b)));
+  const near = inf.length - far.length;
+  check(`局部穩定：複本加一個不可建點（${probe[0].toFixed(1)}, ${probe[1].toFixed(1)}）重建，${LOCAL_R} m 外填充建築輪廓與 id 不變`, outs[2] !== null && changed.length === 0,
+    `${LOCAL_R} m 外 ${far.length} 棟變動 ${changed.length}；${LOCAL_R} m 內 ${near} 棟`);
+}
 const m = /空地 \/（空地 \+ 投影）([\d.]+)%/.exec(log);
 const ratio = m ? Number(m[1]) / 100 : NaN;
 check(`留空地塊（停車場 / 工地）比例 ${VACANT_RATIO[0] * 100}–${VACANT_RATIO[1] * 100}%`, ratio >= VACANT_RATIO[0] && ratio <= VACANT_RATIO[1], `${(ratio * 100).toFixed(1)}%`);

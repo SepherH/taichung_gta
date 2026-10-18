@@ -31,10 +31,14 @@ import { POLICE_STATION, HOSPITAL, SPRAY_SHOPS } from '../src/wanted/places.js';
 import { FOOD_SPOTS } from '../src/collect/food-spots.js';
 import { NIGHT_MARKET_DELIVERY } from '../src/missions/events.js';
 import { VALET_SITES } from '../src/job-props.js';
+// 選單巡覽看點（與 src/ui/menu-tour.js 共用的純資料模組）
+import { STOP_DEFS } from '../src/data/view-stops.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = resolve(ROOT, 'data/osm/qiqi-raw-v2.json');
 const OUT = process.env.CITY_OUT ? resolve(process.env.CITY_OUT) : resolve(ROOT, 'src/data/osm-city.json'); // CITY_OUT：改寫到別處（測試驗證可重現用）
+// INFILL_EXTRA_KEEP="x,z;x,z"：額外不可建點位（測試驗證填充對輸入的局部穩定性用）
+const EXTRA_KEEP = (process.env.INFILL_EXTRA_KEEP || '').split(';').filter(Boolean).map((t) => { const [x, z] = t.split(',').map(Number); return { x, z }; });
 const VERSION = 2;
 
 // 資料擷取範圍（與 Overpass 查詢的 bbox 相同；v2 擴大到含臺中市政府、市議會、捷運市政府站）
@@ -61,6 +65,8 @@ const DEFAULT_WIDTH = {
   residential: 8, unclassified: 8, living_street: 6, service: 5,
   footway: 2.5, path: 2.5, pedestrian: 2.5, cycleway: 2.5, steps: 2.5,
 };
+// 寬度取自 DEFAULT_WIDTH 的道路物件（R / F 元素；不寫進輸出 JSON）
+const DEFAULT_WIDTH_ROADS = new WeakSet();
 const FOOT_TYPES = new Set(['footway', 'path', 'pedestrian', 'cycleway', 'steps', 'track', 'bridleway', 'corridor']);
 const LANE_WIDTH = 3.2;
 
@@ -490,6 +496,7 @@ for (const el of elements) {
     const lanes = num(tags.lanes);
     let width = num(tags.width);
     if (!width && lanes && !FOOT_TYPES.has(type)) width = lanes * LANE_WIDTH;
+    const widthDefault = !width; // 無 width / lanes 標籤：寬度為等級預設值（不輸出，供填充判定七期主幹道）
     if (!width) width = DEFAULT_WIDTH[type] ?? 6;
     const layer = parseInt(tags.layer, 10) || 0;
     const tunnel = !!tags.tunnel && tags.tunnel !== 'no';
@@ -512,6 +519,7 @@ for (const el of elements) {
       }
       if (bridge || layer > 0) stats.bridges++;
       r.p = flat(part);
+      if (widthDefault) DEFAULT_WIDTH_ROADS.add(r);
       if (foot) {
         F.push(r);
         stats.footways++;
@@ -839,20 +847,21 @@ const PLAZA_PAD = 3;
 const OSM_PAD = 3;
 const LANDMARK_PAD = 12; // 具名 OSM 建築：地標 glb 可能超出輪廓，門口另有出生點 / 人流
 const KEEP_CLEAR_R = 15;
-// 選單巡覽建築看點（名稱規則抄自 src/ui/menu-tour.js STOP_DEFS，同名取面積最大者，與 tourStops 相同；老虎城 = 出生點；
-//   不直接 import：該檔另有單元在改，改動不應牽動城市資料）：
+// 選單巡覽看點（src/data/view-stops.js STOP_DEFS，與 menu-tour.js tourStops 同規則：具名建築同名取面積最大者、秋紅谷 = T.basins 名稱比對的外框形心、
+//   夜市攤車 = NIGHT_MARKET_DELIVERY.pickup（執行期 stallRow 原攤車格在其旁數公尺，相對下列半徑可忽略）；老虎城 = 出生點）：
 //   VIEW_CLEAR_R 內不放填充建築（沿路低飛的鏡頭連 5 層透天都會擋）、LOW_RISE_R 內只放透天厝（≤ 5 層）；巡覽遮擋率上限 10%、鏡位會避開建築
-const VIEW_STOPS = [/^老虎城/, /^新光三越$/, /歌劇院/, /^臺中市政府臺灣大道市政大樓$/, /^捷運市政府站$/];
 const LOW_RISE_R = 170;
 const VIEW_CLEAR_R = 110;
 const L_BLOCK_KINDS = new Set(['park', 'garden', 'playground', 'pitch', 'grass', 'pedestrian', 'plaza', 'common', 'recreation_ground', 'dog_park']);
 const TOWER_ROADS = new Set(['trunk', 'primary', 'secondary']);
 const MID_ROADS = new Set(['tertiary']);
 // 七期主要道路在 OSM 多標 tertiary（市政路、河南路、朝富路等，寬 12 m 以上或雙向分隔）：沿線實景以大樓為主，與幹道同列「大樓路段」，但混入臨街公寓 / 透天
+//   判定：名稱在 QIQI_MAIN_NAMES，或 OSM 有明確 width / lanes 標籤且寬 > QIQI_MAIN_W（無標籤時寬度 = DEFAULT_WIDTH.tertiary = 12，不算）；
+//   七期外的西屯路二段、龍門路、大墩路、環中路三段、朝馬路等未標寬度的 tertiary 回到透天 / 公寓
 const QIQI_MAIN_W = 12;
 const QIQI_MAIN_NAMES = ['臺灣大道', '河南路', '朝富路', '市政北七路', '惠來路', '市政路', '市政北一路', '惠中路'];
 const QIQI_TOWER_P = 0.55;
-const isQiqiMain = (r) => r.t === 'tertiary' && (r.w >= QIQI_MAIN_W || QIQI_MAIN_NAMES.some((n) => (r.n || '').startsWith(n)));
+const isQiqiMain = (r) => r.t === 'tertiary' && ((!DEFAULT_WIDTH_ROADS.has(r) && r.w > QIQI_MAIN_W) || QIQI_MAIN_NAMES.some((n) => (r.n || '').startsWith(n)));
 const LANE_ROADS = new Set(['residential', 'unclassified', 'living_street']);
 const VACANT_P = { tower: 0.12, mid: 0.12, lane: 0.12, interior: 0.12 }; // 留空地塊機率（目標空地比例約 10–15%）
 const UNIT_GAP = 0.15; // 相鄰透天厝之間的縫（m）：共牆不共面，避免女兒牆與鄰棟外牆 z-fighting
@@ -861,6 +870,20 @@ const FRONT_RETRY = [0, 3, 6, 10]; // 臨街地塊放不下時往內退的距離
 const FAIL_STEP = 3; // 地塊放不下時沿線前進（m）；lot 回傳 ≤ 此值表示失敗
 const STOREY = 3.3;
 const PODIUM_STOREY = 4.5;
+
+// 亂數以「單元」各自建串流：臨街 = hash(INFILL_SEED, 0, 道路索引, 線段, 側)、街廓內部 = hash(INFILL_SEED, 1, 格點 i, j)；
+//   id 同樣按單元分段（-(單元序 × INFILL_ID_STRIDE + 單元內序)），點位 / 障礙的局部變動只影響附近單元，不讓全城重排或 id 位移
+const INFILL_ID_STRIDE = 100;
+function infillHash(...vals) {
+  let h = 2166136261;
+  for (const v of vals) {
+    h = Math.imul(h ^ (v >>> 0), 16777619);
+    h ^= h >>> 13;
+    h = Math.imul(h, 0x5bd1e995);
+    h ^= h >>> 15;
+  }
+  return h >>> 0;
+}
 
 function infillRng(seed) {
   let a = seed >>> 0;
@@ -874,8 +897,8 @@ function infillRng(seed) {
 }
 
 // 道路沿線 / 街廓內部的填充建築；回傳 { list: B 格式陣列, stats }
-function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, plazaRing) {
-  const rng = infillRng(INFILL_SEED);
+function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, plazaRing, basins) {
+  let rng = null; // 目前單元的亂數串流（beginUnit 切換）
   const rand = (a, b) => a + (b - a) * rng();
   const randInt = (a, b) => a + Math.floor(rng() * (b - a + 1));
   const gx0 = bounds.x0 + INFILL_EDGE;
@@ -963,11 +986,20 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
     POLICE_STATION, HOSPITAL, ...SPRAY_SHOPS, ...FOOD_SPOTS, NIGHT_MARKET_DELIVERY.pickup,
     ...VALET_SITES.flatMap((v) => [v.stand, v.car, v.slot]),
   ];
-  for (const p of keep) blockCircle(p.x, p.z, KEEP_CLEAR_R);
+  for (const p of [...keep, ...EXTRA_KEEP]) blockCircle(p.x, p.z, KEEP_CLEAR_R);
   const lowRiseAt = [];
-  for (const re of VIEW_STOPS) {
+  for (const d of STOP_DEFS) {
+    if (d.source === 'stall') {
+      lowRiseAt.push([NIGHT_MARKET_DELIVERY.pickup.x, NIGHT_MARKET_DELIVERY.pickup.z]);
+      continue;
+    }
+    if (d.source === 'basin') {
+      const b = basins.find((s) => s.n && d.re.test(s.n));
+      if (b) lowRiseAt.push(centroid(unflat(b.p)));
+      continue;
+    }
     let best = null;
-    for (const b of osmB) if (b.n && re.test(b.n) && (!best || areaOf(unflat(b.p)) > areaOf(unflat(best.p)))) best = b;
+    for (const b of osmB) if (b.n && d.re.test(b.n) && (!best || areaOf(unflat(b.p)) > areaOf(unflat(best.p)))) best = b;
     if (best) lowRiseAt.push(centroid(unflat(best.p)));
   }
   const lowRise = (x, z) => lowRiseAt.some(([cx, cz]) => Math.hypot(x - cx, z - cz) < LOW_RISE_R);
@@ -1070,9 +1102,18 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
   // 3. 產生
   const list = [];
   const stats = { towers: 0, podiums: 0, apartments: 0, rows: 0, houses: 0, interior: 0, vacantLots: 0, vacantArea: 0, footprint: 0, openArea: openCells * INFILL_CELL * INFILL_CELL };
-  let nextId = -1;
+  let unitId = 0;
+  let unitN = 0;
+  let unitMax = 0;
+  const beginUnit = (unit, ...key) => {
+    rng = infillRng(infillHash(INFILL_SEED, ...key));
+    unitId = unit;
+    unitN = 0;
+  };
   const emit = (t, levels, storey, ring) => {
-    const b = { i: nextId--, t, l: levels, h: r1(levels * storey), s: 1, f: 1, p: flat(ring) };
+    if (++unitN >= INFILL_ID_STRIDE) throw new Error(`填充單元 ${unitId} 建築數超過 INFILL_ID_STRIDE ${INFILL_ID_STRIDE}`);
+    unitMax = Math.max(unitMax, unitN);
+    const b = { i: -(unitId * INFILL_ID_STRIDE + unitN), t, l: levels, h: r1(levels * storey), s: 1, f: 1, p: flat(ring) };
     list.push(b);
     stats.footprint += areaOf(ring);
     return b;
@@ -1165,8 +1206,16 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
     const second = first === apartmentLot ? rowLot : apartmentLot;
     return first(r, f, s, front, pVacant) || second(r, f, s, front, pVacant) || FAIL_STEP;
   };
+  // 臨街單元序：依 roads 索引 / 線段 / 側固定編號（與是否放得下無關）
+  const unitBase = [];
+  let frontUnits = 0;
+  for (const r of roads) {
+    unitBase.push(frontUnits);
+    frontUnits += 2 * Math.max(0, r.p.length / 2 - 1);
+  }
   const frontage = (pick, lot) => {
-    for (const r of roads) {
+    for (let ri = 0; ri < roads.length; ri++) {
+      const r = roads[ri];
       if (r.u || r.br || !pick(r)) continue;
       const front = r.w / 2 + setbackOf(r.t) + 2 * CELL_PAD + 0.1; // 前緣取樣點所在格的格心離退縮線 > CELL_PAD，才不會被判為不可建
       const pts = unflat(r.p);
@@ -1178,6 +1227,8 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
         const tx = (bx - ax) / L;
         const tz = (bz - az) / L;
         for (const side of [1, -1]) {
+          const sb = side === 1 ? 0 : 1;
+          beginUnit(1 + unitBase[ri] + 2 * k + sb, 0, ri, k, sb);
           // n = t 轉 90°（rectRing 的深方向）× side；side = −1 時 t 反向讓 n 仍為 t 轉 90°
           const f = side === 1 ? { ax, az, tx, tz, nx: -tz, nz: tx } : { ax: bx, az: bz, tx: -tx, tz: -tz, nx: tz, nz: -tx };
           let s = rand(0, 6);
@@ -1199,15 +1250,16 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
   frontage((r) => MID_ROADS.has(r.t) && !isQiqiMain(r), (r, f, s, front) => smallLot(r, f, s, front, 0.5));
   frontage((r) => LANE_ROADS.has(r.t), (r, f, s, front) => smallLot(r, f, s, front, 0.3));
 
-  // 街廓內部：剩餘空地以 8 m 格點取樣（固定種子洗牌），朝向取最近道路
+  // 街廓內部：剩餘空地以 8 m 格點取樣（依 hash(INFILL_SEED, 格點) 排序 = 固定種子洗牌），朝向取最近道路；每個格點各自一條亂數串流
   const STEP = 8;
   const pts = [];
-  for (let z = gz0 + STEP / 2; z < gz0 + GH * INFILL_CELL; z += STEP) for (let x = gx0 + STEP / 2; x < gx0 + GW * INFILL_CELL; x += STEP) pts.push([x, z]);
-  for (let i = pts.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    [pts[i], pts[j]] = [pts[j], pts[i]];
+  const NI = Math.ceil((GW * INFILL_CELL - STEP / 2) / STEP);
+  for (let j = 0, z = gz0 + STEP / 2; z < gz0 + GH * INFILL_CELL; j++, z += STEP) {
+    for (let i = 0, x = gx0 + STEP / 2; x < gx0 + GW * INFILL_CELL; i++, x += STEP) pts.push({ x, z, i, j, order: infillHash(INFILL_SEED, 2, i, j) });
   }
-  for (const [x, z] of pts) {
+  pts.sort((a, b) => a.order - b.order || a.j - b.j || a.i - b.i);
+  for (const { x, z, i, j } of pts) {
+    beginUnit(1 + frontUnits + j * NI + i, 1, i, j);
     const k = cellOf(x, z);
     if (k < 0 || grid[k] !== FREE || lowRise(x, z)) continue;
     const dir = nearestDir(x, z, 150);
@@ -1226,10 +1278,11 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
       break;
     }
   }
+  stats.unitMax = unitMax;
   return { list, stats };
 }
 
-const infill = buildInfill(B, R, F, P, W, L, basinInfo.ring, plazaInfo.ring);
+const infill = buildInfill(B, R, F, P, W, L, basinInfo.ring, plazaInfo.ring, T.basins);
 B.push(...infill.list);
 
 const out = {
@@ -1267,6 +1320,8 @@ console.log(`  類型：${sortObj(stats.buildingTypes)}`);
   const s = infill.stats;
   const vacantRatio = s.vacantArea / (s.vacantArea + s.footprint);
   console.log(`填充建築（推測，f: 1）${infill.list.length} 棟：大樓 ${s.towers}（裙樓 ${s.podiums}）、臨街公寓 ${s.apartments}、透天厝 ${s.houses}（${s.rows} 排）、街廓內部公寓 ${s.interior}`);
+  const tert = R.filter((r) => r.t === 'tertiary' && !r.u && !r.br);
+  console.log(`  tertiary 大樓路段 ${tert.filter(isQiqiMain).length} / ${tert.length} 段；單元內建築數上限 ${s.unitMax}（id 分段 ${INFILL_ID_STRIDE}）`);
   console.log(`  可建空地 ${Math.round(s.openArea)} m²、建築投影 ${Math.round(s.footprint)} m²、留空地塊 ${s.vacantLots} 塊 ${Math.round(s.vacantArea)} m²（空地 /（空地 + 投影）${(vacantRatio * 100).toFixed(1)}%）`);
 }
 console.log(`車道路 ${stats.roads} 段：${sortObj(stats.roadTypes)}`);

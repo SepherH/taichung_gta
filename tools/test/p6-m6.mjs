@@ -64,7 +64,9 @@ const deps = {
 {
   const src = read('src/ui/menu-tour.js');
   const imports = src.split('\n').filter((l) => /^\s*import\s/.test(l));
-  check('menu-tour.js 只 import ../geom.js（不拖入 three / DOM）', imports.length === 1 && imports[0].includes("'../geom.js'"), imports.join(' | '));
+  const allowed = ["'../geom.js'", "'../data/view-stops.js'"]; // view-stops.js：看點定義純資料（與 tools/build-city.mjs 共用）
+  check('menu-tour.js 只 import ../geom.js、../data/view-stops.js（不拖入 three / DOM）', imports.length === 2 && allowed.every((a) => imports.some((l) => l.includes(a))), imports.join(' | '));
+  check('data/view-stops.js 無任何 import（純資料）', !read('src/data/view-stops.js').split('\n').some((l) => /^\s*import\s/.test(l)));
   const code = src.replace(/\/\/[^\n]*/g, '');
   check('menu-tour.js 不讀 document / window / navigator', !/\b(document|window|navigator)\b/.test(code));
 }

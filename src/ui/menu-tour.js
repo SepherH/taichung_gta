@@ -20,6 +20,7 @@
 //   start()（回主選單）由當下鏡頭內插回巡覽路徑（巡覽時間接續上次）。距離 ≤ HANDOFF_FADE_DIST：平滑內插（水平 smoothstep + 四元數 slerp，
 //   高度走開始時建好的剖面：沿途 floor、HANDOFF_VRATE 速率包絡、兩端精確接上）；更遠或高度速率不可行：FADE_SEC 淡出淡入（opts.fade(alpha)，全黑時切鏡）
 import { SpatialGrid, closestOnPolygon, pointInPolygon, polygonBBox, polygonCentroid, polylineInfo, samplePolyline, closestOnSegment } from '../geom.js';
+import { STOP_DEFS } from '../data/view-stops.js';
 
 export const SAMPLE_HZ = 10; // 路徑取樣頻率（Hz）
 export const SAFE_CLEAR = 4; // 高度下限：地形（湖面取較高者）+ 此值（m）
@@ -76,16 +77,8 @@ export const PLATE_CLEAR = 2;
 export const STREET_CLEAR = 9.5;
 export const STREET_REACH = 5;
 
-// 鏡位定義：key、顯示名、比對 namedBuildings 名稱的規則（basin / stall 另由專屬資料推導）
-export const STOP_DEFS = [
-  { key: 'tiger', name: 'Tiger City（老虎城）', re: /^老虎城/ },
-  { key: 'shinkong', name: '新光三越', re: /^新光三越$/ },
-  { key: 'stall', name: '夜市攤車', source: 'stall' },
-  { key: 'opera', name: '臺中國家歌劇院', re: /歌劇院/ },
-  { key: 'cityhall', name: '臺中市政府', re: /^臺中市政府臺灣大道市政大樓$/ },
-  { key: 'mrt', name: '捷運市政府站', re: /^捷運市政府站$/ },
-  { key: 'qiuhonggu', name: '秋紅谷', source: 'basin', re: /秋紅谷/ },
-];
+// 鏡位定義（key、顯示名、名稱比對規則；basin / stall 另由專屬資料推導）：src/data/view-stops.js，與 tools/build-city.mjs 填充避讓共用
+export { STOP_DEFS };
 
 const smooth = (k) => k * k * (3 - 2 * k);
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
