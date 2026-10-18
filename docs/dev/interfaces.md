@@ -42,6 +42,9 @@
 | `police:shoot` | `{ officer, x, y, z, targetX, targetZ }`（傷害已在 adapters officerAim → combat.applyHit 處理，收到勿再扣血） | wanted/police.js |
 | `player:busted` | `{ fine, x, z }`（fine = 實扣罰鍰 min(150, 餘額)；x, z = 被捕地點；傳送 / 清星之後發） | 整合 |
 | `player:wasted` | `{ fee, x, z }`（fee = economy 在 `player:ko` 實扣的醫藥費 min(100, 餘額)；x, z = 倒地地點） | 整合 |
+| `robbery:start` | `{ storeId, x, z }`（開始搶劫；x, z = 櫃檯點；同一刻已 `wanted.report('robbery', { witnessed: false })`） | wanted/robbery.js（§28） |
+| `robbery:done` | `{ storeId, amount }`（搶劫成功；amount = 入帳金額 NT$300–800，已經 `ctx.earn` 入帳） | wanted/robbery.js |
+| `robbery:failed` | `{ storeId, reason: 'aim'\|'distance'\|'clerk'\|'cleared' }`（停止瞄準 > 1 s / 離店員 > 8 m / 店員倒地 / 清星中止） | wanted/robbery.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
 
 表外的新事件名稱必須先加進本表。
@@ -786,7 +789,7 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ## 26. Phase 7 通緝 / 警力（原規劃 §22，該號已由 G2 使用故順延；接線點在 `src/main.js`，介面以各檔頭為準）
 
 ### 26.1 模組介面摘要
-- `src/wanted/wanted.js`：`createWanted({ bus, config? })` → `{ report(crime, { x, z, witnessed = true }), update(dt, { playerX, playerZ, seen }), clear(reason), setStars(n), stars, heat, state, flashing, lastKnown, searchCircle }`；`CRIMES` = assault / assaultPolice / kill / killPolice / gunfire / carjack / vehicleHit / vehicleKill / policeVehicle；heat → 星數（`STAR_HEAT`）、active ↔ searching ↔ clear 狀態機、搜索圈（`searchCircle` 只在 searching 時非 null：`{ x, z, r }`）。witnessed=false（只有路人報案）heat × 0.5、至少 1 星
+- `src/wanted/wanted.js`：`createWanted({ bus, config? })` → `{ report(crime, { x, z, witnessed = true }), update(dt, { playerX, playerZ, seen }), clear(reason), setStars(n), stars, heat, state, flashing, lastKnown, searchCircle }`；`CRIMES` = assault / assaultPolice / kill / killPolice / gunfire / carjack / vehicleHit / vehicleKill / policeVehicle / robbery（Phase 9，§28）；heat → 星數（`STAR_HEAT`）、active ↔ searching ↔ clear 狀態機、搜索圈（`searchCircle` 只在 searching 時非 null：`{ x, z, r }`）。witnessed=false（只有路人報案）heat × 0.5、至少 1 星
 - `src/wanted/police.js`：`createPolice({ bus, wanted, adapters, rng?, config? })` → `{ update(dt, { player: { x, z, inVehicle, speed, down } }) → { seen }, witness(x, z) → boolean, dispose(), cars, officers, bustProgress }`；依星數生成 / 回收警車與警員、追捕、開槍（emit `police:shoot`）、逮捕（emit `police:bust`）
 - `src/wanted/adapters.js`：`createPoliceAdapters(deps)` → 契約 B adapters（findSpawnPoint / spawnCar / despawnCar / driveCar / spawnOfficer / despawnOfficer / moveOfficer / officerAim / canSee）+ `update(dt, { stars, listener, paused })`、`isPoliceVehicle(v)`、`stats()`、`dispose()`；deps 見檔頭（vehicles / dmg / traffic / findRoute / combat / characters / physics / scene / heightAt / blocked / audio / settings / bus / getPlayer / isNight / surfaceOffset）。警車 = `vehicles.adopt({ type: 'police' })`（manifest 第 7 種車），警員開槍命中走 `combat.applyHit`；patrol 只開到路線的路網投影點（不進原始目標點），抵達時煞停並設 `car.patrolArrived = true`（police.js 據此換巡邏點）；耐久歸 0 的警車煞停一次並 `v.ai = false`；`vehicles.findNearby` 對 `v.ai` 車速 > 3 m/s 的車不回傳（行駛中警車不可上車）
 - `src/wanted/ui.js`：`createWantedUI({ root, canvas, doc?, hints? })` → `{ setStars(n, { flashing }), showBusted({ fine }) → Promise<{ reason }>, showWasted({ fee }) → Promise<{ reason }>, showHint(key, text) → boolean, dispose(), overlayActive }`；reason = `'done'`（時間到）\| `'skipped'`（點擊跳過）\| `'preempted'`（被新畫面搶占）\| `'disposed'`；畫面期間 doc 層點擊一律 stopPropagation / preventDefault；`hints`（HUD）注入時 `showHint` 委派 `hud.showHint`（`tcgta.hints.seen`，`hud.resetHints()` 一併重置），未注入才用本檔 `tcgta.hints` 退路；`drawSearchCircle(ctx, { cx, cy, r, t })`。本檔不 import css：整合層 `import './wanted/wanted.css'`
@@ -840,6 +843,41 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - `node tools/test/p8-spray.mjs`（純邏輯：觸發條件 / 拒絕條件各款 / 費用 / 冷卻 + 需離開範圍 / 噴完才扣款（重複扣款、部分扣款退回、無 spend）/ 中途被看見 / 被捕 / 下車 / 換車中止 / `cancel()` / 非字串車色 / repaint 拋錯後狀態重置 / `wanted.clear('spray')` / `spray:done` payload / 幀率無關）
 - `node tools/test/p7-wanted.mjs`（`CLEAR_REASONS` 含 `'spray'`）
 - `node tools/test/integration-p8.mjs`（接線靜態檢查：`main.js` 匯入 `createSprayShops` / `SPRAY_SHOPS`、呼叫 `updateSprayShops`、`beginRespawn` 的 `state.spraying` 互斥判斷存在、resume / syncPanels 看 `state.spraying`、`quitToMenu` / `startGame` 先 `cancelSpray()`、噴漆中每幀手煞、`#spray-fade` z-index 低於暫停選單、`vehicle-damage.js` 不持有 mesh）
+
+---
+
+## 28. Phase 9 超商搶劫（P9；接線點在 `src/main.js`，介面以 `src/wanted/robbery.js` 檔頭為準）
+
+### 28.1 模組介面
+- `src/wanted/robbery.js`：`createRobberies({ bus, wanted, police?, stores, rng?, config? })` → `{ update(dt, ctx) → { active, storeId, progress }, cancel({ resetAll? }), clerkDown(storeId) → boolean, dispose(), stores, active }`；純邏輯，不碰 DOM / three；`police` 保留未用
+  - `stores`：`src/wanted/places.js` 的 `STORES`（`{ id, name, osmId, x, z（門口人行道）, counterX, counterZ（櫃檯 = 門口往內 2 m）, clerkYaw, inferred }[]`）；回傳的 `stores` 是內部複本，附 `state`（`'ready'\|'robbing'\|'cooldown'`）/ `cooldown` / `robT` / `aimLost` / `clerkDown` / `robbed` / `available`（= `state === 'ready'`）
+  - `ctx = { player: { x, z, yaw }, onFoot, aiming, aimAt(x, z) → boolean, earn(n), toast?(text, sec), showHint?(id, text) → boolean }`：`aimAt` = 準星是否對著該點附近 1.2 m（整合層用 `aimNear(origin, dir, x, y, z, tol = AIM_TOL)` 實作）；`toast` 省略改 `emit('toast')`
+  - 開始：`onFoot && aiming && aimAt(櫃檯) && 距櫃檯 ≤ START_DIST`（6 m）→ `state 'robbing'`、`wanted.report('robbery', { x, z: 櫃檯, witnessed: false })`（店員報警）、emit `robbery:start`
+  - 進行：持續瞄準累計 `ROB_SEC`（6 s）→ 成功：`earn(lootAmount)`（`LOOT_MIN`–`LOOT_MAX` NT$300–800 均勻整數）、emit `robbery:done { storeId, amount }`、toast「搶到 NT$x，快逃！」、冷卻 `COOLDOWN_SEC`（180 s，`robbed = true`：整合層讓店員消失）
+  - 失敗：停止瞄準（含準星移開 / 上車）連續 > `AIM_GRACE_SEC`（1 s，期間進度暫停）或離櫃檯 > `ABORT_DIST`（8 m）→ toast「店員報警了！」、星數不足 1 時 `wanted.setStars(1)`、emit `robbery:failed`、冷卻 `FAIL_COOLDOWN_SEC`（180 s）
+  - 店員倒地：bus `ped:knockdown` / `ped:dead` 的 `ped.clerkOf === store.id`，或 `clerkDown(storeId)` → `clerkDown = true`、進行中的搶劫中止（reason `'clerk'`，不 toast、不給錢）、冷卻 180 s（從倒地起算）；冷卻結束才重置
+  - `wanted:cleared`（被捕 / 送醫 / debug）→ 進行中的搶劫無聲中止（reason `'cleared'`，進冷卻）
+  - 冷卻中瞄準無反應；首次在可搶店門口 `HINT_DIST`（20 m）內 → `ctx.showHint('robbery', '拿槍瞄準店員就能搶劫超商，但會立刻被通緝！')`，回傳真值後不再呼叫
+  - `cancel()`：進行中的搶劫無聲取消，各店冷卻 / 店員倒地全部重置為 ready；時間吃呼叫端 dt（clamp ≤ `MAX_DT` 0.1 s），幀率無關
+- `src/wanted/wanted.js`：`CRIMES.robbery` / `HEAT.robbery = 2.5`；新增 `CRIME_MIN_STARS = { robbery: 2 }`（`config.minStars` 可覆寫）：`report` 後星數至少為該值（不論 witnessed；heat 照 HEAT 累加不抬高）
+- `src/wanted/places.js`：新增 `STORES`（4 間）：`osm-city.json` 只有 B「全家便利商店」（id 491492673，黎明路二段）1 筆符合；其餘 3 間為七期路口推測點（`inferred: true`）。座標推導見檔頭
+- `src/missions/light-pillar.js`：`BEACON_COLORS.store = 0x43a047`（綠）；`createBeaconPool` 新增選用 `height` / `radius` / `sink`（預設不變）
+- `src/map/marker-colors.js` / `src/map/big-map.js`：`MARKER_COLORS.store = '#43a047'`、`MARKER_LABELS.store = '超商'`（大地圖圖例自動列出）
+- `src/hud.js`：`setRobberyProgress(frac | null, label = '搶劫中…')`（`.rob-bar` / `.rob-label` / `.rob-track` / `.rob-fill`，掛 body，樣式在 `style.css` 末段；觸控改放畫面上方中央）；小地圖 kind `'store'` 畫綠底「超」字小方塊（`ICON_KINDS`）；入帳跳字 reason `robbery` 前綴「搶劫」
+
+### 28.2 接線（main.js）
+- 建立：`robberies = createRobberies({ bus, wanted, police, stores: STORES, rng: Math.random })`；`storeBeacons = createBeaconPool({ scene, heightAt, ...STORE_BEACON })`（高 7 m、半徑 0.7 m）；`robberyMarkers`（kind `'store'`）併入 `collectMarkers`
+- 店員：玩家距櫃檯 ≤ `CLERK_SPAWN_DIST`（120 m）且該店 ready / robbing 才生成（> `CLERK_DESPAWN_DIST` 150 m 回收）：`createCharacter({ variant: 'pedestrian', colors: CLERK_COLORS })`（綠制服執行期換色）+ `CharacterAnimator` + combat actor（`faction 'clerk'`、`clerkOf = store.id`、`recoverOnKo`）+ `createPedestrianBody`（`owner` = 店員，子彈 / 車撞得到）；搶完（`robbed`）→ 消失；倒地留在原地，判定死亡或冷卻結束回收、下一幀重生
+- 每幀 `updateRobberies(dt, phoneOpen)`（updateGame 內 `updateSprayShops` 之後）：手機開著 / `state.respawn` / `state.spraying` → 凍結（店員以 dt 0 擺位、進度條收起）；暫停 / 全螢幕面板時 updateGame 不跑；`onFoot = state.mode === 'walk'`、`aiming = onFoot && aim.aiming`（`fillAim`：按住瞄準且持手槍，含手把 LT）、`aimAt = aimNear(aim.origin, aim.dir, x, heightAt + AIM_HEIGHT, z)`、`earn = economy.add(n, 'robbery')`、`showHint` 走 `wantedUI.showHint`（HUD 注入，settings.showHints 關閉時不出）
+- 光柱：每幀依 `store.available` acquire / release（只在可搶時顯示）
+- 取消：`cancelRobbery()`（`robberies.cancel({ resetAll })`：只取消進行中的搶劫，開新局才重置各店冷卻 / 店員倒地；店員全回收、進度條收起）在 `quitToMenu` / `startGame` 中於 `cancelSpray()` / `cancelRespawn()` 之前
+- 除錯：`window.__game.robberies` / `clerks`（僅 dev）
+
+### 28.3 回歸
+- `node tools/test/p9-robbery.mjs`（純邏輯：觸發距離 / 條件、aimNear、瞄準中斷、離開 8 m、報警星數、收入範圍、冷卻、店員倒地、wanted:cleared、幀率無關、cancel / dispose、提示）
+- `node tools/test/p7-wanted.mjs`（robbery 犯行：HEAT 2.5、保底 2 星）
+- `node tools/test/integration-p9.mjs`（main.js 接線靜態檢查 + 抽出超商段以替身執行）
+- `tools/build-city.mjs` 會把 places.js 點位列為不蓋建築區：新增 `STORES` 後 `osm-city.json` 需重建（check-city / p8b-infill 在重建前可能不一致）
 
 ---
 

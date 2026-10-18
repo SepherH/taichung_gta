@@ -66,3 +66,61 @@ export const SPRAY_SHOPS = Object.freeze([
     inferred: true,
   }),
 ]);
+
+// 超商（Phase 9，src/wanted/robbery.js 超商搶劫）：x / z = 門口人行道點（小光柱 / 地圖標記），counterX / counterZ = 店員櫃檯點，
+// clerkYaw = 店員面向（櫃檯 → 門口，前方 = (sin yaw, cos yaw)）
+// 來源（src/data/osm-city.json，2026-10 查）：B / L / P / R / F 內 name 含「7-ELEVEN」「7-11」「統一超商」「全家」「FamilyMart」「萊爾富」
+//   「OK」「超商」「便利」者只有 B「全家便利商店」1 筆（id 491492673）；另有「台灣楓康超市」「全聯福利中心」2 筆為超市（非超商）不採用
+// - 全家：輪廓東緣（−393.9, 103）–（−389.8, 91.6）面向黎明路二段（secondary，寬 16 m；東緣到路緣約 6.2 m），
+//   門口 = 東緣中點往外 3.4 m 的人行道點（距路緣約 2.8 m）；櫃檯 = 門口往建物內 2 m（離外牆 1.4 m，仍在建物碰撞體外，店員才看得到 / 打得到）
+// - 不足 3 間 → 其餘 3 間為七期主要路口的推測位置：路口 35 m 內取「離路緣 2.4–3.0 m、離 OSM 建物 ≥ 4.5 m、不在水域」的人行道點中最近路口者，
+//   櫃檯 = 往遠離道路方向 2 m（離路緣 ≥ 4.2 m）；三點 15 m 內皆無建物（含填充建築），不需等 osm-city.json 重建
+export const STORES = Object.freeze([
+  Object.freeze({
+    id: 'store-familymart-liming',
+    name: '全家便利商店（黎明路二段）',
+    osmId: 491492673,
+    x: -388.7,
+    z: 98.5,
+    counterX: -390.5,
+    counterZ: 97.8,
+    clerkYaw: 1.226,
+    inferred: false,
+  }),
+  Object.freeze({
+    id: 'store-huizhong-shizhengbei1',
+    name: '惠中市政北一路口超商（推測）',
+    osmId: null,
+    osmRoadId: 666398456, // 市政北一路（tertiary，寬 12 m），惠中路一段口西南側
+    x: 490.0,
+    z: 586.0,
+    counterX: 491.1,
+    counterZ: 584.3,
+    clerkYaw: -0.558,
+    inferred: true,
+  }),
+  Object.freeze({
+    id: 'store-henan-shizhengbei1',
+    name: '河南市政北一路口超商（推測）',
+    osmId: null,
+    osmRoadId: 1049620878, // 河南路三段（tertiary，寬 12 m），市政北一路口西南側
+    x: -74.0,
+    z: 252.0,
+    counterX: -75.7,
+    counterZ: 251.0,
+    clerkYaw: 1.039,
+    inferred: true,
+  }),
+  Object.freeze({
+    id: 'store-huizhong-shizhengbei7',
+    name: '市政府惠中路口超商（推測）',
+    osmId: null,
+    osmRoadId: 638723039, // 惠中路一段（tertiary，寬 9.6 m），市政北七路口南側、近臺中市政府
+    x: 746.0,
+    z: 165.0,
+    counterX: 744.3,
+    counterZ: 164.0,
+    clerkYaw: 1.027,
+    inferred: true,
+  }),
+]);

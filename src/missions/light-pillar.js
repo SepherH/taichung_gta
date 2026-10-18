@@ -6,15 +6,17 @@ import * as THREE from 'three';
 
 export const BEACON_HEIGHT = 220;
 export const BEACON_RADIUS = 2.4;
-export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff, spray: 0xe040fb }; // job = 打工接單點（§23.4）；spray = 噴漆廠入口（Phase 8）
+export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff, spray: 0xe040fb, store: 0x43a047 }; // job = 打工接單點（§23.4）；spray = 噴漆廠入口（Phase 8）；store = 可搶的超商門口（Phase 9，綠）
+export const BEACON_SINK = 12; // m，柱底埋入地面的深度（地形起伏也不露底）
 const BASE_OPACITY = 0.3;
 const PULSE_SPEED = 1.6; // rad/s，約 4 s 一個週期
 
-export function createBeaconPool({ scene, heightAt = null } = {}) {
-  const geo = new THREE.CylinderGeometry(BEACON_RADIUS, BEACON_RADIUS, BEACON_HEIGHT, 20, 1, true);
-  geo.translate(0, BEACON_HEIGHT / 2 - 12, 0); // 底部略埋入地面，地形起伏（秋紅谷谷底）也不露底
-  const coreGeo = new THREE.CylinderGeometry(BEACON_RADIUS * 0.35, BEACON_RADIUS * 0.35, BEACON_HEIGHT, 10, 1, true);
-  coreGeo.translate(0, BEACON_HEIGHT / 2 - 12, 0);
+// height / radius / sink 選用（預設 = 任務光柱 220 m；超商門口小光柱由 main.js STORE_BEACON 傳入）
+export function createBeaconPool({ scene, heightAt = null, height = BEACON_HEIGHT, radius = BEACON_RADIUS, sink = BEACON_SINK } = {}) {
+  const geo = new THREE.CylinderGeometry(radius, radius, height, 20, 1, true);
+  geo.translate(0, height / 2 - sink, 0); // 底部略埋入地面，地形起伏（秋紅谷谷底）也不露底
+  const coreGeo = new THREE.CylinderGeometry(radius * 0.35, radius * 0.35, height, 10, 1, true);
+  coreGeo.translate(0, height / 2 - sink, 0);
   const pool = [];
   const live = [];
   let time = 0;

@@ -37,6 +37,9 @@
 // 打工委託（I6c，§23.4 / §24）：createMissions 注入 jobSpots（夜市跑單 = oyster 攤 + 攤主側 stallBack + sidewalkNear、代客泊車 = job-props.js VALET_SITES）、
 //   spawnValetCar（vehicles.adopt + dmg.attach）/ releaseValetCar（拉手煞轉路邊停放、遠了回收）/ healthOf（dmg.healthOf）；missionCtx.vehicle = 駕駛中的車；
 //   夜市攤位 = 原攤車 + oyster / tea 變體混擺（缺模型退回原攤車）、泊車亭 valet_stand（缺模型退回程式幾何，碰撞只取亭身）、接單攤檯面 takeout_bag
+// 超商搶劫（Phase 9，§28）：createRobberies（wanted/robbery.js 純邏輯）+ 店員（pedestrian 角色綠制服、combat actor clerkOf = 店 id、行人膠囊剛體）
+//   + 門口小光柱（只在可搶時）+ 小地圖 / 大地圖 kind 'store'；每幀 updateRobberies 接在 updateSprayShops 之後（手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆中不推進），
+//   aiming / aimAt 取 fillAim 的 aim（aim.aiming = 按住瞄準且持手槍；aimAt = 鏡頭中心射線離店員胸口 ≤ 1.2 m）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -86,7 +89,7 @@ import { addStaticBox, buildWorldColliders, osmWithBuildings } from './physics/c
 import { GROUPS, queryGroups, WORLD as G_WORLD, VEHICLE as G_VEHICLE, NPC_CAR as G_NPC_CAR, PEDESTRIAN as G_PED, DEBRIS as G_DEBRIS } from './physics/groups.js';
 import { CharacterBody } from './physics/character.js';
 import { createContactRouter } from './physics/contacts.js';
-import { ACTIVE_RADIUS } from './physics/npc-bodies.js';
+import { ACTIVE_RADIUS, createPedestrianBody } from './physics/npc-bodies.js';
 import { createWorldStep, createFrameLoop } from './core/loop.js';
 import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS } from './weapons/index.js';
 import { makeBatSegment } from './weapons/models.js';
@@ -112,6 +115,8 @@ import { createWantedUI } from './wanted/ui.js';
 import { respawnPlace, SPRAY_SHOPS } from './wanted/places.js';
 import { createSprayShops } from './wanted/spray.js';
 import { createBeaconPool } from './missions/light-pillar.js';
+import { STORES } from './wanted/places.js';
+import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -123,6 +128,11 @@ const CRIME_REPORT_RANGE = 35; // 無警力看見時，此距離內有行人才�
 const POLICE_RAM_MIN_SPEED = 3; // 玩家車撞警車：相對速度達此值、且玩家車比警車快才算 policeVehicle（m/s；警車 ram 玩家不算玩家犯行）
 const POLICE_RAM_COOLDOWN = 2; // 同一台警車 policeVehicle 回報的冷卻（s，同一次碰撞的連續接觸只算一次）
 const WANTED_HINT_TEXT = '被通緝了！星星代表警方追緝程度，離開警察視線並躲出小地圖的搜索圈就能擺脫。';
+const CLERK_SPAWN_DIST = 120; // 超商店員（Phase 9）：玩家距櫃檯此距離內才生成（m）
+const CLERK_DESPAWN_DIST = 150; // 超過此距離回收店員（m；與生成距離留遲滯）
+const CLERK_COLORS = { shirt: '#2E7D32', pants: '#1B3A1F' }; // 店員綠色系制服（pedestrian 角色執行期換色，不改模型檔）
+const CLERK_HP = 100;
+const STORE_BEACON = { height: 7, radius: 0.7, sink: 1 }; // 超商門口小光柱（createBeaconPool 選項；顏色 BEACON_COLORS.store 綠 #43a047）
 const AUTOSAVE_SEC = 15; // 自動存檔間隔（s）
 const MAX_STEP_DIST = 30; // 單幀位移超過此值（傳送 / 重生）不計入里程（m）
 const ROAD_NAME_SEC = 0.5; // 駕駛時路名查詢間隔（s）
@@ -914,6 +924,7 @@ async function init() {
     pushAll(out, food.markers());
     pushAll(out, pickups.markers());
     pushAll(out, sprayMarkers);
+    pushAll(out, robberyMarkers);
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven) out.push(c.pos);
     return out;
   };
@@ -1554,6 +1565,161 @@ async function init() {
     }
   };
 
+  // ---------- 超商搶劫（Phase 9，§28）：src/wanted/robbery.js（純邏輯）+ 店員 + 門口小光柱 + 小地圖 / 大地圖標記 ----------
+  const robberies = createRobberies({ bus, wanted, police, stores: STORES, rng: Math.random });
+  const robberyMarkers = STORES.map((s) => ({ x: s.x, z: s.z, kind: 'store' }));
+  const storeBeacons = createBeaconPool({ scene, heightAt, ...STORE_BEACON });
+  const storeBeaconOf = new Map(); // store.id → 光柱（只在可搶時持有）
+  // 店員：pedestrian 角色換綠制服 + CharacterAnimator + combat actor（clerkOf = 店 id，robbery.js 據 ped:knockdown / ped:dead 判倒地）
+  //   + 行人膠囊剛體（kinematic，子彈 / 車撞得到；倒地切 dynamic）。玩家在 CLERK_SPAWN_DIST 內且該店可搶 / 搶劫中（或店員倒地的冷卻中）才存在；
+  //   搶完冷卻 = 店員消失；冷卻結束回 ready → 倒地 / 擊斃的店員回收、下一幀重新生成
+  const clerks = new Map(); // store.id → { store, pos, yaw, character, mesh, anim, body, actor, settle }
+  let clerkSeq = 0;
+  pw.onAfterStep((h) => {
+    for (const c of clerks.values()) if (c.body && c.body.down) c.settle = c.body.settleCheck(h); // 倒地落穩判定逐子步累計（同警員）
+  });
+  const placeClerk = (c) => {
+    c.mesh.position.set(c.pos.x, c.pos.y + SURFACE_OFFSET, c.pos.z);
+    c.mesh.rotation.set(0, c.yaw, 0);
+  };
+  const spawnClerk = (s) => {
+    const character = createCharacter({ variant: 'pedestrian', colors: CLERK_COLORS });
+    if (!character) return null;
+    const mesh = character.root;
+    mesh.rotation.order = 'YXZ';
+    const anim = new CharacterAnimator(character, getCharacterManifest()?.clips || []);
+    const x = s.counterX;
+    const z = s.counterZ;
+    const yaw = Number.isFinite(s.clerkYaw) ? s.clerkYaw : 0;
+    const c = { store: s, pos: { x, y: heightAt(x, z), z }, yaw, character, mesh, anim, body: null, actor: null, settle: { settled: false, clearToStand: false } };
+    c.body = createPedestrianBody(RAPIER, pw, { x, y: c.pos.y, z, yaw }, { groups: GROUPS, router });
+    c.body.owner = c; // 子彈 raycast（actorOfCollider）/ 車撞（traffic onVehicleHitPedestrian）以 owner.actor 找到店員
+    c.actor = {
+      id: `store-clerk-${++clerkSeq}`,
+      kind: 'pedestrian',
+      faction: 'clerk',
+      clerkOf: s.id,
+      pos: c.pos,
+      yaw,
+      hp: CLERK_HP,
+      maxHp: CLERK_HP,
+      anim,
+      recoverOnKo: true,
+      body: {
+        knockdown: (impulse) => {
+          const h = Math.hypot(impulse.x, impulse.z);
+          const dir = h > 1e-6 ? { x: impulse.x / h, y: 0, z: impulse.z / h } : { x: -Math.sin(c.yaw), y: 0, z: -Math.cos(c.yaw) };
+          c.yaw = Math.atan2(-dir.x, -dir.z); // 面向衝量來向（倒地動作往後躺）
+          c.body.hit({ impulse: Math.hypot(impulse.x, impulse.y, impulse.z), dir });
+          c.settle = { settled: false, clearToStand: false };
+        },
+        settleCheck: () => c.settle,
+        standUp: () => {
+          const p = c.body.recover(c.yaw);
+          if (p) {
+            c.pos.x = p.x;
+            c.pos.y = p.y;
+            c.pos.z = p.z;
+          }
+        },
+      },
+    };
+    combat.register(c.actor);
+    scene.add(mesh);
+    clerks.set(s.id, c);
+    placeClerk(c);
+    return c;
+  };
+  const despawnClerk = (c) => {
+    clerks.delete(c.store.id);
+    combat.unregister(c.actor);
+    c.body.dispose();
+    disposeCharacter(c.character);
+  };
+  const updateClerk = (c, dt) => {
+    if (c.body.down) {
+      // 倒地：位置跟剛體（角色原點 = 膠囊底部）
+      const t = c.body.body.translation();
+      c.pos.x = t.x;
+      c.pos.y = t.y - c.body.centerY;
+      c.pos.z = t.z;
+    } else if (!combat.isDown(c.actor)) {
+      // 起身後回到櫃檯點、面向門口
+      c.pos.x = c.store.counterX;
+      c.pos.z = c.store.counterZ;
+      c.pos.y = heightAt(c.pos.x, c.pos.z);
+      c.yaw = Number.isFinite(c.store.clerkYaw) ? c.store.clerkYaw : 0;
+      c.body.setPose(c.pos.x, c.pos.y, c.pos.z, c.yaw);
+    }
+    c.actor.yaw = c.yaw;
+    c.anim.update(dt, { speed: 0 });
+    placeClerk(c);
+  };
+  // 每幀同步：光柱只在可搶時顯示；店員依距離 / 店狀態生成或回收
+  const syncStores = (dt, px, pz) => {
+    for (const s of robberies.stores) {
+      const b = storeBeaconOf.get(s.id);
+      if (s.available && !b) storeBeaconOf.set(s.id, storeBeacons.acquire('store', s.x, s.z, s));
+      else if (!s.available && b) {
+        storeBeacons.release(b);
+        storeBeaconOf.delete(s.id);
+      }
+      const d2 = (px - s.counterX) ** 2 + (pz - s.counterZ) ** 2;
+      let c = clerks.get(s.id) || null;
+      // 回收：太遠、搶完（店員消失）、已判定死亡、冷卻結束後還是倒地那位
+      if (c && (d2 > CLERK_DESPAWN_DIST ** 2 || s.robbed || combat.stateOf(c.actor) === 'dead' || (s.available && (c.body.down || combat.isDown(c.actor))))) {
+        despawnClerk(c);
+        c = null;
+      }
+      // 生成：可搶或搶劫中（冷卻結束那一幀 robbery.update 可能已直接開始搶劫）
+      if (!c && (s.available || s.state === 'robbing') && state.started && d2 <= CLERK_SPAWN_DIST ** 2) c = spawnClerk(s);
+      if (c) updateClerk(c, dt);
+    }
+    storeBeacons.update(dt);
+  };
+  // 每幀 ctx（重用）：aiming / aimAt 取 fillAim 填好的 aim（鏡頭中心射線；aim.aiming = 按住瞄準且持手槍，手把 LT 同一路徑）
+  const robCtx = {
+    player: { x: 0, z: 0, yaw: 0 },
+    onFoot: false,
+    aiming: false,
+    aimAt: (x, z) => aimNear(aim.origin, aim.dir, x, heightAt(x, z) + AIM_HEIGHT, z),
+    earn: (n) => economy.add(n, 'robbery'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    showHint: (id, text) => !!settings.get('showHints') && wantedUI.showHint(id, text),
+  };
+  let robShown = false;
+  const setRobBar = (r) => {
+    if (r && r.active) {
+      hud.setRobberyProgress(r.progress, PROGRESS_LABEL);
+      robShown = true;
+    } else if (robShown) {
+      hud.setRobberyProgress(null);
+      robShown = false;
+    }
+  };
+  // 暫停 / 全螢幕面板（updateGame 不跑）、手機開著、BUSTED・WASTED、噴漆中：不推進（店員 / 光柱仍同步以 dt 0 擺位）
+  const updateRobberies = (dt, skip) => {
+    const p = playerPos();
+    const frozen = skip || !!state.respawn || !!state.spraying;
+    syncStores(frozen ? 0 : dt, p.x, p.z);
+    if (frozen) {
+      setRobBar(null);
+      return;
+    }
+    robCtx.player.x = p.x;
+    robCtx.player.z = p.z;
+    robCtx.player.yaw = player.yaw;
+    robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor)); // 倒地 / KO / 送醫中不能搶
+    robCtx.aiming = robCtx.onFoot && aim.aiming;
+    setRobBar(robberies.update(dt, robCtx));
+  };
+  // 回主選單 / 開局：取消進行中的搶劫、店員回收、進度條收起；開新局（resetAll）才重置各店冷卻；須在 cancelRespawn 之前（其 wanted.clear 會中止搶劫並發 robbery:failed）
+  const cancelRobbery = (resetAll = false) => {
+    robberies.cancel({ resetAll });
+    for (const c of [...clerks.values()]) despawnClerk(c);
+    setRobBar(null);
+  };
+
   // ---------- 車流 / 行人外部狀態 ----------
   // 行人大腦：玩家是否在車內、移動中的玩家車（高速逼近會閃避）、玩家 Actor（被拖出的司機還手對象）
   const threat = { x: 0, z: 0, vx: 0, vz: 0 };
@@ -1893,6 +2059,7 @@ async function init() {
     if (state.pendingFall) handleFall();
     updateWanted(dt, phoneOpen);
     if (!phoneOpen) updateSprayShops(dt);
+    updateRobberies(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -2235,6 +2402,7 @@ async function init() {
     economy = createEconomy({ bus, initial: save });
     resetExtraStats(save.stats);
     closePanels();
+    cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
     placePlayer(save);
@@ -2300,6 +2468,7 @@ async function init() {
     if (state.mode === 'drive') exitVehicle(true);
     state.mode = 'walk';
     player.locked = false;
+    cancelRobbery();
     cancelSpray();
     cancelRespawn();
     state.started = false;
@@ -2380,6 +2549,8 @@ async function init() {
       wanted, police, policeAdapters, wantedUI,
       // Phase 8：噴漆廠（sprayShops.shops 看每間店的 cooldown / hold）
       sprayShops,
+      // Phase 9：超商搶劫（robberies.stores 看每間店 state / cooldown；clerks = 目前生成的店員）
+      robberies, clerks,
       // 補手槍備彈（回實際加入數，上限 120）
       giveAmmo(n = 36) {
         return weapons.addAmmo(n);

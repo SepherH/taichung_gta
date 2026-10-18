@@ -13,6 +13,7 @@ export const CRIMES = Object.freeze({
   vehicleHit: 'vehicleHit',
   vehicleKill: 'vehicleKill',
   policeVehicle: 'policeVehicle',
+  robbery: 'robbery', // 超商搶劫（Phase 9，src/wanted/robbery.js；開始搶劫時由店員報警，witnessed=false）
 });
 
 // 各犯行增加的 heat（被警力看見時全額）
@@ -26,7 +27,11 @@ export const HEAT = Object.freeze({
   vehicleHit: 0.5,
   vehicleKill: 1.5,
   policeVehicle: 0.8,
+  robbery: 2.5,
 });
+
+// 犯行保底星數：report 後星數至少為此值（不論 witnessed）；超商搶劫保證至少 2 星
+export const CRIME_MIN_STARS = Object.freeze({ robbery: 2 });
 
 export const STAR_HEAT = Object.freeze([0, 0.5, 3, 6, 10, 15]); // stars = 最大 n 使 heat ≥ STAR_HEAT[n]
 export const EVADE_SEC = Object.freeze([0, 10, 15, 22, 30, 40]); // 依星數：脫離視線多久進入 / 完成搜尋
@@ -50,6 +55,7 @@ export function starsForHeat(heat, starHeat = STAR_HEAT) {
 export function createWanted({ bus, config = {} } = {}) {
   const cfg = {
     heat: config.heat || HEAT,
+    minStars: config.minStars || CRIME_MIN_STARS,
     starHeat: config.starHeat || STAR_HEAT,
     evadeSec: config.evadeSec || EVADE_SEC,
     maxDt: config.maxDt ?? MAX_DT,
@@ -120,8 +126,11 @@ export function createWanted({ bus, config = {} } = {}) {
     heat += witnessed ? base : base * cfg.unwitnessedMult;
     let next = Math.max(stars, Math.min(maxStars, starsForHeat(heat, cfg.starHeat)));
     if (!witnessed) next = Math.max(next, UNWITNESSED_MIN_STARS);
-    // 被看見犯行 → 位置確定；只有路人報案時僅在還沒有位置時採用（讓搜索圈有圓心）
-    if (hasPos && (witnessed || !lastKnown)) lastKnown = { x, z };
+    // 保底星數（CRIME_MIN_STARS，不論 witnessed）：只抬星數、heat 照 HEAT 累加（星數只升不降，之後的犯行不會掉回去）
+    const floor = cfg.minStars[crime];
+    if (typeof floor === 'number' && floor > 0) next = Math.max(next, Math.min(maxStars, Math.floor(floor)));
+    // 被看見犯行 → 位置確定；路人報案僅在還沒有位置時採用（讓搜索圈有圓心）；有保底星數的犯行（如 robbery 店員報警）報案位置可靠，一律更新
+    if (hasPos && (witnessed || !lastKnown || (typeof floor === 'number' && floor > 0))) lastKnown = { x, z };
     setStarsValue(next, crime);
     ensureActive();
     // 搜索中被警力目擊犯行 → 同 update 的 seen：回 active、計時歸零

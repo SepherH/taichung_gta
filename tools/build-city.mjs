@@ -27,7 +27,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // 填充建築要避開的遊戲固定點位（純資料模組，不依賴 three / JSON）
-import { POLICE_STATION, HOSPITAL, SPRAY_SHOPS } from '../src/wanted/places.js';
+import { POLICE_STATION, HOSPITAL, SPRAY_SHOPS, STORES } from '../src/wanted/places.js';
 import { FOOD_SPOTS } from '../src/collect/food-spots.js';
 import { NIGHT_MARKET_DELIVERY } from '../src/missions/events.js';
 import { VALET_SITES } from '../src/job-props.js';
@@ -983,7 +983,7 @@ function buildInfill(osmB, roads, foots, parks, waters, landcover, basinRing, pl
   blockRing(plazaRing, PLAZA_PAD);
   for (const b of osmB) blockRing(unflat(b.p), b.n ? LANDMARK_PAD : OSM_PAD);
   const keep = [
-    POLICE_STATION, HOSPITAL, ...SPRAY_SHOPS, ...FOOD_SPOTS, NIGHT_MARKET_DELIVERY.pickup,
+    POLICE_STATION, HOSPITAL, ...SPRAY_SHOPS, ...STORES, ...FOOD_SPOTS, NIGHT_MARKET_DELIVERY.pickup,
     ...VALET_SITES.flatMap((v) => [v.stand, v.car, v.slot]),
   ];
   for (const p of [...keep, ...EXTRA_KEEP]) blockCircle(p.x, p.z, KEEP_CLEAR_R);

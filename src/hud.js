@@ -31,6 +31,8 @@
 // Phase 6（I6a）：hud.showCamView(index) → 畫面上方短暫顯示「鏡頭：近 / 中 / 遠」1.2 s（src/ui/cam-view-hint.js，倒數吃 update 的渲染 dt）
 // Phase 7（通緝）：state.searchCircle（wanted.searchCircle：{ x, z, r } | null）→ 小地圖以 wanted/ui.js drawSearchCircle 畫搜索圈（藍紅交替）；
 //   state.policeCars（[{ x, z }]，police.cars 的 pos）→ 小地圖紅藍交替閃爍點（每 POLICE_BLINK_SEC 秒換色，超出半徑不畫）
+// Phase 9（超商搶劫）：hud.setRobberyProgress(frac | null, label?) → 畫面中下（互動提示膠囊上方）進度條「搶劫中…」（.rob- 前綴，樣式在 style.css 末段）；
+//   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
 import { makeCanvas, FONT_STACK } from './utils.js';
@@ -58,7 +60,7 @@ export const RADIO_BTN_ID = 'tb-radio';
 const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
 // 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
 export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
-const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ' }; // economy 入帳原因 → 跳動文字前綴
+const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ', robbery: '搶劫 ' }; // economy 入帳原因 → 跳動文字前綴（robbery = Phase 9 超商搶劫）
 const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空白）
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
@@ -67,6 +69,9 @@ const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-star
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
+const ICON_KINDS = { store: '超' }; // 畫成「色塊 + 白字」小方塊圖示的 kind（Phase 9 超商）
+const ICON_PX = 6; // 圖示方塊半邊長（螢幕 px）
+export const ROB_LABEL = '搶劫中…'; // 超商搶劫進度條預設文字（src/wanted/robbery.js PROGRESS_LABEL 同字）
 const EDGE_PAD = 9; // 貼邊標記距外框的內縮（px）
 export const POLICE_DOT_COLORS = ['#ff3b3b', '#3b7bff']; // 小地圖警車點：紅藍交替
 const POLICE_BLINK_SEC = 0.25; // 警車點換色週期（每段秒數）
@@ -169,6 +174,7 @@ export class HUD {
     }
     this._buildPhase5();
     this._buildSprayFade();
+    this._buildRobBar();
     this._camViewHint = createCamViewHint({ parent: this.root });
     this.mapCanvas = this._buildMap();
     if (typeof window !== 'undefined' && window.addEventListener) {
@@ -196,6 +202,51 @@ export class HUD {
     if (!this.sprayFadeEl) return;
     const v = Math.max(0, Math.min(1, Number(frac) || 0));
     this.sprayFadeEl.style.opacity = String(v);
+  }
+
+  // 超商搶劫進度條（Phase 9）：掛 document.body（#hud 是 z-index 10 的堆疊環境，style.css 的 .rob-bar z 52 要在 body 層才生效）
+  _buildRobBar() {
+    this._robShown = false;
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+      this.robBarEl = null;
+      return;
+    }
+    const bar = document.createElement('div');
+    bar.className = 'rob-bar';
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    bar.hidden = true;
+    const label = document.createElement('div');
+    label.className = 'rob-label';
+    label.textContent = ROB_LABEL;
+    const track = document.createElement('div');
+    track.className = 'rob-track';
+    const fill = document.createElement('div');
+    fill.className = 'rob-fill';
+    track.appendChild(fill);
+    bar.appendChild(label);
+    bar.appendChild(track);
+    (document.body || this.root).appendChild(bar);
+    this.robBarEl = bar;
+    this.robLabelEl = label;
+    this.robFillEl = fill;
+  }
+
+  // frac：0–1 顯示進度（搶劫中）；null / undefined = 隱藏；label 省略 = ROB_LABEL
+  setRobberyProgress(frac, label = ROB_LABEL) {
+    if (!this.robBarEl) return;
+    const show = frac !== null && frac !== undefined && Number.isFinite(Number(frac));
+    if (show !== this._robShown) {
+      this.robBarEl.hidden = !show;
+      this._robShown = show;
+    }
+    if (!show) return;
+    const v = Math.max(0, Math.min(1, Number(frac)));
+    const text = String(label || ROB_LABEL);
+    if (this.robLabelEl.textContent !== text) this.robLabelEl.textContent = text;
+    this.robFillEl.style.width = `${(v * 100).toFixed(1)}%`;
+    this.robBarEl.setAttribute('aria-valuenow', String(Math.round(v * 100)));
   }
 
   // 天氣圖示（狀態列最前面）、台名列（駕駛面板內車名上方）、觸控換台鈕；index.html / style.css 不動，樣式以 inline 補
@@ -840,6 +891,25 @@ export class HUD {
         ctx.lineWidth = 1.5;
         ctx.fill();
         ctx.stroke();
+        continue;
+      }
+      const glyph = m.kind ? ICON_KINDS[m.kind] : undefined;
+      if (glyph) {
+        // 小方塊圖示：色塊 + 黑框 + 白字（超商「超」）
+        const cx = R + dx;
+        const cz = R + dz;
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - ICON_PX, cz - ICON_PX, ICON_PX * 2, ICON_PX * 2);
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - ICON_PX, cz - ICON_PX, ICON_PX * 2, ICON_PX * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${ICON_PX * 2 - 2}px ${FONT_STACK}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(glyph, cx, cz + 0.5);
+        ctx.restore();
         continue;
       }
       ctx.beginPath();

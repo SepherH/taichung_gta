@@ -3,6 +3,7 @@
 // 用法：node tools/test/p7-wanted.mjs（任一斷言失敗 exit 1；最後一行 PASS n/n 或 FAIL k/n）
 // 涵蓋：犯行 heat → 星數、路人目擊 0.5 倍且至少 1 星、星數只升不降、狀態機（active → searching → evaded、spotted、圈內 0.25 倍速）、
 //   searchCircle、clear 各 reason 的事件序列、幀率無關（1/60 vs 1/144）、dt clamp、setStars / 0 星 update
+// Phase 9：robbery 犯行（HEAT 2.5、CRIME_MIN_STARS 保證 ≥ 2 星，witnessed 與否皆然；heat 照常累加不被抬高）
 import { createBus } from '../../src/core/events.js';
 import {
   CRIMES,
@@ -15,6 +16,7 @@ import {
   CIRCLE_PER_STAR_R,
   INSIDE_SEARCH_RATE,
   CLEAR_REASONS,
+  CRIME_MIN_STARS,
   createWanted,
   starsForHeat,
 } from '../../src/wanted/wanted.js';
@@ -52,8 +54,9 @@ function run(w, sec, dt, ctx) {
 // ======================= 常數 =======================
 {
   const keys = Object.keys(CRIMES);
-  check('CRIMES：9 種且值 = 同名字串', keys.length === 9 && keys.every((k) => CRIMES[k] === k));
-  check('HEAT：與 CRIMES 同鍵', keys.every((k) => typeof HEAT[k] === 'number') && Object.keys(HEAT).length === 9);
+  check('CRIMES：10 種（含 robbery）且值 = 同名字串', keys.length === 10 && keys.includes('robbery') && keys.every((k) => CRIMES[k] === k));
+  check('HEAT：與 CRIMES 同鍵、robbery = 2.5', keys.every((k) => typeof HEAT[k] === 'number') && Object.keys(HEAT).length === 10 && HEAT.robbery === 2.5);
+  check('CRIME_MIN_STARS：robbery 保底 2 星', CRIME_MIN_STARS.robbery === 2 && Object.isFrozen(CRIME_MIN_STARS));
   check('STAR_HEAT / EVADE_SEC 契約值', STAR_HEAT.join() === '0,0.5,3,6,10,15' && EVADE_SEC.join() === '0,10,15,22,30,40');
   check('starsForHeat 邊界', starsForHeat(0.49) === 0 && starsForHeat(0.5) === 1 && starsForHeat(2.99) === 1 && starsForHeat(3) === 2 && starsForHeat(15) === 5 && starsForHeat(999) === 5);
 }
@@ -61,7 +64,7 @@ function run(w, sec, dt, ctx) {
 // ======================= 1. 犯行 heat 與星數 =======================
 {
   // 各犯行單次（被看見）
-  const expect = { assault: 1, assaultPolice: 1, kill: 1, killPolice: 2, gunfire: 0, carjack: 1, vehicleHit: 1, vehicleKill: 1, policeVehicle: 1 };
+  const expect = { assault: 1, assaultPolice: 1, kill: 1, killPolice: 2, gunfire: 0, carjack: 1, vehicleHit: 1, vehicleKill: 1, policeVehicle: 1, robbery: 2 };
   const bad = [];
   for (const c of Object.keys(CRIMES)) {
     const { w } = make();
@@ -104,6 +107,26 @@ function run(w, sec, dt, ctx) {
   check('lastKnown：被看見犯行時更新、路人報案不覆蓋', w3.lastKnown.x === 10 && w3.lastKnown.z === 20);
   w3.report(CRIMES.assault, { x: 30, z: 40, witnessed: true });
   check('lastKnown：再次被看見 → 更新', w3.lastKnown.x === 30 && w3.lastKnown.z === 40);
+}
+{
+  // Phase 9 robbery：店員報警（witnessed=false）→ heat 2.5 × 0.5 = 1.25（換算 1 星）但保底 2 星；搜索圈圓心 = 報案點
+  const { w, log } = make();
+  w.report(CRIMES.robbery, { x: 7, z: 8, witnessed: false });
+  const ch = log.filter((e) => e.name === 'wanted:change');
+  check('robbery（witnessed=false）：heat 1.25、保底 2 星、wanted:change reason robbery', near(w.heat, 1.25) && w.stars === 2 && ch.length === 1 && ch[0].reason === 'robbery' && ch[0].stars === 2, `heat ${w.heat} stars ${w.stars}`);
+  check('robbery：進入 active、lastKnown = 報案點', w.state === 'active' && w.lastKnown.x === 7 && w.lastKnown.z === 8);
+  w.report(CRIMES.gunfire, { x: 7, z: 8, witnessed: false });
+  check('robbery 之後的輕犯行不降星（仍 2 星）', w.stars === 2 && near(w.heat, 1.25 + 0.2));
+  const { w: w2 } = make();
+  w2.report(CRIMES.robbery, { x: 0, z: 0, witnessed: true });
+  check('robbery（witnessed=true）：heat 2.5 → 保底 2 星', near(w2.heat, 2.5) && w2.stars === 2);
+  const { w: w3 } = make();
+  w3.setStars(4);
+  w3.report(CRIMES.robbery, { x: 0, z: 0, witnessed: false });
+  check('robbery：已 4 星時保底不降星', w3.stars === 4);
+  const { w: w4 } = make({ minStars: {} });
+  w4.report(CRIMES.robbery, { x: 0, z: 0, witnessed: false });
+  check('config.minStars 覆寫：無保底時 robbery 路人報案只到 1 星', w4.stars === 1);
 }
 {
   // 只升不降：gunfire 被看見（0 星）不會把已有星數降下；heat 只增
