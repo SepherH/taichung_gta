@@ -22,11 +22,12 @@ import blendsafe  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 GLB_DIR = os.path.join(REPO, "public", "models", "weapons")
-BLEND_DIR = os.path.join(REPO, "assets", "blender", "weapons")
-PREVIEW_DIR = os.path.join(REPO, "docs", "models", "previews")
+BLEND_DIR = os.environ.get("WEAPON_BLEND_DIR") or os.path.join(REPO, "assets", "blender", "weapons")
+PREVIEW_DIR = os.environ.get("WEAPON_PREVIEW_DIR") or os.path.join(REPO, "docs", "models", "previews")
+ONLY = [x for x in os.environ.get("WEAPON_ONLY", "").split(",") if x]   # 只建指定武器（其餘沿用 manifest 現有條目）
 PREVIEW_COLL = "_preview（不匯出）"
 MAX_TRIS = 1500
-MAX_BYTES = 80 * 1024
+MAX_BYTES = 60 * 1024
 
 
 # ---------------------------------------------------------------- 材質（同 char_lib 寫法）
@@ -182,10 +183,75 @@ def build_pistol(bm, mi):
     cylinder_y(bm, 0.0, zc, -0.1455, -0.1449, 0.0055, 12, grip)
     return {"smooth": False, "tip_z": zc}
 
+SMG_MATS = [("metal", "#2E3136", 0.4, 0.6), ("grip", "#1C1D1F", 0.8, 0.0), ("sight", "#D8D8D8", 0.5, 0.0)]
+SHOTGUN_MATS = [("metal", "#2E3136", 0.4, 0.6), ("wood", "#7A4E2D", 0.65, 0.0),
+                ("grip", "#1C1D1F", 0.8, 0.0), ("sight", "#D8D8D8", 0.5, 0.0)]
+
+
+def build_smg(bm, mi):
+    """全長 0.45 m：原點 = 握把中心；機匣軸線高 0.05，槍口在原點前方 0.35、折疊托後端在 +0.10。"""
+    metal, grip, sight = mi["metal"], mi["grip"], mi["sight"]
+    zc = 0.05
+    box_span(bm, -0.021, 0.021, -0.20, 0.07, zc - 0.026, zc + 0.026, metal)          # 機匣
+    box_span(bm, -0.017, 0.017, -0.20, 0.07, zc + 0.026, zc + 0.032, grip)           # 上蓋防滑
+    cylinder_y(bm, 0.0, zc + 0.006, -0.35, -0.20, 0.0115, 10, metal)                 # 槍管 / 護套
+    cylinder_y(bm, 0.0, zc + 0.006, -0.26, -0.20, 0.0165, 10, grip)                  # 護套粗段
+    cylinder_y(bm, 0.0, zc + 0.006, -0.3503, -0.35, 0.0075, 10, grip)                # 槍口孔
+    rot = Matrix.Rotation(math.radians(15), 4, "X")
+    box(bm, (0.030, 0.042, 0.105), grip, rot @ Matrix.Translation((0, 0, -0.02)))   # 握把
+    loop_yz(bm, -0.075, 0.012, 0.020, 0.013, 0.006, 0.004, 10, grip)                # 扳機護弓
+    box(bm, (0.005, 0.005, 0.016), metal,
+        Matrix.Translation((0, -0.066, 0.010)) @ Matrix.Rotation(math.radians(-12), 4, "X"))
+    box(bm, (0.026, 0.034, 0.125), grip,                                              # 彈匣（前傾）
+        Matrix.Translation((0, -0.135, -0.020)) @ Matrix.Rotation(math.radians(-8), 4, "X"))
+    box(bm, (0.028, 0.038, 0.006), metal,
+        Matrix.Translation((0, -0.146, -0.083)) @ Matrix.Rotation(math.radians(-8), 4, "X"))
+    box_span(bm, -0.010, 0.010, -0.195, -0.160, zc - 0.062, zc - 0.026, grip)       # 前握把（貼機匣底）
+    box_span(bm, -0.002, 0.002, -0.19, -0.185, zc + 0.032, zc + 0.040, metal)       # 前照門
+    box_span(bm, -0.001, 0.001, -0.185, -0.1845, zc + 0.034, zc + 0.038, sight)
+    for sx in (-1, 1):                                                                # 後照門
+        box_span(bm, *sorted((sx * 0.003, sx * 0.008)), 0.045, 0.052, zc + 0.032, zc + 0.039, metal)
+    box_span(bm, -0.002, 0.002, 0.07, 0.10, zc + 0.012, zc + 0.020, metal)          # 折疊托（上桿）
+    box_span(bm, -0.002, 0.002, 0.10, 0.104, zc - 0.018, zc + 0.020, metal)
+    box_span(bm, -0.002, 0.002, 0.07, 0.10, zc - 0.018, zc - 0.010, metal)          # 折疊托（下桿）
+    return {"smooth": False, "tip_z": zc + 0.006}
+
+
+def build_shotgun(bm, mi):
+    """全長 1.0 m：原點 = 握把中心；槍口在原點前方 0.70、槍托後端約 +0.30。護木中心約在 −0.36。"""
+    metal, wood, grip, sight = mi["metal"], mi["wood"], mi["grip"], mi["sight"]
+    zc = 0.05
+    box_span(bm, -0.019, 0.019, -0.12, 0.09, zc - 0.028, zc + 0.026, metal)          # 機匣
+    box_span(bm, -0.004, 0.004, -0.04, 0.02, zc - 0.028, zc - 0.034, metal)          # 退殼口 / 底部扳機座
+    cylinder_y(bm, 0.0, zc + 0.008, -0.70, -0.12, 0.0125, 12, metal)                 # 槍管
+    cylinder_y(bm, 0.0, zc + 0.008, -0.7003, -0.70, 0.0085, 12, grip)                # 槍口孔
+    cylinder_y(bm, 0.0, zc - 0.018, -0.62, -0.12, 0.011, 10, metal)                  # 彈倉管
+    cylinder_y(bm, 0.0, zc - 0.018, -0.63, -0.62, 0.0135, 10, metal)                 # 管尾蓋
+    box_span(bm, -0.021, 0.021, -0.49, -0.27, zc - 0.045, zc - 0.002, wood)         # 泵動護木
+    for y in (-0.46, -0.44, -0.42, -0.40):                                            # 護木防滑槽
+        for sx in (-1, 1):
+            box_span(bm, *sorted((sx * 0.0210, sx * 0.0218)), y - 0.004, y + 0.004, zc - 0.036, zc - 0.012, grip)
+    rot = Matrix.Rotation(math.radians(15), 4, "X")
+    box(bm, (0.028, 0.040, 0.100), grip, rot @ Matrix.Translation((0, 0, -0.015)))  # 握把
+    loop_yz(bm, -0.060, 0.014, 0.022, 0.013, 0.006, 0.004, 10, metal)               # 扳機護弓
+    box(bm, (0.005, 0.005, 0.016), metal,
+        Matrix.Translation((0, -0.052, 0.012)) @ Matrix.Rotation(math.radians(-12), 4, "X"))
+    # 槍托：由機匣尾端向後下方斜伸（長約 0.21），尾端加厚為肩墊
+    stock = Matrix.Translation((0, 0.195, zc - 0.012)) @ Matrix.Rotation(math.radians(-8), 4, "X")
+    box(bm, (0.034, 0.21, 0.050), wood, stock)
+    box(bm, (0.038, 0.014, 0.078), grip, Matrix.Translation((0, 0.305, zc - 0.034)) @ Matrix.Rotation(math.radians(-8), 4, "X"))
+    box_span(bm, -0.0015, 0.0015, -0.69, -0.685, zc + 0.020, zc + 0.027, metal)     # 準星
+    box_span(bm, -0.0008, 0.0008, -0.685, -0.6845, zc + 0.022, zc + 0.026, sight)
+    return {"smooth": False, "tip_z": zc + 0.008}
+
 
 WEAPONS = [
     {"id": "bat", "name": "球棒", "type": "melee", "mats": BAT_MATS, "build": build_bat},
     {"id": "pistol", "name": "手槍", "type": "ranged", "mats": PISTOL_MATS, "build": build_pistol},
+    {"id": "smg", "name": "衝鋒槍", "type": "ranged", "mats": SMG_MATS, "build": build_smg,
+     "offHand": [0, -0.03, 0.18]},    # 前握把（glTF z +0.18、握把下緣）
+    {"id": "shotgun", "name": "散彈槍", "type": "ranged", "mats": SHOTGUN_MATS, "build": build_shotgun,
+     "offHand": [0, 0.0, 0.38]},      # 泵動護木中心
 ]
 
 
@@ -325,7 +391,7 @@ def build(w):
         entry["sweep"] = {"from": [0, 0, 0.35], "to": [0, 0, tip], "radius": 0.04}
         entry["socketRotation"] = [0, 0, 0, 1]
     else:
-        entry["offHandOffset"] = [0, -0.01, 0.0]
+        entry["offHandOffset"] = w.get("offHand", [0, -0.01, 0.0])
         entry["socketRotation"] = [0.70711, 0, 0, 0.70711]
     entry.update({"triangles": tris, "bytes": size, "materials": mat_names})
     return entry
@@ -364,10 +430,42 @@ def verify(entry):
         print(f"WARN {entry['id']} 重新匯入 tip z {tip[2]} ≠ manifest {entry['tipOffset'][2]}")
 
 
+def load_old_entries(mp):
+    """讀既有 manifest 的條目（id → entry）；檔案不存在 / 格式壞掉 → 空 dict（印 WARN，不丟例外）。"""
+    if not os.path.exists(mp):
+        return {}
+    try:
+        with open(mp, encoding="utf-8") as f:
+            items = json.load(f).get("weapons", [])
+        return {e["id"]: e for e in items if isinstance(e, dict) and "id" in e}
+    except (OSError, ValueError, AttributeError) as err:
+        print(f"WARN 讀不到既有 manifest（{err}），只寫入這次建的武器")
+        return {}
+
+
+def merge_entries(weapons, only, old, build_fn):
+    """WEAPON_ONLY 指定時只重建指定武器，其餘沿用既有 manifest 條目；既有 manifest 缺項 → 略過並 WARN（不 KeyError）。
+    既有 manifest 裡不在 WEAPONS 清單的條目原樣保留在最後。"""
+    entries = []
+    for w in weapons:
+        if not only or w["id"] in only:
+            entries.append(build_fn(w))
+        elif w["id"] in old:
+            entries.append(old[w["id"]])
+        else:
+            print(f"WARN {w['id']} 不在既有 manifest 且未列入 WEAPON_ONLY，略過（要建請加進 WEAPON_ONLY）")
+    if only:
+        ids = {w["id"] for w in weapons}
+        entries.extend(e for k, e in old.items() if k not in ids)
+    return entries
+
+
 def main():
     for p in (GLB_DIR, BLEND_DIR, PREVIEW_DIR):
         os.makedirs(p, exist_ok=True)
-    entries = [build(w) for w in WEAPONS]
+    mp = os.path.join(GLB_DIR, "manifest.json")
+    old = load_old_entries(mp) if ONLY else {}
+    entries = merge_entries(WEAPONS, ONLY, old, build)
     write_manifest(entries)
     for e in entries:
         verify(e)

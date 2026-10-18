@@ -405,15 +405,18 @@ export function createAudio({ bus, settings, AudioContextCtor = globalThis.Audio
   const on = (name, fn) => {
     if (bus && typeof bus.on === 'function') offs.push(bus.on(name, (e) => fn(e || {})));
   };
-  on('weapon:fire', (e) => play('gunshot', { x: e.x, z: e.z }));
+  on('weapon:fire', (e) => play('gunshot', { x: e.x, z: e.z, weapon: e.weapon })); // Phase 14：配方依 weapon 區分手槍 / 衝鋒槍 / 散彈槍
   on('weapon:dryFire', () => play('dryfire'));
   on('weapon:reload', (e) => play('reload', { phase: e.phase }));
-  on('weapon:impact', (e) => play('ricochet', { x: e.x, z: e.z, surface: e.surface, volume: IMPACT_VOLUME }));
+  on('weapon:impact', (e) => {
+    if (e.quiet) return; // 散彈槍同一發第 2 顆起的落點不重複發聲（音源上限）
+    play('ricochet', { x: e.x, z: e.z, surface: e.surface, volume: IMPACT_VOLUME });
+  });
   on('weapon:swing', (e) => play('bat_swing', { x: e.x, z: e.z, weapon: e.weapon }));
   on('combat:hit', (e) => {
     if (e.weapon === 'explosion') return; // 爆炸受擊不另發擊中聲（爆炸聲已涵蓋）
     const name = e.weapon === 'bat' ? 'bat_hit' : 'punch';
-    play(name, { x: e.x, z: e.z, volume: e.weapon === 'pistol' ? 0.5 : 1 });
+    play(name, { x: e.x, z: e.z, volume: e.weapon === 'pistol' || e.weapon === 'smg' || e.weapon === 'shotgun' ? 0.5 : 1 });
   });
   on('vehicle:horn', (e) => play('horn', { x: e.x, z: e.z }));
   on('vehicle:crash', (e) => {

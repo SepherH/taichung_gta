@@ -6,7 +6,7 @@ import * as THREE from 'three';
 
 export const BEACON_HEIGHT = 220;
 export const BEACON_RADIUS = 2.4;
-export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff, spray: 0xe040fb, store: 0x43a047, race: 0xfb8c00, taxi: 0xf5c518, ems: 0xe53935 }; // job = 打工接單點（§23.4）；spray = 噴漆廠入口（Phase 8）；store = 可搶的超商門口（Phase 9，綠）；race = 街頭競速起點 / 檢查點（Phase 12，橘）；taxi = 計程車目的地（Phase 13，黃）；ems = 救護車送醫醫院（Phase 13，紅）
+export const BEACON_COLORS = { start: 0xffc93f, dest: 0x3fd8ff, job: 0x9b7bff, spray: 0xe040fb, store: 0x43a047, race: 0xfb8c00, taxi: 0xf5c518, ems: 0xe53935, gunshop: 0xe53935, safehouse: 0x1e88e5 }; // job = 打工接單點（§23.4）；spray = 噴漆廠入口（Phase 8）；store = 可搶的超商門口（Phase 9，綠）；race = 街頭競速起點 / 檢查點（Phase 12，橘）；taxi = 計程車目的地（Phase 13，黃）；ems = 救護車送醫醫院（Phase 13，紅）；gunshop = 武器店門口（Phase 14，紅）；safehouse = 安全屋門口（Phase 14，藍）
 export const BEACON_SINK = 12; // m，柱底埋入地面的深度（地形起伏也不露底）
 const BASE_OPACITY = 0.3;
 const PULSE_SPEED = 1.6; // rad/s，約 4 s 一個週期

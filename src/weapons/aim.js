@@ -1,4 +1,4 @@
-// 瞄準純函式（不 import three）：觸控弱吸附 pickAimAssist、手槍射線解算 resolveShot、後座 recoilKick
+// 瞄準純函式（不 import three）：觸控弱吸附 pickAimAssist、手槍射線解算 resolveShot、散佈 spreadDir、後座 recoilKick
 // 向量一律用 { x, y, z } 純物件；out 參數由呼叫端重用（每幀 / 每發不配置新物件）
 // 座標：X 東、Z 南、Y 上；yaw 前方 = (sin yaw, cos yaw)
 import { AIM_ASSIST_ANGLE, AIM_ASSIST_RANGE, AIM_POINT_HEIGHT } from './defs.js';
@@ -187,6 +187,39 @@ export function resolveShot(raycast, origin, dir, muzzle, range, excludeActor, o
   out.normal.y = camHasN ? camNy : -my;
   out.normal.z = camHasN ? camNz : -mz;
   out.dist = md;
+  return out;
+}
+
+// 散佈（純函式）：把單位方向 dir 繞自身偏轉 angle（rad），偏轉方位 phi（rad，0 = 右、π/2 = 上）；寫入 out 並回傳（不配置）
+// 基底：right = dir × 世界上 (0,1,0)（dir 近垂直時改用世界前 (0,0,1)），up = right × dir
+export function spreadDir(dir, angle, phi, out) {
+  const dl = Math.hypot(dir.x, dir.y, dir.z) || 1;
+  const fx = dir.x / dl;
+  const fy = dir.y / dl;
+  const fz = dir.z / dl;
+  let rx = -fz; // f × (0,1,0) = (−fz, 0, fx)
+  let ry = 0;
+  let rz = fx;
+  let rl = Math.hypot(rx, rz);
+  if (rl < 1e-6) {
+    rx = fy; // f × (0,0,1) = (fy, −fx, 0)
+    ry = -fx;
+    rz = 0;
+    rl = Math.hypot(rx, ry);
+  }
+  rx /= rl;
+  ry /= rl;
+  rz /= rl;
+  const ux = ry * fz - rz * fy; // up = right × f
+  const uy = rz * fx - rx * fz;
+  const uz = rx * fy - ry * fx;
+  const c = Math.cos(angle);
+  const sn = Math.sin(angle);
+  const cp = Math.cos(phi) * sn;
+  const sp = Math.sin(phi) * sn;
+  out.x = fx * c + rx * cp + ux * sp;
+  out.y = fy * c + ry * cp + uy * sp;
+  out.z = fz * c + rz * cp + uz * sp;
   return out;
 }
 

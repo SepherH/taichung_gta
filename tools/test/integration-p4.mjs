@@ -140,8 +140,10 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
     ['武器：sweep = 膠囊（半長 = |to − from| / 2）intersections 行人組', ['new RAPIER.Capsule(', 'pw.intersections(sweepPos, sweepRot, sweepShape', 'queryGroups(G_PED)', 'Math.hypot(dx, dy, dz) / 2']],
     ['武器：模型掛 weapon_socket（attachWeapon + socketQuaternion）、空手拿下、駕駛隱藏', ['loadWeaponModels()', 'attachWeapon(player.character', 'socketQuaternion.toArray()', 'detachWeapon(player.character)', "m.object.visible = state.mode !== 'drive'", 'makeBatSegment(']],
     ['武器：持武器姿勢 / 動畫注入 / 後座', ['player.weaponLayer.setPose(', 'player.weaponLayer.play(name)', 'player.weaponLayer.addRecoil(', 'weapons.recoilKick()', 'rig.addRecoil(kick.pitch, kick.yaw)']],
-    ['武器：輸入 slot1/2/3 → select、weaponCycle → cycle、reload → reload、攻擊（手槍 down / 其餘 pressed）', [
-      'snap.pressed.slot1', 'weapons.select(0)', 'weapons.select(2)', 'snap.pressed.weaponCycle', 'weapons.cycle()', 'snap.pressed.reload', 'weapons.reload()', "weapons.current === 'pistol' ? snap.down.attack : snap.pressed.attack", 'weapons.attack(aim)']],
+    // P14b：攻擊判定由「手槍 down / 其餘 pressed」擴充為「槍械（isGun：手槍 / 衝鋒槍 / 散彈槍）down / 其餘 pressed」；isGun 對空手 / 球棒 / 手槍的結果另於下方以 defs.js 實際定義驗證
+    ['武器：輸入 slot1/2/3 → select、weaponCycle → cycle、reload → reload、攻擊（槍械 down / 其餘 pressed）', [
+      'snap.pressed.slot1', 'weapons.select(0)', 'weapons.select(2)', 'snap.pressed.weaponCycle', 'weapons.cycle()', 'snap.pressed.reload', 'weapons.reload()',
+      'const fire = isGun(weapons.current) ? snap.down.attack : snap.pressed.attack;', 'if (fire) weapons.attack(aim);']],
     ['武器：步行才處理武器輸入、每幀 weapons.update(dt, aim)、肩後鏡頭 aim、瞄準中滾輪不縮放', [
       "if (state.mode === 'walk') handleWeaponInput(snap)", 'weapons.update(dt, aim)', 'aim: aiming', 'if (aiming) input.wheel = 0', 'snap.down.aim']],
     ['武器：槍聲 → 行人 hear、彈藥拾取（update / pickup:ammo → addAmmo / 上限 120）、武器 HUD（駕駛隱藏）', [
@@ -180,6 +182,13 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
   for (const [name, list] of groups) {
     const lack = has(list);
     check(`main.js 接線：${name}`, lack.length === 0, lack.map(String).join(' | '));
+  }
+  {
+    // 攻擊判定語意：isGun（defs.js 實際定義）→ 手槍 true（down，半自動按住連發）、空手 / 球棒 false（pressed），與原「手槍 down / 其餘 pressed」對這三把相同
+    const m = /export const isGun = (\(id\) => [^\n]*);/.exec(read('src/weapons/defs.js'));
+    const isGunFn = m ? new Function(`return ${m[1]}`)() : null;
+    check('武器：攻擊判定 isGun（手槍 → down；空手 / 球棒 → pressed）',
+      !!isGunFn && isGunFn('pistol') === true && isGunFn('fist') === false && isGunFn('bat') === false && isGunFn(undefined) === false);
   }
   check('彈藥盒不放置：main.js createAmmoPickups points 為空、不引用 DEFAULT_AMMO_POINTS',
     /createAmmoPickups\(\{[^}]*points: \[\]/.test(mainSrc) && !mainSrc.includes('DEFAULT_AMMO_POINTS'));

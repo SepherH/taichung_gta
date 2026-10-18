@@ -428,7 +428,7 @@ export class NpcBrain {
         continue;
       }
       if (s.type === 'attacked') {
-        if (s.weapon === 'pistol') this._startFlee(s.attacker ? { actor: s.attacker } : null);
+        if (s.weapon === 'pistol' || s.weapon === 'smg' || s.weapon === 'shotgun') this._startFlee(s.attacker ? { actor: s.attacker } : null); // 槍械（Phase 14 含衝鋒槍 / 散彈槍）
         else if (s.attacker && this._canFight(s.attacker, ctx, s.ejected)) this._startFight(s.attacker, s.ejected);
         else if (!(this.state === 'fight' && s.attacker === this.target)) this._startFlee(s.attacker ? { actor: s.attacker } : s.vehicle);
       } else if (this._calm() && this.films) {

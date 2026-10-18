@@ -294,7 +294,7 @@ function aimAt(tx, ty, tz, { origin = { x: 0.45, y: 1.6, z: -1.6 }, aiming = tru
 {
   const B = WEAPONS.bat;
   const P = WEAPONS.pistol;
-  ok(SLOT_IDS.join() === 'fist,bat,pistol', '三槽 0 空手 / 1 球棒 / 2 手槍');
+  ok(SLOT_IDS.join() === 'fist,bat,pistol,smg,shotgun', '五槽 0 空手 / 1 球棒 / 2 手槍 / 3 衝鋒槍 / 4 散彈槍（P14b；前三槽不變）');
   ok(B.damage === 35 && B.cooldown === 0.75 && B.hitWindow[0] === 0.3 && B.hitWindow[1] === 0.55, '球棒：傷害 35、冷卻 0.75 s、命中窗退路 [0.3, 0.55]');
   ok(P.damage === 40 && P.magSize === 12 && P.startReserve === 36 && P.reserveMax === 120 && P.fireInterval === 0.22 && P.reloadSec === 1.4 && P.range === 80,
     '手槍：傷害 40、彈匣 12、備彈 36 / 上限 120、射速 0.22 s、裝填 1.4 s、射程 80 m');

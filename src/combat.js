@@ -39,6 +39,9 @@
 //   damageDown(actor, damage, { weapon, attacker, impulse }) → { damage, hp, knockdown, down: true } | null：爆炸核心必死用的強制扣血入口，
 //     只受理倒地 / 起身中（applyHit 不受理的狀態）且尚未判定死亡者；hp 歸零 → 進 dying 並重發 'knockdown'（玩家接 player:ko → WASTED）
 //     + ped:dead；起身中未死 → 再次倒地；倒地中未死 → 只扣血
+// Phase 14 槍械：applyHit 的 weapon 加 'smg' | 'shotgun'（cause 'bullet'；擊倒門檻見 KNOCKDOWN_RULES）；
+//   選項 forceKnockdown（預設 false）：本次受擊直接擊倒（散彈槍近距離多顆彈丸命中）
+//   選項 combo（預設 true）：false = 本次受擊照常扣血 / 硬直，但不計入擊倒連擊（散彈槍遠距擦傷，見 defs shotgun.comboDamage）
 // 匯流排事件 ped:dead（行人 hp 歸零、判定死亡的當下發一次；recoverOnKo 的拳 / 棒歸零只倒地不算）：
 //   payload { ped, cause: 'punch'|'bat'|'bullet'|'vehicle'|'explosion', weapon, attacker（擊殺來源：出手者 / 駕駛 actor 或 null）, byPlayer, x, z }
 //   bus 由建構參數注入；省略時用 core/events 全域單例（main.js 用的同一個），給 bus: null 則不發
@@ -81,12 +84,15 @@ export const KNOCKDOWN_RULES = {
   bat: { hits: 2, window: COMBO_WINDOW },
   pistol: { hits: 2, window: 1.5 },
   explosion: { hits: 1, window: 1 }, // V4 爆炸：一律倒地（擊飛衝量由 explosions.js 依距離給）
+  smg: { hits: 4, window: 1.5 }, // Phase 14 衝鋒槍：1.5 s 內 4 發
+  shotgun: { hits: 2, window: 1.5 }, // Phase 14 散彈槍：一槍的彈丸合併成一次受擊；近距離由 weapons 以 forceKnockdown 一槍擊倒；
+  //   合併傷害 < comboDamage 的擦傷以 combo: false 呼叫、不計入連擊（遠距連兩槍擦傷不會倒地）
 };
 // 武器 → knockdown 事件的 cause
-export const WEAPON_CAUSE = { fist: 'punch', bat: 'bat', pistol: 'bullet', explosion: 'explosion' };
+export const WEAPON_CAUSE = { fist: 'punch', bat: 'bat', pistol: 'bullet', explosion: 'explosion', smg: 'bullet', shotgun: 'bullet' };
 // 各武器受擊擊退位移（m）與擊倒水平衝量（N·s，手感設定：推測值）
-export const WEAPON_KNOCKBACK = { fist: KNOCKBACK_DIST, bat: 0.8, pistol: 0.25, explosion: 1.5 };
-export const WEAPON_KNOCKDOWN_IMPULSE = { fist: PUNCH_KNOCKDOWN_IMPULSE, bat: 170, pistol: 90, explosion: 300 };
+export const WEAPON_KNOCKBACK = { fist: KNOCKBACK_DIST, bat: 0.8, pistol: 0.25, explosion: 1.5, smg: 0.15, shotgun: 0.6 };
+export const WEAPON_KNOCKDOWN_IMPULSE = { fist: PUNCH_KNOCKDOWN_IMPULSE, bat: 170, pistol: 90, explosion: 300, smg: 80, shotgun: 220 };
 // 受擊點高度（m，腳底往上）：hit 事件沒有給 point 時的 y
 export const HIT_POINT_HEIGHT = 1.2;
 
@@ -343,7 +349,7 @@ export class CombatSystem {
   }
 
   // 通用受擊入口（契約 §13）：回傳 { damage, hp, side, knockdown } 或 null（未註冊 / 倒地中 / 不可受擊 / 同一揮已命中）
-  applyHit({ attacker = null, target, damage, weapon = 'fist', dir = null, impulse = null, point = null, swingId = null, throughVehicle = false } = {}) {
+  applyHit({ attacker = null, target, damage, weapon = 'fist', dir = null, impulse = null, point = null, swingId = null, throughVehicle = false, forceKnockdown = false, combo = true } = {}) {
     const e = target && this.entries.get(target.id);
     if (!e || (e.state !== 'normal' && e.state !== 'hit')) return null;
     if (target.untargetable && !throughVehicle) return null;
@@ -366,7 +372,7 @@ export class CombatSystem {
       dx = target.pos.x - attacker.pos.x;
       dz = target.pos.z - attacker.pos.z;
     }
-    const knock = this._hit(att, e, this.now(), attacker, damage, weapon, dx, dz, impulse, point, swingId);
+    const knock = this._hit(att, e, this.now(), attacker, damage, weapon, dx, dz, impulse, point, swingId, forceKnockdown, combo);
     return { damage, hp: target.hp, side: this._lastSide, knockdown: knock };
   }
 
@@ -406,14 +412,14 @@ export class CombatSystem {
   }
 
   // 受擊共用流程：(dx, dz) 為攻擊方向（攻擊者 → 目標，未正規化）；att 為攻擊者的 entry（可為 null）；回傳是否擊倒
-  _hit(att, e, t, a, damage, weapon, dx, dz, impulse, point, swingId) {
+  _hit(att, e, t, a, damage, weapon, dx, dz, impulse, point, swingId, force = false, countCombo = true) {
     const target = e.actor;
     const cause = WEAPON_CAUSE[weapon];
     const died = this._damage(e, damage, t, cause);
     const hitTimes = e.hitTimes;
     const kinds = e.hitKinds;
     hitTimes.push(t);
-    kinds.push(weapon);
+    kinds.push(countCombo ? weapon : null); // combo false：留時間戳（與 hitTimes 平行）但不算任何武器的連擊
     while (hitTimes.length && t - hitTimes[0] > COMBO_WINDOW) {
       hitTimes.shift();
       kinds.shift();
@@ -431,7 +437,7 @@ export class CombatSystem {
     dx /= d;
     dz /= d;
     const side = (this._lastSide = hitSide(target.yaw, dx, dz));
-    const knock = e.dying || target.hp <= 0 || combo >= rule.hits;
+    const knock = force || e.dying || target.hp <= 0 || combo >= rule.hits;
     const kb = WEAPON_KNOCKBACK[weapon];
     const byPlayer = !!a && a.kind === 'player';
     this._emit('hit', {

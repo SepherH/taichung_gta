@@ -85,6 +85,77 @@
         "grip",
         "sight"
       ]
+    },
+    {
+      "id": "smg",
+      "name": "衝鋒槍",
+      "type": "ranged",
+      "file": "smg.glb",
+      "length": 0.4543,
+      "gripOffset": [
+        0,
+        0,
+        0
+      ],
+      "tipOffset": [
+        0.0,
+        0.056,
+        0.3503
+      ],
+      "offHandOffset": [
+        0,
+        -0.03,
+        0.18
+      ],
+      "socketRotation": [
+        0.70711,
+        0,
+        0,
+        0.70711
+      ],
+      "triangles": 356,
+      "bytes": 20256,
+      "materials": [
+        "metal",
+        "grip",
+        "sight"
+      ]
+    },
+    {
+      "id": "shotgun",
+      "name": "散彈槍",
+      "type": "ranged",
+      "file": "shotgun.glb",
+      "length": 1.0177,
+      "gripOffset": [
+        0,
+        0,
+        0
+      ],
+      "tipOffset": [
+        0.0,
+        0.058,
+        0.7003
+      ],
+      "offHandOffset": [
+        0,
+        0.0,
+        0.38
+      ],
+      "socketRotation": [
+        0.70711,
+        0,
+        0,
+        0.70711
+      ],
+      "triangles": 444,
+      "bytes": 25784,
+      "materials": [
+        "metal",
+        "wood",
+        "grip",
+        "sight"
+      ]
     }
   ],
   "notes": "原點在慣用手握點；掛到角色 weapon_socket 骨下時設 weapon.quaternion = socketRotation（x, y, z, w）、position = 0。tipOffset（前端點）、sweep（近戰揮擊判定線段與半徑）、offHandOffset（另一手托握點）皆為武器本地座標（glTF：+Z 前端、+Y 上），單位公尺；length / triangles / bytes 由建模腳本實測寫入。"

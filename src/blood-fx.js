@@ -413,7 +413,7 @@ export function createBloodFx({
 
   function onHit(e) {
     if (!e || !enabled() || !Number.isFinite(e.x) || !Number.isFinite(e.z)) return;
-    const w = HIT_DROPS[e.weapon] ? e.weapon : 'fist';
+    const w = HIT_DROPS[e.weapon] ? e.weapon : e.weapon === 'smg' || e.weapon === 'shotgun' ? 'pistol' : 'fist'; // Phase 14 長槍比照手槍
     const [lo, hi] = HIT_DROPS[w];
     const g = ground(e.x, e.z, e.groundY);
     const y = Number.isFinite(e.y) ? Math.max(e.y, g + 0.1) : g + HIT_HEIGHT;

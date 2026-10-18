@@ -93,8 +93,12 @@ for (const [name, list] of GROUPS) {
 
 // ---------- 行為：抽出 main.js 超商段，以替身執行 ----------
 const SLICE_START = '  // ---------- 超商搶劫（Phase 9';
-const SLICE_END = '  // ---------- 車流 / 行人外部狀態 ----------';
-const slice = mainSrc.slice(mainSrc.indexOf(SLICE_START), mainSrc.indexOf(SLICE_END));
+// 段尾：P14b 起超商段後接「武器店 / 安全屋（Phase 14）」段（需 createGunShop / economy.spend / autosave 等，不屬本段），取兩個標記中先出現者，
+//   使抽段內容與 P14b 前相同（只含超商段）；武器店段的接線由 integration-p14 驗證
+const SLICE_ENDS = ['  // ---------- 武器店 / 安全屋（Phase 14', '  // ---------- 車流 / 行人外部狀態 ----------'];
+const sliceFrom = mainSrc.indexOf(SLICE_START);
+const sliceTo = Math.min(...SLICE_ENDS.map((m) => mainSrc.indexOf(m, sliceFrom)).filter((i) => i > sliceFrom));
+const slice = sliceFrom >= 0 && Number.isFinite(sliceTo) ? mainSrc.slice(sliceFrom, sliceTo) : '';
 const CONST_NAMES = ['CLERK_SPAWN_DIST', 'CLERK_DESPAWN_DIST', 'CLERK_COLORS', 'CLERK_HP', 'STORE_BEACON'];
 const consts = CONST_NAMES.map((n) => (mainSrc.match(new RegExp(`^const ${n} = .*$`, 'm')) || [''])[0]).join('\n');
 check('取出 main.js 超商段與常數', slice.length > 2000 && consts.split('\n').every(Boolean));
@@ -310,7 +314,8 @@ const run = (w, sec, dt = 1 / 30, skip = false) => {
 const hudSrc = read('src/hud.js');
 check('hud.js：setRobberyProgress(frac, label) + .rob-bar / .rob-label / .rob-track / .rob-fill', hudSrc.includes('setRobberyProgress(frac, label = ROB_LABEL)') && ["'rob-bar'", "'rob-label'", "'rob-track'", "'rob-fill'"].every((k) => hudSrc.includes(k)));
 check("hud.js：ROB_LABEL = '搶劫中…'（與 robbery.js PROGRESS_LABEL 同字）", hudSrc.includes("export const ROB_LABEL = '搶劫中…';") && PROGRESS_LABEL === '搶劫中…');
-check("hud.js：小地圖 kind 'store' 畫圖示（ICON_KINDS）", /const ICON_KINDS = \{ store: '超' \};/.test(hudSrc) && hudSrc.includes('ctx.fillText(glyph, cx, cz + 0.5);'));
+// P14b：ICON_KINDS 追加 'gun-shop' / safehouse（p14-shops 驗證），store 仍須為首項「超」
+check("hud.js：小地圖 kind 'store' 畫圖示（ICON_KINDS）", /const ICON_KINDS = \{ store: '超'(?:, [^{}\n]+)? \};/.test(hudSrc) && hudSrc.includes('ctx.fillText(glyph, cx, cz + 0.5);'));
 check("hud.js：入帳跳字 robbery「搶劫」", /MONEY_REASON_LABEL = \{[^}]*robbery: '搶劫 '/.test(hudSrc));
 const styleSrc = read('src/style.css');
 check('style.css：.rob-bar / .rob-fill 樣式、[hidden] 隱藏、pointer-events none', ['.rob-bar {', '.rob-bar[hidden]', '.rob-fill {', '.rob-track {'].every((k) => styleSrc.includes(k)) && /\.rob-bar \{[^}]*pointer-events: none;/.test(styleSrc));

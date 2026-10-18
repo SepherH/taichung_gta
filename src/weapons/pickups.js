@@ -6,6 +6,9 @@
 //   canPickup() 回 false 時回 null（備彈已滿不提示）
 // 外觀：共用幾何 / 材質的小彈藥盒（綠色盒 + 黃色標），緩慢旋轉上下浮動；scene 省略時只跑邏輯（測試）
 // 每幀不配置新物件（markers 陣列與 interactable 物件重用）
+// Phase 14：點位可帶 weapon（'pistol' | 'smg' | 'shotgun'，缺 = 選項 weapon，預設 'pistol'）、amount（缺 = 選項 amount）、label；
+//   pickup:ammo payload 多帶 weapon（整合層呼叫 weapons.addAmmo(amount, weapon)）；canPickup(weapon) 以該點武器詢問；
+//   hideUnavailable = true 時 markers() / nearest() 略過 canPickup 為 false 的點（例：還沒買衝鋒槍時不顯示衝鋒槍彈藥盒）
 import * as THREE from 'three';
 
 export const PICKUP_RADIUS = 1.5;
@@ -39,7 +42,7 @@ function crateParts() {
   return { geo: sharedGeo, mats: sharedMats };
 }
 
-export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_AMMO_POINTS, amount = 12, respawnSec = 90, heightAt = null, canPickup = null } = {}) {
+export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_AMMO_POINTS, amount = 12, respawnSec = 90, heightAt = null, canPickup = null, weapon = 'pistol', hideUnavailable = false } = {}) {
   const list = (points || []).filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.z)).map((p, i) => ({
     id: `ammo-${i}`,
     x: p.x,
@@ -48,11 +51,15 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
     active: true,
     respawnT: 0,
     mesh: null,
+    weapon: typeof p.weapon === 'string' && p.weapon ? p.weapon : weapon,
+    amount: Number.isFinite(p.amount) && p.amount > 0 ? p.amount : amount,
+    label: typeof p.label === 'string' && p.label ? p.label : '彈藥',
   }));
   let time = 0;
   let disposed = false;
   const markerList = [];
-  const markerObjs = list.map((p) => ({ x: p.x, z: p.z, kind: 'ammo', label: '彈藥' }));
+  const markerObjs = list.map((p) => ({ x: p.x, z: p.z, kind: 'ammo', label: p.label }));
+  const available = (p) => !canPickup || !!canPickup(p.weapon);
 
   if (scene) {
     const { geo, mats } = crateParts();
@@ -68,11 +75,11 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
 
   function take(p) {
     if (!p.active || disposed) return false;
-    if (canPickup && !canPickup()) return false;
+    if (!available(p)) return false;
     p.active = false;
     p.respawnT = respawnSec;
     if (p.mesh) p.mesh.visible = false;
-    if (bus) bus.emit('pickup:ammo', { amount, x: p.x, z: p.z });
+    if (bus) bus.emit('pickup:ammo', { amount: p.amount, x: p.x, z: p.z, weapon: p.weapon });
     return true;
   }
 
@@ -92,6 +99,7 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
           if (p.mesh) p.mesh.visible = true;
         } else continue;
       }
+      if (p.mesh && hideUnavailable) p.mesh.visible = available(p);
       if (p.mesh) {
         p.mesh.rotation.y = time * SPIN;
         p.mesh.position.y = p.y + BOB_HEIGHT + Math.sin(time * 2.2 + p.x) * BOB_AMP;
@@ -106,11 +114,10 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
 
   function nearest(pos) {
     if (disposed || !pos) return null;
-    if (canPickup && !canPickup()) return null; // 備彈已滿：不顯示「撿彈藥」提示（take 也不會消耗彈藥盒）
     let best = null;
     let bestD = INTERACT_RADIUS;
     for (const p of list) {
-      if (!p.active) continue;
+      if (!p.active || !available(p)) continue; // 備彈已滿：不顯示「撿彈藥」提示（take 也不會消耗彈藥盒）
       const d = Math.hypot(pos.x - p.x, pos.z - p.z);
       if (d <= bestD) {
         bestD = d;
@@ -126,7 +133,7 @@ export function createAmmoPickups({ scene = null, bus = null, points = DEFAULT_A
 
   function markers() {
     markerList.length = 0;
-    for (let i = 0; i < list.length; i++) if (list[i].active) markerList.push(markerObjs[i]);
+    for (let i = 0; i < list.length; i++) if (list[i].active && (!hideUnavailable || available(list[i]))) markerList.push(markerObjs[i]);
     return markerList;
   }
 

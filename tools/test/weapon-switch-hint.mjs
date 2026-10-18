@@ -199,7 +199,12 @@ function setup() {
 // ---------- 5. 桌機 HUD 鍵位提示 ----------
 {
   const hints = weaponKeyHints();
-  ok(hints.length === 1 + SLOT_IDS.length, `鍵位提示 ${hints.length} 項（循環 + ${SLOT_IDS.length} 槽）`);
+  // P14b：五槽，4 / 5 不進 ACTIONS（SLOT_KEYS 直接讀鍵）→ weaponKeyHints() 只列 ACTIONS 有的槽；HUD 用 weaponKeyHints(true) 補上 SLOT_KEYS 的 4 / 5
+  const nAct = SLOT_IDS.filter((_, i) => ACTIONS[`slot${i + 1}`]).length;
+  ok(nAct === 3 && hints.length === 1 + nAct, `鍵位提示 ${hints.length} 項（循環 + ACTIONS 直選 ${nAct} 槽）`);
+  const all = weaponKeyHints(true);
+  ok(all.length === 1 + SLOT_IDS.length && all.slice(1).every((h, i) => h.slot === i) && all.slice(1).map((h) => h.text).join('|') === '1 空手|2 球棒|3 手槍|4 衝鋒槍|5 散彈槍',
+    `鍵位提示（含 SLOT_KEYS）${all.length} 項（循環 + ${SLOT_IDS.length} 槽）：${all.slice(1).map((h) => h.text).join('、')}`);
   ok(hints[0].slot === -1 && hints[0].text.startsWith('Q ') && ACTIONS.weaponCycle.keys[0] === 'KeyQ', `循環鍵讀 ACTIONS.weaponCycle：「${hints[0].text}」`);
   ok(hints.slice(1).map((h) => h.text).join('|') === '1 空手|2 球棒|3 手槍', `直選讀 ACTIONS.slot1–3 + 武器名：${hints.slice(1).map((h) => h.text).join('、')}`);
 
@@ -212,7 +217,7 @@ function setup() {
   ok(keys && hud.keys === keys && keys.parentNode === hud.el, '桌機：武器面板內有 .wp-keys');
   const txt = hud.el.visibleText();
   ok(/Q 換武器/.test(txt) && /1 空手/.test(txt) && /2 球棒/.test(txt) && /3 手槍/.test(txt), `桌機面板可見文字含鍵位：「${txt}」`);
-  ok(keys.children.length === 4 && keys.children[1].classList.contains('wp-cur') && !keys.children[2].classList.contains('wp-cur'), '目前槽（空手）標 .wp-cur');
+  ok(keys.children.length === 1 + SLOT_IDS.length && keys.children[1].classList.contains('wp-cur') && keys.children.filter((k) => k.classList.contains('wp-cur')).length === 1, '目前槽（空手）標 .wp-cur（五槽中唯一）');
   w.select(2);
   frames(1);
   hud.update(FRAME, {});

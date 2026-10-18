@@ -62,6 +62,13 @@
 //   在醫院旁生成 suv 白車 + 紅條 + 頂燈（emissive 方塊閃爍，不加光源 / 貼圖）；駕駛計程車 / 救護車時互動鍵開始 / 收工（後備：競速 / 警車 / 委託 / 打卡都沒有時才出現）；
 //   每幀 updateSideJobs 接在 updateGangs 之後（手機 / 暫停 / BUSTED・WASTED / 噴漆中不推進，但傷患倒地計時照刷）；互斥：state.sideJob（getter）併入 otherMissionBusy 與搶劫守門、
 //   vigHooks.active / end 包裝（委託類 / 噴漆 / BUSTED・WASTED）；開新局 / 回主選單 → cancelSideJobs()
+// Phase 14 衝鋒槍 / 散彈槍 / 武器店 / 安全屋：weapons 五槽（Digit4 / Digit5 以 SLOT_KEYS 直接讀鍵，不進 ACTIONS；手把十字鍵 ← 讀 weapons.prevSlot）、
+//   槍械（isGun）都按住連發（間隔由 weapons 控制）、長槍持握以 pistol_aim 近似雙手（無雙手 clip）、模型 weaponModels[id]；
+//   不放地圖彈藥盒（手槍備彈無限；衝鋒槍 / 散彈槍彈藥只在武器店購買或取得武器時附贈）；
+//   createGunShop（src/shops/gun-shop.js）/ createSafehouses（src/shops/safehouse.js）：門口小光柱（各自 createBeaconPool）、小地圖 / 大地圖 kind
+//   'gun-shop' / 'safehouse'、步行互動經 nearestInteractable 仲裁（priority 2，委託 3 優先；搶車 F 與駕駛副任務不同鍵 / 不同模式）；
+//   武器店面板併入 panelOpen（開著時世界與輸入暫停）；每幀 updateShops 接在 updateStreetEvents 之後；開新局 / 回主選單 → cancelShops()；
+//   安全屋：存檔 + 回滿血 + 通緝清零、存檔 safehouse.last、繼續遊戲從該安全屋出生；死亡（WASTED）/ 被捕沿用既有規則：武器與彈藥保留
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -116,7 +123,9 @@ import { createContactRouter } from './physics/contacts.js';
 import { ACTIVE_RADIUS, createPedestrianBody } from './physics/npc-bodies.js';
 import { NPC_WRECK_IMPULSE } from './physics/npc-bodies.js';
 import { createWorldStep, createFrameLoop } from './core/loop.js';
-import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS } from './weapons/index.js';
+import { createWeapons, gunshotListeners, loadWeaponModels, createAmmoPickups, WEAPONS, SLOT_KEYS, isGun } from './weapons/index.js';
+import { createGunShop, GUN_SHOP_BEACON } from './shops/gun-shop.js';
+import { createSafehouses, SAFEHOUSE_BEACON } from './shops/safehouse.js';
 import { makeBatSegment } from './weapons/models.js';
 import { createWeaponHud } from './weapons/hud.js';
 import { attachWeapon, detachWeapon } from './character-animation.js';
@@ -849,7 +858,7 @@ async function init() {
     swapPending = false;
     if (!weaponModels) return;
     const id = weapons.current;
-    const m = id === 'bat' ? weaponModels.bat : id === 'pistol' ? weaponModels.pistol : null;
+    const m = id === 'fist' ? null : weaponModels[id] || null; // 球棒 / 手槍 / 衝鋒槍 / 散彈槍
     if (!m) {
       detachWeapon(player.character);
       return;
@@ -882,11 +891,12 @@ async function init() {
   };
   player.weaponLayer.on('finished', equipEnded);
   player.weaponLayer.on('cancel', equipEnded);
-  // 持武器姿勢：球棒 bat_hold、手槍 pistol_hold / 瞄準 pistol_aim（clip 缺 → 退回 hold / 不疊加）
+  // 持武器姿勢：球棒 bat_hold、手槍 pistol_hold / 瞄準 pistol_aim（clip 缺 → 退回 hold / 不疊加）；
+  // 衝鋒槍 / 散彈槍（雙手）：角色沒有雙手持握 clip → 一律以 pistol_aim（雙臂前伸）近似，左手扶握點 manifest offHandOffset 保留供日後 IK
   let weaponPose = null;
   const updateWeaponPose = (aiming) => {
     const id = weapons.current;
-    const want = id === 'bat' ? 'bat_hold' : id === 'pistol' ? (aiming ? 'pistol_aim' : 'pistol_hold') : 'none';
+    const want = id === 'bat' ? 'bat_hold' : id === 'pistol' ? (aiming ? 'pistol_aim' : 'pistol_hold') : isGun(id) ? 'pistol_aim' : 'none';
     if (want === weaponPose) return;
     weaponPose = want;
     if (!player.weaponLayer.setPose(want)) player.weaponLayer.setPose(want === 'pistol_aim' ? 'pistol_hold' : 'none');
@@ -896,13 +906,13 @@ async function init() {
   const muzzleW = new THREE.Vector3();
   const aimCandidates = [];
   const muzzleWorld = () => {
-    const m = weaponModels && weaponModels.pistol;
+    const m = weaponModels && isGun(weapons.current) ? weaponModels[weapons.current] : null;
     if (!m || !m.muzzle || !m.object.parent || !m.object.visible) return null;
     m.object.updateWorldMatrix(true, false);
     return muzzleW.copy(m.muzzle).applyMatrix4(m.object.matrixWorld);
   };
   const fillAim = (aimHeld) => {
-    const pistol = weapons.current === 'pistol';
+    const pistol = isGun(weapons.current); // 槍械（手槍 / 衝鋒槍 / 散彈槍）
     camera.getWorldDirection(aim.dir);
     aim.aiming = !!aimHeld && pistol;
     aim.muzzle = pistol ? muzzleWorld() : null;
@@ -920,25 +930,30 @@ async function init() {
     aim.candidates = aimCandidates;
     return aim;
   };
-  // 步行中的武器輸入：1 / 2 / 3 直選、Q 循環、R 裝填；攻擊（空手 / 球棒按一下、手槍按住連發）取代 player.punch()
+  // 步行中的武器輸入：1 / 2 / 3 直選（ACTIONS）、4 / 5 直選（SLOT_KEYS，未購買時 select 回 false）、Q 循環、R 裝填；
+  // 攻擊（空手 / 球棒按一下、槍械按住連發：手槍半自動 0.22 s、衝鋒槍全自動 0.1 s、散彈槍泵動 1 s）取代 player.punch()
   const handleWeaponInput = (snap) => {
     fillAim(snap.down.aim);
     if (snap.pressed.slot1) weapons.select(0);
     else if (snap.pressed.slot2) weapons.select(1);
     else if (snap.pressed.slot3) weapons.select(2);
+    else if (input.wasPressed(SLOT_KEYS[3])) weapons.select(3);
+    else if (input.wasPressed(SLOT_KEYS[4])) weapons.select(4);
     if (snap.pressed.weaponCycle) weapons.cycle();
     if (snap.pressed.reload) weapons.reload();
-    const fire = weapons.current === 'pistol' ? snap.down.attack : snap.pressed.attack;
+    const fire = isGun(weapons.current) ? snap.down.attack : snap.pressed.attack;
     if (fire) weapons.attack(aim);
   };
   const whud = createWeaponHud({ root: document.body, touchRoot: document.getElementById('touch-ui'), weapons, input, isTouch: touch });
   const whudState = { driving: false, aimBlend: 0 };
   gunshotListeners(bus, () => traffic.brains.values()); // weapon:fire → 30 m 內行人 hear({ type: 'gunshot' })
-  // 無限備彈後不放置彈藥盒（場景 / 小地圖皆無）；系統與串接保留供日後其他拾取物使用
+  // 彈藥盒不放置（系統保留、points 為空）：手槍備彈無限（canPickup 恆 false）；Phase 14 衝鋒槍 / 散彈槍彈藥只在武器店購買或取得武器時附贈，
+  // 不恢復地圖彈藥盒；pickup:ammo 仍依 payload.weapon 加到對應槍，日後傳入拾取點即生效
   const pickups = createAmmoPickups({ scene, bus, points: [], heightAt, canPickup: () => weapons.ammo().reserve < WEAPONS.pistol.reserveMax });
   bus.on('pickup:ammo', (e) => {
-    const n = weapons.addAmmo(e && e.amount);
-    if (n > 0) hud.toast(`撿到手槍子彈 ×${n}`, 2);
+    const w = (e && e.weapon) || 'pistol';
+    const n = weapons.addAmmo(e && e.amount, w);
+    if (n > 0) hud.toast(`撿到${WEAPONS[w].label}子彈 ×${n}`, 2);
   });
 
   // ---------- 流血（W3）：只做地面血跡與血滴；settings.showBlood 由模組自行訂閱 ----------
@@ -1072,6 +1087,8 @@ async function init() {
     pushAll(out, streetMarkers());
     pushAll(out, raceMarkers());
     pushAll(out, sideJobMarkers());
+    pushAll(out, gunShop.markers()); // Phase 14 武器店 / 安全屋
+    pushAll(out, safehouses.markers());
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1094,14 +1111,16 @@ async function init() {
       bigMap.draw();
     },
   });
-  // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
-  const interCands = [null, null, null, null];
+  // interactable 仲裁的候選（重用）；小吃 / 彈藥 / 武器店 / 安全屋只在步行時問
+  const interCands = [null, null, null, null, null, null];
   const nearestInteractable = (pos, walking) => {
     interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos); // 警車任務 / 街頭競速進行中不接委託（互斥）
     if (state.sideJob) interCands[0] = null; // 計程車 / 救護車副任務中同樣不接委託
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
+    interCands[4] = walking ? gunShop.nearest(pos) : null; // Phase 14：priority 2（委託 3 優先、同級取近）
+    interCands[5] = walking ? safehouses.nearest(pos) : null;
     return pickInteractable(interCands);
   };
   // 互動提示與車輛提示互不覆蓋（hud 為單一膠囊，setPrompt / setInteractPrompt 各自會清掉另一則）：
@@ -1116,7 +1135,7 @@ async function init() {
     else hud.setPrompt(vehicleText || text);
   };
   // 全螢幕面板：接單 / 結算（missions）、大地圖、圖鑑；開啟中世界與輸入暫停
-  const panelOpen = () => missions.isModalOpen() || bigMap.isOpen() || food.isOpen();
+  const panelOpen = () => missions.isModalOpen() || bigMap.isOpen() || food.isOpen() || gunShop.isOpen(); // 武器店購買面板（Phase 14）
   const hide3D = () => bigMap.isOpen() || food.isOpen(); // 大地圖 / 圖鑑蓋滿畫面：不渲染 3D
   const openGuide = () => {
     if (!state.started) return;
@@ -1219,6 +1238,7 @@ async function init() {
         missions: missions.serialize(),
         collect: { checkins: checkins.serialize(), foods: food.serialize() },
         races: races.serialize(), // Phase 12：街頭競速最佳成績（無紀錄 = null，存檔省略）
+        safehouse: safehouses.serialize(), // Phase 14：最後使用的安全屋（沒用過 = null，存檔省略）
       };
     },
   });
@@ -1715,7 +1735,7 @@ async function init() {
   bus.on('vehicle:crash', ({ relSpeed }) => rig.shake(Math.min(1, relSpeed / CRASH_SHAKE_SPEED)));
   // 遊戲手把（gamepad.js）：輪詢掛在 input 每幀 hook；步行 / 駕駛沿用 state.mode，十字鍵 ← 上一把武器讀 weapons.pending（排隊中優先）/ weapons.slot
   // 震動只接既有事件：玩家開槍（weapon:fire byPlayer）一次短震、玩家駕駛碰撞（vehicle:crash，≥ 8 m/s）依撞擊速度；手把不支援震動時略過
-  const gamepad = createGamepad(input, { getMode: () => state.mode, getSlot: () => (weapons.pending >= 0 ? weapons.pending : weapons.slot) });
+  const gamepad = createGamepad(input, { getMode: () => state.mode, getSlot: () => (weapons.pending >= 0 ? weapons.pending : weapons.slot), getPrevSlot: () => weapons.prevSlot() });
   bus.on('weapon:fire', (e) => {
     if (e && e.byPlayer) gamepad.rumble(0.2, 0.6, 70);
   });
@@ -1970,6 +1990,44 @@ async function init() {
     robberies.cancel({ resetAll });
     for (const c of [...clerks.values()]) despawnClerk(c);
     setRobBar(null);
+  };
+
+  // ---------- 武器店 / 安全屋（Phase 14，src/shops/）----------
+  // 武器店：通緝中拒絕交易、扣款走 economy.spend（原子，不足整筆拒扣）、購買 → weapons.give / addAmmo；面板開著 = panelOpen（世界暫停）
+  // 安全屋：有星不可進、搶劫中不可進；進入 → 回滿血、wanted.clear('safehouse')、記錄 safehouse.last 後 autosave.flush('safehouse')
+  const gunShop = createGunShop({
+    bus,
+    weapons,
+    getMoney: () => economy.money,
+    spend: (n, reason) => economy.spend(n, reason),
+    getStars: () => wanted.stars,
+    beacons: createBeaconPool({ scene, heightAt, ...GUN_SHOP_BEACON }),
+    toast: (t, sec) => hud.toast(t, sec),
+    doc: document,
+    root: document.body,
+    keyTarget: window,
+  });
+  const safehouses = createSafehouses({
+    bus,
+    getStars: () => wanted.stars,
+    beacons: createBeaconPool({ scene, heightAt, ...SAFEHOUSE_BEACON }),
+    save: () => autosave.flush('safehouse'),
+    heal: () => {
+      player.actor.hp = player.actor.maxHp;
+    },
+    clearWanted: () => wanted.clear('safehouse'),
+    toast: (t, sec) => hud.toast(t, sec),
+    busy: () => (robberies.active ? '搶劫進行中，不能進安全屋' : null),
+  });
+  // 每幀（updateStreetEvents 之後）：只推進門口光柱脈動（購買 / 存檔都在互動鍵當下完成）
+  const updateShops = (dt) => {
+    gunShop.update(dt);
+    safehouses.update(dt);
+  };
+  // 開新局 / 回主選單：關掉武器店面板（closePanels 也會關；此處與其他 cancel* 同列、順序在 cancelRespawn 之前）
+  const cancelShops = () => {
+    gunShop.cancel();
+    safehouses.cancel();
   };
 
   // ---------- 車流 / 行人外部狀態 ----------
@@ -2903,6 +2961,7 @@ async function init() {
     updateExplosions(dt);
     handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
     updateStreetEvents(dt, phoneOpen);
+    updateShops(dt);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3189,6 +3248,7 @@ async function init() {
   };
 
   // 開新局 / 繼續：重設玩家（離開車輛、hp 回滿）並放到存檔位置（無效、在建築碰撞體內或水中 → 出生點）
+  // Phase 14：存檔有最後使用的安全屋（safehouse.last，舊存檔 / 新局沒有）→ 改從該安全屋門口出生（同樣經 validSavedPosition 檢查）
   const placePlayer = (save) => {
     if (cj.active) cj.cancel();
     if (state.mode === 'drive') exitVehicle(true);
@@ -3199,7 +3259,8 @@ async function init() {
     player.locked = false;
     player.actor.untargetable = false;
     player.mesh.visible = true;
-    const p = save.player;
+    const home = safehouses.spawnPoint(save.safehouse || null);
+    const p = home ? { x: home.x, z: home.z, yaw: home.yaw } : save.player;
     const ok = validSavedPosition(p, { solidAt, buildingAt, inWater, inBounds });
     const x = ok ? p.x : spawn.x;
     const z = ok ? p.z : spawn.z;
@@ -3235,6 +3296,7 @@ async function init() {
     if (bigMap.isOpen()) bigMap.close();
     if (food.isOpen()) food.close();
     if (missions.isModalOpen()) missions.ui.closePanel();
+    if (gunShop.isOpen()) gunShop.close();
     panelWas = false;
     phoneLink.reset();
   };
@@ -3257,8 +3319,10 @@ async function init() {
     cancelStreetEvents();
     cancelRobbery(!continued);
     cancelSpray();
+    cancelShops();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
+    safehouses.restore(save.safehouse); // Phase 14：最後使用的安全屋（新局 defaultSave 無此欄 → null）；placePlayer 據此決定出生點
     placePlayer(save);
     ambulances.ensure(true); // 醫院旁救護車（停放點附近且完好就沿用；棄置遠處的收回重生）
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
@@ -3332,6 +3396,7 @@ async function init() {
     cancelStreetEvents();
     cancelRobbery();
     cancelSpray();
+    cancelShops();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     state.started = false;
@@ -3425,8 +3490,14 @@ async function init() {
       // V3：街頭事件（streetEvents.events 看各 slot；streetWorld.stats() 看事件車 / 待回收行人）
       streetEvents, streetWorld,
       // 補手槍備彈（回實際加入數，上限 120）
-      giveAmmo(n = 36) {
-        return weapons.addAmmo(n);
+      giveAmmo(n = 36, id = 'pistol') {
+        return weapons.addAmmo(n, id);
+      },
+      // Phase 14：武器店 / 安全屋（gunShop.open('gunshop-ntc')、safehouses.enter('safehouse-henan')）；直接給長槍（除錯）
+      gunShop,
+      safehouses,
+      giveWeapon(id = 'smg') {
+        return weapons.give(id);
       },
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {

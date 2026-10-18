@@ -393,11 +393,17 @@ body.touch-drive #touch-look { display: none; }
 |---|---|---|
 | `weapon:equip` | `{ slot: 0\|1\|2, weapon: 'fist'\|'bat'\|'pistol', prev }` | weapons |
 | `weapon:swing` | `{ weapon: 'fist'\|'bat', x, y, z, byPlayer }` | weapons |
-| `weapon:fire` | `{ weapon: 'pistol', x, y, z, dirX, dirY, dirZ, byPlayer, hit: boolean }` | weapons |
+| `weapon:fire` | `{ weapon: 'pistol'\|'smg'\|'shotgun', x, y, z, dirX, dirY, dirZ, byPlayer, hit: boolean }`（P14 散彈另帶 `pellets` / `pelletHits`） | weapons |
 | `weapon:dryFire` | `{ weapon }` | weapons |
 | `weapon:reload` | `{ weapon, phase: 'start'\|'end', mag, reserve }` | weapons |
 | `weapon:ammo` | `{ weapon, mag, magSize, reserve }` | weapons（任何彈藥變動） |
 | `weapon:impact` | `{ x, y, z, nx, ny, nz, surface: 'world'\|'vehicle', vehicle?, damage?, byPlayer? }`（V4：打到車時 `vehicle` = 車輛物件、`damage` = `WEAPONS.pistol.vehicleDamage`） | weapons（子彈打到非角色） |
+| `weapon:acquire` | `{ weapon: 'smg'\|'shotgun', slot }`（P14：武器店購買取得） | weapons |
+| `shop:open` / `shop:close` | `{ shop }`（P14 武器店面板） | shops/gun-shop |
+| `shop:refused` | `{ shop, reason: 'wanted' }`（通緝中拒絕交易） | shops/gun-shop |
+| `shop:purchase` | `{ shop, item, weapon, kind: 'weapon'\|'ammo', price, amount? }` | shops/gun-shop |
+| `safehouse:enter` | `{ id, x, z, saved }`（P14：存檔 + 回滿血 + 通緝清零） | shops/safehouse |
+| `safehouse:refused` | `{ id, reason: 'wanted'\|'busy' }` | shops/safehouse |
 | `combat:hit` | `{ attacker, target, weapon: 'fist'\|'bat'\|'pistol'\|'vehicle', damage, hp, x, y, z, dirX, dirZ, side: 'front'\|'back', byPlayer, knockdown: boolean }` | 整合（由 combat 'hit' 轉發） |
 | `ped:knockdown` | §1 原欄位，`cause` 擴充為 `'punch'\|'bat'\|'bullet'\|'vehicle'`，另加 `weapon` | 整合 |
 | `pickup:ammo` | `{ amount, x, z }` | weapons/pickups |
@@ -1141,6 +1147,57 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 35.3 回歸
 - `node tools/test/p13-taxi.mjs`、`node tools/test/p13-ems.mjs`（純邏輯 + 世界 / HUD 替身）、`node tools/test/integration-p13.mjs`（main.js 靜態檢查 + 抽段執行、hud / 標記 / CSS / 文件）
+
+## 36. Phase 14 衝鋒槍 / 散彈槍、武器店與安全屋（P14；接線點在 `src/main.js`，介面以 `src/weapons/weapons.js`、`src/shops/gun-shop.js` / `safehouse.js` 檔頭為準）
+
+### 36.1 新武器參數（`src/weapons/defs.js`；手感推測值）
+- 槽位 `SLOT_IDS = ['fist','bat','pistol','smg','shotgun']`；`SLOT_KEYS` Digit1–5（4 / 5 不進 `ACTIONS`，ACTIONS 維持 19 個；整合層 `input.wasPressed(SLOT_KEYS[3|4])`）；`GUN_IDS` / `isGun(id)`；`PURCHASABLE = ['smg','shotgun']`（須在武器店購買）
+- `smg`：`damage` 16（手槍 40）、`magSize` 30、`startReserve` 90、`reserveMax` 300、`auto` 全自動 `fireInterval` 0.1 s（10 發 / 秒，與幀率無關：`weapons.js afterShot` 以排程時刻 `nextFireAt` 起算冷卻，幀長造成的遲到零頭結轉到下一發；30 / 60 / 144 fps 每秒發數一致，回歸斷言誤差 ≤ 0.3 發 / 秒）、`reloadSec` 1.8、`range` 60、`vehicleDamage` 18 / 發；散佈 `spreadBase` 0.6° + `spreadPerShot` 0.45° / 發、上限 `spreadMax` 5°、停火收斂 `spreadRecover` 10° / 秒、瞄準 × `aimSpreadScale` 0.6；`price` NT$2,500、彈藥 `ammoPack` 60 發 NT$300、地上彈藥盒 30 發
+- `shotgun`：`pellets` 8 × `pelletDamage` 14（近距離全中 112）、`coneDeg` 5°（半角）、距離衰減 `pelletFalloff(dist)`：≤ 8 m 全額 → 30 m 線性降到 0.2；同一目標 ≤ `knockdownRange` 8 m 且中 ≥ `knockdownPellets` 4 顆 → 一槍擊倒；`magSize` 6、`startReserve` 18、`reserveMax` 60、泵動 `fireInterval` 1.0 s、`reloadSec` 2.6、`range` 40、`vehicleDamage` 16 / 顆（近距離全中 128；與打人同樣 × `pelletFalloff(dist)`，四捨五入）；同一目標單發合併傷害 < `comboDamage` 42 → `applyHit({ combo: false })` 不累積擊倒連擊；`price` NT$3,500、彈藥 12 發 NT$400、彈藥盒 6 發
+- `combat.js`：`KNOCKDOWN_RULES.smg` 1.5 s 內 4 發、`shotgun` 1.5 s 內 2 次；`WEAPON_CAUSE` 兩者皆 `'bullet'`；`applyHit` 新選項 `forceKnockdown`（本次直接擊倒）、`combo`（預設 true；false = 照常扣血 / 硬直但不計入擊倒連擊）
+- 雙手持握：角色無雙手 clip / IK → 長槍一律套 `pistol_aim` 姿勢近似（雙臂前伸），開槍 / 裝填沿用 `pistol_fire` / `pistol_reload`；manifest `offHandOffset` 讀進 `models.js`（`model.offHand`）保留供日後 IK
+- 模型：`loadWeaponModels()` 另回 `smg` / `shotgun`（manifest 有項才載 glb；缺 → `placeholderLongGun(id)`）；`normalizeLongGunManifest(m)`
+
+### 36.2 weapons 介面增補（`createWeapons`）
+- `owns(id)`、`give(id)` → 是否新取得（彈匣滿 + 附贈備彈，發 `weapon:acquire`）、`prevSlot()`（上一個已擁有槽；手把十字鍵 ← 用 `createGamepad({ getPrevSlot })`）、`cycle(dir = 1)`（跳過未擁有）、`select(未擁有槽)` → false 不排隊、`ammo(id?)` → `{ weapon, mag, magSize, reserve }`（省略 = 手上的槍，非槍 = 手槍）、`addAmmo(n, id = 'pistol')`（未擁有 / 無限備彈回 0）、`spread()`（衝鋒槍目前散佈度數）
+- 散彈：8 顆彈丸各一次 `resolveShot`（重用同一 `shot` / 方向 / 命中彙整物件，扣扳機不配置新物件；`aim.js spreadDir(dir, angle, phi, out)`）；同一目標彈丸合併成一次 `applyHit`（weapon `'shotgun'`）
+- `serialize()`：`{ slot, ammo: { pistol, smg?, shotgun? }, owned?: ['smg'|'shotgun'] }`（未買長槍 = 與舊格式相同）；`restore` 槽位未擁有 → 0
+- HUD：彈藥「彈匣 / 備彈」、準星、tb-reload / tb-aim 對三把槍都顯示；輪盤五格（`WHEEL_ANGLES_ALL` 180 / 135 / 90 / 45 / 0°，未擁有的格隱藏，`wheelAngles(owned)`）；桌機鍵位提示另列 4 / 5（未擁有隱藏）
+- 拾取：`createAmmoPickups` 點位可帶 `weapon` / `amount` / `label`；`canPickup(weapon)`；`hideUnavailable`；`pickup:ammo` 多帶 `weapon`
+- 音效：`gunshot` 配方依 `o.weapon`（smg 短促、shotgun 厚重長尾 + 泵動兩聲）；`weapon:impact.quiet` 不發跳彈聲
+- 行人：被 `smg` / `shotgun` 打到同手槍一律逃跑（`npc-ai.js`）
+
+### 36.3 武器店（`src/shops/gun-shop.js`，純邏輯 + 選用 DOM 面板，不 import three）
+- `GUN_SHOPS`：`gunshop-ntc`（NTC國家商貿中心旁市政北二路人行道 x −120.6, z 50.7）、`gunshop-skm`（新光三越旁惠來路二段人行道 x 530.4, z −50.7）；`GUN_SHOP_RADIUS` 2.5 m、`GUN_SHOP_PRIORITY` 2、`GUN_SHOP_BEACON` 小光柱（`BEACON_COLORS.gunshop` 0xe53935）；標記 kind `'gun-shop'`（`MARKER_COLORS` #c62828、小地圖「槍」字圖示、圖例「武器店」）
+- `SHOP_ITEMS`：`smg` NT$2,500、`shotgun` NT$3,500、`ammo-smg` 60 發 NT$300、`ammo-shotgun` 12 發 NT$400；`checkPurchase(item, { money, stars, owns, ammo })` → `{ ok, reason: 'wanted'|'owned'|'notOwned'|'full'|'money', text }`
+- `createGunShop({ bus, weapons, getMoney, spend(n, reason), getStars, beacons, toast, doc?, root?, keyTarget?, shops?, items? })` → `{ nearest(pos), open(id), close(), isOpen(), current, buy(itemId), check(itemId), moveFocus(d), activate(), focus, update(dt), markers(), cancel(), dispose() }`
+- 規則：有星 → `open` 回 false + toast `REFUSE_TEXT`（不開面板）；扣款走 `spend(price, 'gunshop')`（不足整筆拒扣，面板訊息列顯示差額）；成功 → `weapons.give` / `addAmmo`
+- 彈藥將滿：`ammoQuote(item, reserve)` → `{ amount, price }`，剩餘空間不足一盒時只賣放得下的發數、按比例收費（進位到元）；`checkPurchase` 回傳帶 `price` / `amount`，按鈕價格、扣款、`shop:purchase.price` 皆為實收
+- 單一觸發：鍵盤只走 keydown；keyup 的 Space / Enter 攔下（原生按鈕 Space 在 keyup 派 click）；品項 click 不受理 `detail` 0（鍵盤合成）/ > 1（連點），且 `CLICK_GUARD_MS` 300 ms 內第二下不受理
+- 面板沿用 `ms-panel` / `ms-card` / `ms-btn` 樣式；↑↓ 移焦點、Enter / 空白購買、Esc 離開（不收 E，避免進店連按誤買）；手把在面板開啟時送合成 Arrow / Enter / Escape 到 window，同一套處理
+- 事件：`shop:open { shop }`、`shop:close { shop }`、`shop:refused { shop, reason }`、`shop:purchase { shop, item, weapon, kind, price, amount? }`
+
+### 36.4 安全屋（`src/shops/safehouse.js`，純邏輯，不 import three）
+- `SAFEHOUSES`：`safehouse-henan`（出生點沿河南路三段約 81 m 的人行道 x 42.0, z 108.1，yaw 面向道路）；`SAFEHOUSE_RADIUS` 2.5 m、`SAFEHOUSE_PRIORITY` 2、小光柱 `BEACON_COLORS.safehouse` 0x1e88e5；標記 kind `'safehouse'`（#1e88e5、小地圖「家」字圖示、圖例「安全屋」）
+- `createSafehouses({ bus, getStars, beacons, save() → boolean, heal(), clearWanted(), toast, busy?() → string|null, places? })` → `{ nearest(pos), enter(id) → { ok, reason, saved }, lastUsed, serialize() → { last }|null, restore(rec), spawnPoint(rec?) → { id, x, z, yaw }|null, update(dt), markers(), cancel(), dispose() }`
+- 規則：有星 → 不可進入（toast `WANTED_TEXT`「先甩掉警察」，`safehouse:refused { id, reason: 'wanted' }`）；`busy()`（main：搶劫中）→ `reason: 'busy'`；進入 → `heal()` + `clearWanted()`（`wanted.clear('safehouse')`）→ 記 `lastUsed` → `save()`（`autosave.flush('safehouse')`）→ `safehouse:enter { id, x, z, saved }`
+
+### 36.5 存檔（`src/save.js`，不升版，全部選填、`defaultSave` 不含）
+- `weapons.owned`（只收 `smg` / `shotgun`、去重；空省略）、`weapons.ammo.smg` / `shotgun`（只在 owned 含該槍時保留；缺 → 滿彈匣 + 附贈備彈；clamp 30 / 300、6 / 60）、`weapons.slot` 3 / 4 只在已擁有時有效（否則 0；舊存檔的 slot 3 仍歸 0）
+- `safehouse: { last }`（`[\w-]{1,64}`；格式錯誤整欄丟棄）；繼續遊戲時 `placePlayer` 以 `safehouses.spawnPoint(save.safehouse)` 取代存檔位置（同樣經 `validSavedPosition`）；舊存檔沒有此欄 → 沿用存檔位置 / 出生點
+- 死亡（WASTED）/ 被捕（BUSTED）：既有規則不動武器 → 武器、擁有權與彈藥全部保留
+
+### 36.6 接線（main.js）
+- 建立（搶劫段之後）：`gunShop = createGunShop({ … getMoney: economy.money, spend: economy.spend, getStars: wanted.stars, beacons: createBeaconPool({ …GUN_SHOP_BEACON }), doc: document, keyTarget: window })`、`safehouses = createSafehouses({ … save: autosave.flush('safehouse'), heal: hp = maxHp, clearWanted: wanted.clear('safehouse'), busy: robberies.active })`
+- 互動：`nearestInteractable` 候選 `[4] gunShop.nearest`、`[5] safehouses.nearest`（只在步行；priority 2 < 委託 3，同級取近）；搶車是 F、副任務 / 競速 / 警車任務只在駕駛 → 互不衝突；`panelOpen()` 併入 `gunShop.isOpen()`（面板開著時世界與輸入暫停）；`closePanels` 一併關面板
+- 每幀 `updateShops(dt)` 接在 `updateStreetEvents` 之後（光柱脈動）；`startGame` / `quitToMenu` → `cancelShops()`（在 `cancelRespawn` 之前）；`startGame` → `safehouses.restore(save.safehouse)` 後 `placePlayer(save)`
+- 標記：`collectMarkers` 併入 `gunShop.markers()` / `safehouses.markers()`；不放地圖彈藥盒（`createAmmoPickups` points 為空，不引用 `DEFAULT_AMMO_POINTS`）：長槍彈藥只在武器店購買或取得武器時附贈（`pickupAmount` / `hideUnavailable` 為保留機制，目前不使用）
+- 武器：`SLOT_KEYS[3|4]` 直選、`isGun` 槍械按住連發、`weaponModels[id]` 掛模型 / 槍口、`getPrevSlot: weapons.prevSlot()`；`autosave` getState 加 `safehouse: safehouses.serialize()`
+- 除錯：`window.__game.gunShop` / `safehouses` / `giveWeapon(id)` / `giveAmmo(n, id)`
+- 限制：未新增 shadow map / 貼圖單元（光柱為無貼圖 `MeshBasicMaterial`、佔位長槍為無貼圖 `MeshStandardMaterial`）
+
+### 36.7 回歸
+- `node tools/test/p14-weapons.mjs`、`node tools/test/p14-shops.mjs`（純邏輯 + 替身；點位以 osm-city.json 重驗）、`node tools/test/integration-p14.mjs`（main.js 靜態檢查）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

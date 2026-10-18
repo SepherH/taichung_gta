@@ -78,8 +78,11 @@ export const KEYMAP_HELP = [
       { keys: '1', action: 'slot1', desc: '切換：空手' },
       { keys: '2', action: 'slot2', desc: '切換：球棒' },
       { keys: '3', action: 'slot3', desc: '切換：手槍' },
+      // Phase 14：4 / 5 不進 ACTIONS（定稿 19 個），鍵位由 weapons/defs.js SLOT_KEYS 直接讀
+      { keys: '4', action: null, desc: '切換：衝鋒槍（需在武器店購買）' },
+      { keys: '5', action: null, desc: '切換：散彈槍（需在武器店購買）' },
       { keys: 'R', action: 'reload', desc: '裝填' },
-      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 倒垃圾 / 收集小吃 / 撿彈藥）' },
+      { keys: 'E', action: 'interact', desc: '互動（接委託 / 打卡 / 外送取餐 / 倒垃圾 / 收集小吃 / 撿彈藥 / 武器店 / 安全屋）' },
       { keys: 'F', action: 'enterExit', desc: '上車 / 搶車' },
       { keys: '滑鼠移動', action: null, desc: '轉動視角（點畫面鎖定滑鼠，Esc 解除）' },
       { keys: '滾輪', action: null, desc: '拉近 / 拉遠鏡頭微調（按 V 回到段位；瞄準中不縮放）' },

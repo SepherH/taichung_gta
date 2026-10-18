@@ -40,6 +40,8 @@ export const MARKER_LABELS = {
   'taxi-dest': '計程車目的地',
   'ems-patient': '傷患',
   'ems-hospital': '醫院',
+  'gun-shop': '武器店',
+  safehouse: '安全屋',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);

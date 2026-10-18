@@ -3,7 +3,7 @@
 // manifest：{ bat:{ file, gripOffset:[x,y,z], tipOffset:[x,y,z], length, type }, pistol:{ …, muzzleOffset? } }
 //   也接受陣列形式 [{ id: 'bat', file, … }]（id 缺時讀 name / type）與美術實檔形式
 //   { units, axes, socket, weapons: [ { id, name, type, file, length, gripOffset, tipOffset, offHandOffset, sweep: { from, to, radius }, socketRotation: [x,y,z,w] } ] }
-// 回傳 Promise<{ bat, pistol }>，每把：{ id, object（THREE.Object3D，原點 = 握把附近、模型本地座標）, grip, tip, muzzle（THREE.Vector3，
+// 回傳 Promise<{ bat, pistol, smg, shotgun }>，每把：{ id, object（THREE.Object3D，原點 = 握把附近、模型本地座標）, grip, tip, muzzle（THREE.Vector3，
 //   武器本地座標；球棒 muzzle = null；手槍無 muzzleOffset 時 = tipOffset）, offHand（THREE.Vector3|null）, length, type,
 //   socketQuaternion（THREE.Quaternion；掛到 weapon_socket 骨時設 object.quaternion，缺 = 單位四元數）,
 //   sweep（{ from, to: THREE.Vector3, radius }，球棒近戰判定段；缺 = grip→tip 的 40%–100% 段、半徑 0.04；手槍 null）, placeholder: boolean }
@@ -11,6 +11,9 @@
 // 本地座標慣例（美術實檔 glTF）：原點 = 握點、+Z 前端（棒頭 / 槍口）、+Y 上；掛上後 position = 0、quaternion = socketQuaternion
 // W3 attachWeapon(character, model.object, { gripOffset: model.grip }) 掛到右手；棒頭 / 槍口世界座標 = object.localToWorld(tip / muzzle 的複本)
 // makeBatSegment(model) → getBatSegment(gripOut, tipOut)：以 sweep 段的世界座標填入（注入 createWeapons 的 getBatSegment）
+// Phase 14：回傳另含 smg / shotgun（manifest 有該項才載 glb；缺項 / 載入失敗 → 佔位長槍幾何 placeholderLongGun）；
+//   長槍 muzzle = tipOffset（或 muzzleOffset）、offHand = offHandOffset（左手扶握點；目前無雙手 clip / IK，供日後使用）；
+//   缺檔提示只在 manifest 列了長槍但 glb 讀不到時併入「武器模型缺檔」那一則（manifest 沒列 = 安靜用佔位）
 import * as THREE from 'three';
 
 const BASE_URL = import.meta.env?.BASE_URL ?? './';
@@ -79,9 +82,12 @@ export function batSweep(sweep, grip, tip) {
   return { from, to, radius };
 }
 
+const LONG_GUNS = { smg: { label: '衝鋒槍', length: 0.454 }, shotgun: { label: '散彈槍', length: 1.018 } };
+const placeholderFor = (id) => (id === 'bat' ? placeholderBat() : LONG_GUNS[id] ? placeholderLongGun(id) : placeholderPistol());
+
 // 單把 manifest 項目 → 正規化欄位（不含 object）；entry 缺 → 佔位幾何的數值
 export function normalizeWeaponEntry(id, entry) {
-  const ph = id === 'bat' ? placeholderBat() : placeholderPistol();
+  const ph = placeholderFor(id);
   const e = entry && typeof entry === 'object' ? entry : null;
   if (!e) {
     return { id, grip: ph.grip, tip: ph.tip, muzzle: ph.muzzle, offHand: null, length: ph.length, type: ph.type, socketQuaternion: ph.socketQuaternion, sweep: ph.sweep };
@@ -89,7 +95,7 @@ export function normalizeWeaponEntry(id, entry) {
   const length = Number.isFinite(e.length) && e.length > 0 ? e.length : ph.length;
   const grip = vec3(e.gripOffset, ph.grip);
   const tip = vec3(e.tipOffset, id === 'bat' ? new THREE.Vector3(0, length, 0) : ph.tip);
-  const muzzle = id === 'pistol' ? vec3(e.muzzleOffset, tip) : null;
+  const muzzle = id === 'pistol' || LONG_GUNS[id] ? vec3(e.muzzleOffset, tip) : null;
   return {
     id,
     grip,
@@ -160,6 +166,42 @@ export function placeholderBat() {
   };
 }
 
+// manifest（物件或陣列）→ { smg, shotgun } 項目（缺者 null）
+export function normalizeLongGunManifest(m) {
+  const out = { smg: null, shotgun: null };
+  if (!m || typeof m !== 'object') return out;
+  const list = Array.isArray(m) ? m : Array.isArray(m.weapons) ? m.weapons : null;
+  if (list) {
+    for (const e of list) {
+      if (!e || typeof e !== 'object') continue;
+      const id = e.id || e.name;
+      if (id === 'smg' || id === 'shotgun') out[id] = e;
+    }
+  }
+  if (!Array.isArray(m)) for (const id of ['smg', 'shotgun']) if (m[id] && typeof m[id] === 'object') out[id] = m[id];
+  return out;
+}
+
+// 佔位長槍（衝鋒槍 / 散彈槍）：槍身沿 +Z（長度同 manifest）、握把往下；槍口在 (0, 0.05, length × 0.75)
+export function placeholderLongGun(id) {
+  const g = LONG_GUNS[id] || LONG_GUNS.smg;
+  const L = g.length;
+  const mat = new THREE.MeshStandardMaterial({ color: id === 'shotgun' ? 0x4a3524 : 0x24262a, roughness: 0.55, metalness: 0.35 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.06, L), mat);
+  body.position.set(0, 0.05, L * 0.25);
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.1, 0.045), mat);
+  handle.position.set(0, 0, 0);
+  handle.rotation.x = -0.25;
+  const root = new THREE.Group();
+  root.name = `weapon_${id}`;
+  root.add(body, handle);
+  const m = new THREE.Vector3(0, 0.05, L * 0.75);
+  return {
+    id, object: root, grip: new THREE.Vector3(0, 0, 0), tip: m.clone(), muzzle: m, offHand: new THREE.Vector3(0, 0, L * 0.4), length: L, type: 'ranged',
+    socketQuaternion: new THREE.Quaternion(), sweep: null, placeholder: true,
+  };
+}
+
 // 佔位手槍：L 形（槍身沿 +Z + 往下的握把）
 export function placeholderPistol() {
   const mat = new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.5, metalness: 0.4 });
@@ -179,7 +221,7 @@ export function placeholderPistol() {
 }
 
 async function loadOne(id, entry, base, loadGltf) {
-  const ph = id === 'bat' ? placeholderBat() : placeholderPistol();
+  const ph = placeholderFor(id);
   if (!entry || typeof entry.file !== 'string' || !entry.file) return { model: ph, missing: true };
   const scene = await loadGltf(base + entry.file);
   if (!scene) return { model: ph, missing: true };
@@ -203,17 +245,27 @@ export async function loadWeaponModels(base = DEFAULT_WEAPON_BASE, opts = {}) {
     manifest = null;
   }
   const m = normalizeWeaponManifest(manifest);
+  const lg = normalizeLongGunManifest(manifest);
   let bat;
   let pistol;
+  let smg;
+  let shotgun;
   try {
-    [bat, pistol] = await Promise.all([loadOne('bat', m.bat, dir, loadGltf), loadOne('pistol', m.pistol, dir, loadGltf)]);
+    [bat, pistol, smg, shotgun] = await Promise.all([
+      loadOne('bat', m.bat, dir, loadGltf),
+      loadOne('pistol', m.pistol, dir, loadGltf),
+      lg.smg ? loadOne('smg', lg.smg, dir, loadGltf) : { model: placeholderLongGun('smg'), missing: false },
+      lg.shotgun ? loadOne('shotgun', lg.shotgun, dir, loadGltf) : { model: placeholderLongGun('shotgun'), missing: false },
+    ]);
   } catch (err) {
     bat = { model: placeholderBat(), missing: true };
     pistol = { model: placeholderPistol(), missing: true };
+    smg = { model: placeholderLongGun('smg'), missing: false };
+    shotgun = { model: placeholderLongGun('shotgun'), missing: false };
   }
-  if (bat.missing || pistol.missing) {
-    const miss = [bat.missing ? '球棒' : null, pistol.missing ? '手槍' : null].filter(Boolean).join('、');
+  if (bat.missing || pistol.missing || smg.missing || shotgun.missing) {
+    const miss = [bat.missing ? '球棒' : null, pistol.missing ? '手槍' : null, smg.missing ? '衝鋒槍' : null, shotgun.missing ? '散彈槍' : null].filter(Boolean).join('、');
     infoOnce(`武器模型缺檔（${miss}），改用佔位幾何`);
   }
-  return { bat: bat.model, pistol: pistol.model };
+  return { bat: bat.model, pistol: pistol.model, smg: smg.model, shotgun: shotgun.model };
 }

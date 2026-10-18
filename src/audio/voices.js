@@ -22,9 +22,23 @@ function arpeggio(v, t, notes, step, type, gain, d) {
 }
 
 export const RECIPES = {
-  // 槍聲：短噪爆 + 低頻 thump + 尾音
+  // 槍聲：短噪爆 + 低頻 thump + 尾音（o.weapon：'smg' 短促清脆、'shotgun' 厚重長尾 + 泵動喀噠；其餘 = 手槍）
   gunshot(v, t, o, nb) {
     const p = vary(0.05);
+    if (o && o.weapon === 'smg') {
+      noiseHit(v, t, { buf: nb.white, type: 'highpass', freq: 1400 * p, gain: 0.75, a: 0.001, d: 0.05 });
+      toneHit(v, t, { type: 'sine', freq: 190 * p, freqEnd: 70, gain: 0.55, a: 0.001, d: 0.08 });
+      noiseHit(v, t + 0.005, { buf: nb.pink, type: 'lowpass', freq: 2800 * p, freqEnd: 700, gain: 0.25, a: 0.003, d: 0.16 });
+      return 0.2;
+    }
+    if (o && o.weapon === 'shotgun') {
+      noiseHit(v, t, { buf: nb.white, type: 'lowpass', freq: 3200 * p, freqEnd: 600, gain: 1, a: 0.001, d: 0.16 });
+      toneHit(v, t, { type: 'sine', freq: 95 * p, freqEnd: 32, gain: 1, a: 0.001, d: 0.32 });
+      noiseHit(v, t + 0.02, { buf: nb.pink, type: 'lowpass', freq: 1500 * p, freqEnd: 250, gain: 0.6, a: 0.008, d: 0.75 });
+      click(v, t + 0.42, nb, 1500, 0.4); // 泵動：拉
+      click(v, t + 0.56, nb, 2100, 0.45); // 推回
+      return 0.8;
+    }
     noiseHit(v, t, { buf: nb.white, type: 'highpass', freq: 900 * p, gain: 1, a: 0.001, d: 0.09 });
     toneHit(v, t, { type: 'sine', freq: 140 * p, freqEnd: 42, gain: 0.9, a: 0.001, d: 0.2 });
     noiseHit(v, t + 0.01, { buf: nb.pink, type: 'lowpass', freq: 2200 * p, freqEnd: 400, gain: 0.45, a: 0.005, d: 0.45 });

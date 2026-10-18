@@ -17,7 +17,7 @@
 //   6 LT：步行 Mouse2（瞄準）/ 駕駛 煞車倒車類比　7 RT：步行 Mouse0（攻擊）/ 駕駛 油門類比
 //   8 Back：KeyM（大地圖）　9 Start：Escape（暫停）　10 L3：ShiftLeft（衝刺，按住）　11 R3：KeyC（回頭看，按住）
 //   12 ↑：KeyT（手機）　13 ↓：KeyN（時間快轉）
-//   14 ←：上一把武器——有 opts.getSlot()（main.js 傳 weapons.pending 優先、否則 weapons.slot，0 起算）時送直選鍵 Digit{上一格}；未給則退回 KeyQ（只能往下一把）
+//   14 ←：上一把武器——有 opts.getPrevSlot()（Phase 14，五槽跳過未購買）時送 Digit{上一個已擁有槽 + 1}；否則有 opts.getSlot()（main.js 傳 weapons.pending 優先、否則 weapons.slot，0 起算）時送直選鍵 Digit{上一格}；未給則退回 KeyQ（只能往下一把）
 //   15 →：下一把武器——送 KeyQ（weaponCycle，沿用武器循環的排隊 / 跳格邏輯）；← / → 只在步行有效，駕駛中不送
 // 震動：rumble(strong, weak, ms)；手把沒有 vibrationActuator.playEffect 時略過（回 false）
 import { LOOK_RAD_PER_UNIT } from './input.js';
@@ -104,7 +104,7 @@ const NOOP = Object.freeze({
   dispose() {},
 });
 
-// opts：getMode()（'walk' | 'drive' | …，預設讀 input.touchMode）、getSlot()（目前武器槽 0 起算）、
+// opts：getMode()（'walk' | 'drive' | …，預設讀 input.touchMode）、getSlot()（目前武器槽 0 起算）、getPrevSlot()（上一個已擁有槽，Phase 14）、
 //   navigator / window / KeyboardEvent / now()（測試替身；預設取全域）、autoPoll（預設 true：掛 input.addFrameHook）
 export function createGamepad(input, opts = {}) {
   const nav = 'navigator' in opts ? opts.navigator : globalThis.navigator;
@@ -191,6 +191,9 @@ export function createGamepad(input, opts = {}) {
     if (i === PAD.LEFT || i === PAD.RIGHT) {
       if (drive) return null;
       if (i === PAD.RIGHT) return 'KeyQ';
+      // Phase 14：opts.getPrevSlot()（上一個已擁有的槽，0 起算；五槽且跳過未購買者）優先，送 Digit{槽 + 1}
+      const prev = typeof opts.getPrevSlot === 'function' ? opts.getPrevSlot() : null;
+      if (Number.isInteger(prev) && prev >= 0) return `Digit${prev + 1}`;
       const slot = typeof opts.getSlot === 'function' ? opts.getSlot() : null;
       return Number.isInteger(slot) && slot >= 0 ? `Digit${((slot + 2) % 3) + 1}` : 'KeyQ';
     }

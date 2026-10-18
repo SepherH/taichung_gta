@@ -8,13 +8,15 @@
 //   按鈕預設動作：tb-weapon 點擊 = weapons.cycle()、輪盤選格 = weapons.select(slot)、tb-reload = weapons.reload()、
 //     tb-aim 按住 = input.touchPress('Mouse2', true) / touchRelease（沒給 input 時改讀 hud.aimHeld）；可用 onCycle / onSelect / onReload 覆寫
 //   觸控按鈕 ≥ 44 px、safe-area；駕駛中（setDriving(true) 或 body.touch-drive）全部隱藏
+//   Phase 14：槍械（手槍 / 衝鋒槍 / 散彈槍，defs isGun）都顯示彈藥「彈匣 / 備彈」、準星、tb-reload / tb-aim；
+//     輪盤五格（未擁有的衝鋒槍 / 散彈槍格隱藏、不可選，角度表 wheel.js wheelAngles）；桌機鍵位提示另列 4 / 5（未擁有時隱藏）
 //   桌機（非觸控）面板另列換武器鍵位提示 .wp-keys（鍵位讀 core/actions.js 的 ACTIONS：weaponCycle、slot1–3；目前槽加 .wp-cur 並加粗），駕駛中隱藏
 //   觸控版面（body.touch，weapons.css）：面板縮為一列放 #status 下方（直向在新手提示卡下方、高 < 380 橫向在 #status 上方），
 //     三鈕排在攻擊鈕周圍（矮橫向 ≤ 540：武器 / 瞄準在互動鈕下方、裝填在右上角）；駕駛中面板一併隱藏
 import './weapons.css';
-import { WEAPONS, SLOT_IDS } from './defs.js';
+import { WEAPONS, SLOT_IDS, SLOT_KEYS, isGun } from './defs.js';
 import { ACTIONS } from '../core/actions.js';
-import { LONG_PRESS_MS, classifyPress, wheelSlotFromVector, wheelCellOffset, ammoText } from './wheel.js';
+import { LONG_PRESS_MS, classifyPress, wheelSlotFromVector, wheelCellOffset, wheelAngles, ammoText } from './wheel.js';
 
 let iconInfoShown = false;
 
@@ -32,12 +34,14 @@ function toggle(e, cls, on) {
 // KeyboardEvent.code → 顯示用鍵名（KeyQ → Q、Digit1 → 1）
 const keyName = (code) => String(code).replace(/^Key|^Digit/, '');
 
-// 桌機換武器鍵位提示：[{ text, slot }]（slot -1 = 循環鍵）；鍵位單一來源 ACTIONS
-export function weaponKeyHints() {
+// 桌機換武器鍵位提示：[{ text, slot }]（slot -1 = 循環鍵）；鍵位單一來源 ACTIONS（slot1–3）
+// all = true 時另列不在 ACTIONS 的槽（4 衝鋒槍 / 5 散彈槍，鍵位取 defs SLOT_KEYS）
+export function weaponKeyHints(all = false) {
   const out = [{ text: `${ACTIONS.weaponCycle.keys.map(keyName).join('/')} 換武器`, slot: -1 }];
   SLOT_IDS.forEach((id, i) => {
     const a = ACTIONS[`slot${i + 1}`];
-    if (a) out.push({ text: `${a.keys.map(keyName).join('/')} ${WEAPONS[id].label}`, slot: i });
+    const keys = a ? a.keys : all ? [SLOT_KEYS[i]] : null;
+    if (keys) out.push({ text: `${keys.map(keyName).join('/')} ${WEAPONS[id].label}`, slot: i });
   });
   return out;
 }
@@ -77,7 +81,7 @@ export function createWeaponHud({
   const keyCells = [];
   if (keys) {
     Object.assign(keys.style, { display: 'flex', gap: '6px', fontSize: '0.72em', fontWeight: 'normal', opacity: '0.85', whiteSpace: 'nowrap' });
-    for (const h of weaponKeyHints()) {
+    for (const h of weaponKeyHints(true)) {
       const k = el(doc, 'span', 'wp-key');
       k.textContent = h.text;
       keys.appendChild(k);
@@ -119,6 +123,9 @@ export function createWeaponHud({
   let btnAim = null;
   let wheel = null;
   const cells = [];
+  const ownedFlags = SLOT_IDS.map(() => true);
+  let ownMask = -1; // 擁有權位元（變了才改輪盤 / 鍵位提示）
+  let angles = wheelAngles(null);
   let wheelOpen = false;
   let wheelSel = -1;
   let press = null; // { id, t0, x0, y0, cx, cy, moved, timer }
@@ -203,7 +210,7 @@ export function createWeaponHud({
     on(btnWeapon, 'pointermove', (e) => {
       if (!press || e.pointerId !== press.id) return;
       press.moved = Math.max(press.moved, Math.hypot(e.clientX - press.x0, e.clientY - press.y0));
-      if (wheelOpen) markSel(wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy));
+      if (wheelOpen) markSel(wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy, undefined, angles));
     });
     // 結算目前 press：mode 'up' = 正常放開（短按 cycle、輪盤選格 select）；'cancel' = pointercancel / lostpointercapture
     //   （只清狀態）；'preempt' = 被下一指搶先（短按仍算一次 cycle，輪盤取消）
@@ -211,7 +218,7 @@ export function createWeaponHud({
       clearTimeout(press.timer);
       const kind = wheelOpen ? 'long' : classifyPress(nowMs() - press.t0, press.moved);
       if (kind === 'long') {
-        const s = mode === 'up' ? wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy) : -1;
+        const s = mode === 'up' ? wheelSlotFromVector(e.clientX - press.cx, e.clientY - press.cy, undefined, angles) : -1;
         if (s >= 0) select(s);
       } else if (kind === 'tap' && mode !== 'cancel') cycle();
       press = null;
@@ -251,6 +258,7 @@ export function createWeaponHud({
   // ---------- 每幀 ----------
   let shownWeapon = null;
   let shownAmmo = null;
+  let shownAmmoId = null;
   let shownMag = -1;
   let shownRes = -1;
   let shownReload = -2;
@@ -282,12 +290,37 @@ export function createWeaponHud({
     if (btnLabel) btnLabel.textContent = WEAPONS[id].label;
   }
 
+  // 擁有權（衝鋒槍 / 散彈槍購買後）變了：輪盤格與鍵位提示的顯示、輪盤角度表
+  function syncOwned() {
+    let mask = 0;
+    for (let i = 0; i < SLOT_IDS.length; i++) {
+      const own = typeof weapons.owns === 'function' ? weapons.owns(SLOT_IDS[i]) : i < 3;
+      ownedFlags[i] = own;
+      if (own) mask |= 1 << i;
+    }
+    if (mask === ownMask) return;
+    ownMask = mask;
+    angles = wheelAngles(ownedFlags);
+    const off = { x: 0, y: 0 };
+    cells.forEach((c, i) => {
+      c.hidden = angles[i] === null || angles[i] === undefined;
+      if (c.hidden) return;
+      wheelCellOffset(i, off, undefined, angles);
+      c.style.transform = `translate(${off.x.toFixed(1)}px, ${off.y.toFixed(1)}px)`;
+    });
+    keyCells.forEach((k, i) => {
+      if (k) k.hidden = !ownedFlags[i];
+    });
+  }
+
   function update(dt, state = {}) {
+    syncOwned();
     const id = weapons.current;
     if (id !== shownWeapon) setWeapon(id);
     const a = weapons.ammo();
-    const pistol = id === 'pistol';
-    if (pistol !== shownAmmo || (pistol && (a.mag !== shownMag || a.reserve !== shownRes))) {
+    const pistol = isGun(id); // 槍械（手槍 / 衝鋒槍 / 散彈槍）
+    if (pistol !== shownAmmo || id !== shownAmmoId || (pistol && (a.mag !== shownMag || a.reserve !== shownRes))) {
+      shownAmmoId = id;
       shownAmmo = pistol;
       shownMag = a.mag;
       shownRes = a.reserve;

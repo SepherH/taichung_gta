@@ -7,6 +7,11 @@
 //   { completed: { id: 正整數 }, cooldowns: { id: 正秒數 } }；格式錯誤整欄丟棄（不影響其他欄位），清洗後兩表皆空也省略
 // Phase 12（§34 增補，不升版）：races（街頭競速，missions/race.js serialize）選填頂層欄位——{ best: { raceId: 正秒數 } }；
 //   舊存檔沒有此欄 → 省略（無最佳成績）；格式錯誤整欄丟棄、非法值的鍵個別丟棄，清洗後為空也省略（defaultSave 不含此欄）
+// Phase 14（不升版，皆選填、defaultSave 不含）：
+//   weapons.owned：已購買的武器 id 陣列（只收 'smg' / 'shotgun'、去重）；空 → 省略
+//   weapons.ammo.smg / weapons.ammo.shotgun：{ mag, reserve }，只在 owned 含該槍時保留（缺 → 彈匣滿、附贈備彈；clamp 到上限）
+//   weapons.slot：{0,1,2} 之外只接受已擁有的 3（衝鋒槍）/ 4（散彈槍），其餘 → 0（舊存檔 slot 3 仍歸 0）
+//   safehouse：{ last: 安全屋 id（[\w-]{1,64} 字串）}——最後使用的安全屋（src/shops/safehouse.js）；格式錯誤整欄丟棄
 
 export const SAVE_VERSION = 2;
 
@@ -16,6 +21,12 @@ const STAT_FLOAT_KEYS = ['playTimeSec', 'distWalkM', 'distDriveM'];
 // v2 清洗上限
 const PISTOL_MAG_MAX = 12;
 const PISTOL_RESERVE_MAX = 120;
+// Phase 14 長槍（與 src/weapons/defs.js 的 magSize / reserveMax / startReserve 一致，測試交叉比對）
+const LONG_GUNS = {
+  smg: { slot: 3, mag: 30, reserveMax: 300, reserve: 90 },
+  shotgun: { slot: 4, mag: 6, reserveMax: 60, reserve: 18 },
+};
+const SAFEHOUSE_ID_RE = /^[\w-]{1,64}$/;
 const LIST_MAX = 200; // checkins / foods 陣列長度上限
 const MAP_MAX = 200; // completed / best / cooldowns 鍵數上限（契約未定，本檔自訂）
 const MISSION_STAGES = ['pickup', 'deliver'];
@@ -107,6 +118,18 @@ function raceRecords(src) {
   return Object.keys(best).length ? { best } : null;
 }
 
+// 已購買武器清單：只收 LONG_GUNS 的鍵、去重；非陣列 → []
+function ownedGuns(src) {
+  if (!Array.isArray(src)) return [];
+  return Object.keys(LONG_GUNS).filter((id) => src.includes(id));
+}
+
+// 最後使用的安全屋：{ last: id } → 同形；格式錯誤 → null（省略）
+function safehouseRecord(src) {
+  if (!isObj(src) || typeof src.last !== 'string' || !SAFEHOUSE_ID_RE.test(src.last)) return null;
+  return { last: src.last };
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -154,10 +177,20 @@ export function validateSave(obj) {
   out.world.hour = nonNeg(w.hour, d.world.hour) % 24;
   // v2：武器 / 任務 / 收集
   const wp = isObj(m.weapons) ? m.weapons : {};
-  out.weapons.slot = [0, 1, 2].includes(wp.slot) ? wp.slot : d.weapons.slot;
+  const own = ownedGuns(wp.owned);
+  const ownedSlots = own.map((id) => LONG_GUNS[id].slot);
+  out.weapons.slot = [0, 1, 2].includes(wp.slot) || ownedSlots.includes(wp.slot) ? wp.slot : d.weapons.slot;
   const pa = isObj(wp.ammo) && isObj(wp.ammo.pistol) ? wp.ammo.pistol : {};
   out.weapons.ammo.pistol.mag = intCap(pa.mag, d.weapons.ammo.pistol.mag, PISTOL_MAG_MAX);
   out.weapons.ammo.pistol.reserve = intCap(pa.reserve, d.weapons.ammo.pistol.reserve, PISTOL_RESERVE_MAX);
+  if (own.length) {
+    out.weapons.owned = own;
+    for (const id of own) {
+      const L = LONG_GUNS[id];
+      const ga = isObj(wp.ammo) && isObj(wp.ammo[id]) ? wp.ammo[id] : {};
+      out.weapons.ammo[id] = { mag: intCap(ga.mag, L.mag, L.mag), reserve: intCap(ga.reserve, L.reserve, L.reserveMax) };
+    }
+  }
   const ms = isObj(m.missions) ? m.missions : {};
   out.missions.completed = numMap(ms.completed, true);
   out.missions.best = numMap(ms.best, false);
@@ -170,6 +203,8 @@ export function validateSave(obj) {
   out.collect.foods = strList(cl.foods);
   const rc = raceRecords(m.races);
   if (rc) out.races = rc;
+  const sh = safehouseRecord(m.safehouse);
+  if (sh) out.safehouse = sh;
   return out;
 }
 
