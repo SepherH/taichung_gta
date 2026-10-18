@@ -71,6 +71,7 @@ const depsFor = (v) => ({
   namedBuildings: cm.namedBuildings,
   roads: cm.surfaceRoads,
   basins: osm.T.basins,
+  parks: cm.parks.map((p) => p.poly),
   stall: { x: NIGHT_MARKET_DELIVERY.pickup.x + v.dx, z: NIGHT_MARKET_DELIVERY.pickup.z, source: `NIGHT_MARKET_DELIVERY.pickup ${v.label}` },
 });
 
@@ -496,6 +497,29 @@ for (const s of sources) {
   check(`${s}：鏡頭全程不在實體內、離表面 ≥ ${CLEAR_M} m（近平面 ${CAM_NEAR} + 1 m）`, n === 0, m ? [...m].map(([c, e]) => `${c} ${e.n}`).join(' / ') : '0 幀');
 }
 check('取樣頻率 ≥ SAMPLE_HZ', FPS >= T.SAMPLE_HZ);
+// 公園綠地：citymodel parks（world.js placeParkTrees 全部種樹）在 floor 內要抬到 地面 + STREET_CLEAR；只給 basins 時公園只剩 SAFE_CLEAR（修前行為）
+{
+  const parkPolys = cm.parks.map((p) => p.poly);
+  const floorWith = T.makeFloor(terrain, [], [], parkPolys);
+  const floorWithout = T.makeFloor(terrain, [], [], []);
+  let inside = 0;
+  let bad = 0;
+  let lowBefore = 0;
+  for (const p of cm.parks) {
+    const c = { x: (p.bbox.x0 + p.bbox.x1) / 2, z: (p.bbox.z0 + p.bbox.z1) / 2 };
+    const q = geom.pointInPolygon(c.x, c.z, p.poly) ? c : { x: p.poly[0], z: p.poly[1] };
+    const mid = geom.pointInPolygon(c.x, c.z, p.poly) ? q : { x: (p.poly[0] + c.x) / 2, z: (p.poly[1] + c.z) / 2 };
+    if (!geom.pointInPolygon(mid.x, mid.z, p.poly)) continue;
+    inside++;
+    const g = groundY(mid.x, mid.z);
+    if (floorWith(mid.x, mid.z) < g + T.STREET_CLEAR - 1e-6) bad++;
+    if (floorWithout(mid.x, mid.z) < g + T.STREET_CLEAR - 1e-6) lowBefore++;
+  }
+  check(`公園內 floor ≥ 地面 + STREET_CLEAR（取樣 ${inside} 座公園）`, inside > 0 && bad === 0, `${bad} 座不足`);
+  check('未給公園多邊形時公園內 floor 只有 SAFE_CLEAR（修前行為，斷言可偵測缺漏）', lowBefore > 0, `${lowBefore} 座`);
+  const mainSrc = readFileSync(resolve(ROOT, 'src/main.js'), 'utf8');
+  check('main.js createMenuTour 補傳 parks', /createMenuTour\(\{[\s\S]*?parks: parks\.map\(\(p\) => p\.poly\)/.test(mainSrc));
+}
 check(`平滑不變：巡覽 / 減少動態效果相鄰幀位移、進出遊戲平滑內插相鄰幀高度變化 ≤ ${MAX_STEP_M} m（兩個攤車變體）`,
   ['tour', 'reduced', 'handoff-out', 'handoff-in'].every((k) => maxStep[k] <= MAX_STEP_M), Object.entries(maxStep).map(([k, v]) => `${k} ${v.toFixed(3)} m`).join(' / '));
 check('地標 glb 全數載入（manifest 每筆都有三角形）', landmarks.length === manifest.length && landmarks.every((L) => L.tris.length > 0));

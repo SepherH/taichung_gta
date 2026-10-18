@@ -175,7 +175,7 @@ function fakeStorage(init = {}) {
       all.showBlood === true && all.recoil === 1 && all.aimAssist === true && all.weather === 'auto',
     JSON.stringify(all),
   );
-  check('settings：schema 有 16 個鍵（§2 十個 + §11 三個 + §21 weather + §23.2 camWalkView / camDriveView）', Object.keys(SETTINGS_SCHEMA).length === 16 && Object.keys(all).length === 16);
+  check('settings：schema 有 17 個鍵（§2 十個 + §11 三個 + §21 weather + §23.2 camWalkView / camDriveView + 手把 lookSensPad）', Object.keys(SETTINGS_SCHEMA).length === 17 && Object.keys(all).length === 17);
   check(
     'settings：§21 weather schema（enum auto / clear / rain / fog、預設 auto）',
     SETTINGS_SCHEMA.weather.type === 'enum' && SETTINGS_SCHEMA.weather.values.join(',') === 'auto,clear,rain,fog' && SETTINGS_SCHEMA.weather.default === 'auto' && SETTINGS_SCHEMA.weather.label === '天氣',

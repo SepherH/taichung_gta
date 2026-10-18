@@ -1,5 +1,5 @@
 // 輸入動作表（契約 §4 / §12）：動作名稱 → 按鍵代碼（KeyboardEvent.code，滑鼠左 / 右鍵記為 'Mouse0' / 'Mouse2'）
-// 桌機與觸控的操作說明（KEYMAP_HELP / TOUCH_HELP）由本檔單一來源產生：選單「操作說明」頁與 HUD 提示都讀這裡
+// 桌機、觸控與手把的操作說明（KEYMAP_HELP / TOUCH_HELP / GAMEPAD_HELP）由本檔單一來源產生：選單「操作說明」頁與 HUD 提示都讀這裡
 // reserved：預留動作（尚無功能，說明表不列）；hold：按住有意義（否則只看「本幀剛按下」）
 // 三個與舊版衝突的鍵：H 說明 → 喇叭（說明移到暫停選單）、R 翻車 → 裝填（翻車改 F 扶起）、E 揮拳 → 互動（攻擊改左鍵）
 // Phase 4（§12）：aim / interact / reload 取消預留；Q 由電台改為武器循環（radio 移除）；1 / 2 / 3 直選武器
@@ -149,6 +149,50 @@ export const TOUCH_HELP = [
       { keys: '「視角」鈕', action: 'camera', desc: '切換鏡頭距離（近 / 中 / 遠）' }, // touch.js tb-view（虛擬 KeyV；橫向右上、直向步行左上小鈕列下方、直向駕駛右半電台鈕下方）
       { keys: '左上「圖鑑」', action: null, desc: '開 / 關小吃圖鑑（步行時顯示）' }, // tb-guide 無對應鍵位（onTap 開圖鑑）
       { keys: '傍晚垃圾車', action: null, desc: '16–18 時出現（小地圖紅點），3 分鐘內追上車尾點「互動」鈕倒垃圾（步行 / 駕駛皆可）' },
+    ],
+  },
+];
+
+// 遊戲手把操作說明（standard mapping；與 src/gamepad.js 的按鍵配置一致，選單「操作說明」的「手把」頁籤顯示）
+export const GAMEPAD_HELP = [
+  {
+    group: '步行',
+    items: [
+      { keys: '左搖桿', action: 'move', desc: '移動（類比）' },
+      { keys: 'L3（按下左搖桿）', action: 'sprint', desc: '衝刺（按住）' },
+      { keys: 'A', action: 'jump', desc: '跳' },
+      { keys: 'RT', action: 'attack', desc: '攻擊（依武器；手槍可按住連發）' },
+      { keys: 'LT', action: 'aim', desc: '肩後瞄準（持手槍，按住）' },
+      { keys: 'X', action: 'reload', desc: '裝填' },
+      { keys: 'LB / 十字鍵 →', action: 'weaponCycle', desc: '下一把武器' },
+      { keys: '十字鍵 ←', action: null, desc: '上一把武器' },
+      { keys: 'B', action: 'interact', desc: '互動' },
+      { keys: 'Y', action: 'enterExit', desc: '上車 / 搶車' },
+      { keys: '右搖桿', action: null, desc: '轉動視角（設定可調手把靈敏度）' },
+    ],
+  },
+  {
+    group: '駕駛',
+    items: [
+      { keys: '左搖桿', action: 'move', desc: '轉向' },
+      { keys: 'RT / LT', action: 'move', desc: '油門 / 煞車倒車（類比）' },
+      { keys: 'A', action: 'jump', desc: '手煞車' },
+      { keys: 'X', action: 'horn', desc: '喇叭' },
+      { keys: 'R3（按下右搖桿）', action: 'lookBack', desc: '回頭看（按住）' },
+      { keys: 'LB', action: null, desc: '換電台' },
+      { keys: 'B', action: 'interact', desc: '互動' },
+      { keys: 'Y', action: 'enterExit', desc: '下車 / 扶起翻覆車' },
+    ],
+  },
+  {
+    group: '通用',
+    items: [
+      { keys: 'RB', action: 'camera', desc: '切換鏡頭距離' },
+      { keys: '十字鍵 ↑', action: 'phone', desc: '開手機（B 關閉）' },
+      { keys: '十字鍵 ↓', action: 'timeSkip', desc: '時間快轉' },
+      { keys: 'Back / View', action: 'map', desc: '開大地圖（B 關閉）' },
+      { keys: 'Start / Menu', action: 'pause', desc: '暫停選單' },
+      { keys: '選單中', action: null, desc: '十字鍵 / 左搖桿移動、A 確定、B 返回' },
     ],
   },
 ];

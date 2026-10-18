@@ -43,6 +43,7 @@ import osm from './data/osm-city.json';
 import { SURFACE_OFFSET, TRIVIA } from './data/city.js';
 import { LoadingScreen } from './loading.js';
 import { Input } from './input.js';
+import { createGamepad } from './gamepad.js';
 import { registerTouchButton } from './touch.js';
 import { PhysicsOccluder } from './collision.js';
 import { buildWorld, describeLocation } from './world.js';
@@ -50,7 +51,7 @@ import { buildQiuhonggu } from './qiuhonggu.js';
 import { buildBuildings } from './buildings.js';
 import { loadLandmarkModels, projectLatLon } from './landmarks/index.js';
 import { computeSpawn, computeParkedVehicles } from './places.js';
-import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, surfaceFootways, surfaceRoads } from './citymodel.js';
+import { ATTRIBUTION, buildingAt, buildings as cityBuildings, getTerrain, heightAt, inBounds, inWater, namedBuildings, nearestNamedRoad, onRoadSurface, parks, surfaceFootways, surfaceRoads } from './citymodel.js';
 import { loadCharacterModels, getCharacterManifest, createCharacter, disposeCharacter, CharacterAnimator } from './characters/index.js';
 import { loadVehicleModels, createVehicleModel, vehicleTemplateMaterials, EMISSIVE_MATERIALS } from './vehicle-model.js';
 import { loadPropModels, createPropModel, propInfo, propEmissiveMaterials, placeProp, propColliderBox } from './prop-model.js';
@@ -71,7 +72,7 @@ import { nextFrame } from './utils.js';
 import { applyRendererQuality, createAdaptiveResolution, isInputBlocked, isTouch, pixelRatioFor, qualityTier, setGameActive, setQualitySetting } from './mobile.js';
 import { bus } from './core/events.js';
 import { settings } from './core/settings.js';
-import { KEYMAP_HELP, TOUCH_HELP } from './core/actions.js';
+import { KEYMAP_HELP, TOUCH_HELP, GAMEPAD_HELP } from './core/actions.js';
 import { qualityBudget } from './core/quality.js';
 import { createAutosave, createSaveStore, defaultSave, SAVE_VERSION } from './save.js';
 import { createEconomy, HOSPITAL_FEE, LOOT_MIN, LOOT_MAX } from './economy.js';
@@ -583,7 +584,7 @@ async function init() {
   player.attachCombat(combat);
   player.placeAt(spawn.x, spawn.z, spawn.yaw, terrain);
   const input = new Input(renderer.domElement);
-  input.setSensitivity({ mouse: settings.get('lookSensMouse'), touch: settings.get('lookSensTouch') });
+  input.setSensitivity({ mouse: settings.get('lookSensMouse'), touch: settings.get('lookSensTouch'), pad: settings.get('lookSensPad') });
   input.setInvertY(settings.get('invertY'));
   const occluder = new PhysicsOccluder(pw, colliderStats);
   const rig = new CameraRig(camera, occluder, terrain);
@@ -835,7 +836,10 @@ async function init() {
   const sidewalkNear = createSidewalkNear({ nearestRoadPoint, onRoadSurface, buildingAt, inBounds });
 
   // ---------- 委託 / 導航 / 大地圖 / 打卡 / 小吃圖鑑（W4–W6）----------
+  // keyTarget: window——手把選單模式的合成 KeyboardEvent 只送 window（path 不含 document），面板預設掛 document 會收不到；
+  //   實體鍵盤事件本來就經過 window capture，不會重複處理（ui.js onKey 在面板關著時早退）
   const missions = createMissions({
+    keyTarget: window,
     bus,
     scene,
     root: document.body,
@@ -1514,6 +1518,16 @@ async function init() {
   });
   router.onVehicleHitPedestrian(({ vehicle, relSpeed }) => impact(vehicle, relSpeed, 'ped'));
   bus.on('vehicle:crash', ({ relSpeed }) => rig.shake(Math.min(1, relSpeed / CRASH_SHAKE_SPEED)));
+  // 遊戲手把（gamepad.js）：輪詢掛在 input 每幀 hook；步行 / 駕駛沿用 state.mode，十字鍵 ← 上一把武器讀 weapons.pending（排隊中優先）/ weapons.slot
+  // 震動只接既有事件：玩家開槍（weapon:fire byPlayer）一次短震、玩家駕駛碰撞（vehicle:crash，≥ 8 m/s）依撞擊速度；手把不支援震動時略過
+  const gamepad = createGamepad(input, { getMode: () => state.mode, getSlot: () => (weapons.pending >= 0 ? weapons.pending : weapons.slot) });
+  bus.on('weapon:fire', (e) => {
+    if (e && e.byPlayer) gamepad.rumble(0.2, 0.6, 70);
+  });
+  bus.on('vehicle:crash', ({ relSpeed }) => {
+    const k = Math.min(1, relSpeed / CRASH_SHAKE_SPEED);
+    gamepad.rumble(k, 0.4 + 0.6 * k, 120 + 230 * k);
+  });
   bus.on('vehicle:disabled', ({ vehicle }) => {
     if (byPlayer(vehicle)) hud.toast('車子熄火了', 2.5);
   });
@@ -1629,6 +1643,7 @@ async function init() {
   settings.subscribe((key, value) => {
     if (key === 'lookSensMouse') input.setSensitivity({ mouse: value });
     else if (key === 'lookSensTouch') input.setSensitivity({ touch: value });
+    else if (key === 'lookSensPad') input.setSensitivity({ pad: value });
     else if (key === 'invertY') input.setInvertY(value);
     else if (key === 'quality') {
       setQualitySetting(value);
@@ -2023,6 +2038,7 @@ async function init() {
     namedBuildings,
     roads: surfaceRoads,
     basins: osm.T ? osm.T.basins : [],
+    parks: parks.map((p) => p.poly),
     stall: tourStall ? { x: tourStall.pl.x, z: tourStall.pl.z } : { ...NIGHT_MARKET_DELIVERY.pickup, source: 'NIGHT_MARKET_DELIVERY.pickup' },
     reducedMotion: () => !!(reduceMotionMq && reduceMotionMq.matches),
     focus: attractFocus,
@@ -2094,6 +2110,7 @@ async function init() {
     bus,
     keymapHelp: KEYMAP_HELP,
     touchHelp: TOUCH_HELP,
+    gamepadHelp: GAMEPAD_HELP,
     isTouch: touch,
     attribution: ATTRIBUTION,
     getStats: () => currentStats(),

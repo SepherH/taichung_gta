@@ -72,7 +72,7 @@ export const PLATE_LIFT = 0.6;
 export const PLATE_ASPECT = 512 / 112;
 export const PLATE_CLEAR = 2;
 // 街道雜物（行道樹冠頂約 7.6 m、路燈 7 m、號誌桿 6.4 m 含伸向路內的懸臂）：主要道路與寬 ≥ 8 m 道路中心線 hw + STREET_REACH 內，
-//   以及綠地（秋紅谷 basins 輪廓，公園樹木）外擴 STREET_REACH 內，高度下限 = 地面 + STREET_CLEAR（m）
+//   以及綠地（citymodel parks 多邊形 + 秋紅谷 basins 輪廓；world.js placeParkTrees 在全部公園種樹）外擴 STREET_REACH 內，高度下限 = 地面 + STREET_CLEAR（m）
 export const STREET_CLEAR = 9.5;
 export const STREET_REACH = 5;
 
@@ -111,8 +111,8 @@ function plateTop(b) {
   return PLATE_LIFT + clamp(L * 0.6, 5, 36) / PLATE_ASPECT;
 }
 
-// 綠地輪廓（公園樹木範圍）：basins（秋紅谷）輪廓
-const greenPolys = (basins) => (basins || []).filter((b) => b && Array.isArray(b.p)).map((b) => b.p);
+// 綠地輪廓（公園樹木範圍）：citymodel parks 的 poly（扁平 [x0, z0, …]）加 basins（秋紅谷）輪廓
+const greenPolys = (basins, parks) => [...(parks || []).filter((p) => Array.isArray(p)), ...(basins || []).filter((b) => b && Array.isArray(b.p)).map((b) => b.p)];
 
 // 高度下限函式：floor(x, z) = max(地面 + SAFE_CLEAR, BUILDING_PAD 內建築頂 + ROOF_CLEAR, 街道雜物範圍內地面 + STREET_CLEAR)
 //   建築頂：一般建築 = OSM 高度（具名者含名稱牌 + PLATE_CLEAR）；地標 glb = LANDMARK_SOLIDS 各層（輪廓外 pad + BUILDING_PAD 內）
@@ -647,9 +647,9 @@ export function samplePathAt(path, t, pos, look) {
   look.z = cr(path.lz[i0], path.lz[i1], path.lz[i2], path.lz[i3], k);
 }
 
-// 完整巡覽：{ stops, segments, duration, ... } —— deps = { terrain, buildings, namedBuildings, roads, basins, stall }
+// 完整巡覽：{ stops, segments, duration, ... } —— deps = { terrain, buildings, namedBuildings, roads, basins, parks, stall }
 export function buildTour(deps) {
-  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins));
+  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins, deps.parks));
   const stops = orderStops(tourStops(deps));
   if (stops.length === 0) return null;
   const roads = deps.roads || [];
@@ -673,7 +673,7 @@ export function buildTour(deps) {
 
 // 減少動態效果：老虎城（第一個鏡位）固定高度慢速環繞一整圈為一輪
 export function buildReducedTour(deps) {
-  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins));
+  const floorAt = makeFloor(deps.terrain, deps.buildings || [], deps.roads || [], greenPolys(deps.basins, deps.parks));
   const stops = tourStops(deps);
   const c = stops.find((s) => s.key === 'tiger') || stops[0] || { x: 0, z: 0, base: 0, top: 10, name: '原點' };
   const sec = (2 * Math.PI) / REDUCED_OMEGA;
@@ -789,7 +789,7 @@ export function slerpQuat(a, b, k, out) {
 }
 
 // 控制器：main.js 只接線（updateAttract → update；startGame → stop；updateGame rig.update 之後 → handoff；quitToMenu → start）
-// opts = { camera, terrain, buildings, namedBuildings, roads, basins, stall, reducedMotion: () => boolean, focus?（寫入 { x, y, z } 的物件）, fade?: (alpha 0–1) => void }
+// opts = { camera, terrain, buildings, namedBuildings, roads, basins, parks（citymodel parks 的 poly 陣列）, stall, reducedMotion: () => boolean, focus?（寫入 { x, y, z } 的物件）, fade?: (alpha 0–1) => void }
 export function createMenuTour(opts) {
   const { camera } = opts;
   const reduced = typeof opts.reducedMotion === 'function' ? opts.reducedMotion : () => false;

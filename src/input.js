@@ -1,7 +1,7 @@
 // 鍵盤、滑鼠與觸控輸入：以 KeyboardEvent.code 記錄按住狀態與「本幀剛按下」
 //
-// keys（按住）由五個來源合成：實體鍵盤、滑鼠按鍵（Mouse0 左鍵 / Mouse2 右鍵，只算 canvas 上的點擊）、觸控按鈕（hold）、
-//   觸控搖桿相容層、遮罩期間強制鍵；pressed 為本幀剛按下（含觸控 tap / hold 按下、滑鼠按下）
+// keys（按住）由六個來源合成：實體鍵盤、滑鼠按鍵（Mouse0 左鍵 / Mouse2 右鍵，只算 canvas 上的點擊）、觸控按鈕（hold）、
+//   觸控搖桿相容層、遮罩期間強制鍵、遊戲手把（padKeys）；pressed 為本幀剛按下（含觸控 tap / hold 按下、滑鼠按下）
 // 觸控搖桿相容層：推過 STICK_KEY 的方向寫入 KeyW / KeyA / KeyS / KeyD（駕駛時只寫 KeyA / KeyD 轉向），
 //   步行中推過 STICK_RUN 視為 ShiftLeft（衝刺），讓只讀按鍵的 player.js / main.js 不改也能用觸控
 //
@@ -16,7 +16,11 @@
 //   滑鼠 / pointer lock：movementX × 滑鼠倍率（800 px ≈ 360°）；觸控：touchLook() 依螢幕寬換算（拖半個螢幕寬 ≈ 180°）× 觸控倍率
 // 靈敏度：setSensitivity({ mouse, touch }) 連續倍率（0.3–3.0），反轉 Y：setInvertY(bool)；兩者由整合層以 core/settings 驅動，
 //   初值取 core/settings 單例（lookSensMouse / lookSensTouch / invertY），整合層 setSensitivity 之前也是設定值
-// enabled = false（開始前 / 暫停 / 選單）：不吃任何輸入，並清空所有按住狀態（鍵盤、滑鼠、觸控、搖桿、踏板），通知觸控層釋放指標
+// enabled = false（開始前 / 暫停 / 選單）：不吃任何輸入，並清空所有按住狀態（鍵盤、滑鼠、觸控、搖桿、踏板、手把），通知觸控層釋放指標
+// 遊戲手把（gamepad.js 驅動）：獨立來源 padKeys（按住）+ padStick / padPedals（類比）+ padLook（視角，倍率 lookSensPad）；
+//   與觸控類比量的合併規則：每軸取「絕對值較大者」（觸控搖桿與手把左搖桿）、踏板各取較大深度——兩者都不會覆蓋對方
+//   駕駛判斷：padDrive 由 gamepad.js 每幀依 main.js 的 state.mode 寫入（不另造狀態）；padDrive 依模式穩定（不隨類比量閃爍），為真時 moveAxis 走駕駛分支
+// 每幀 hook：onFrame（觸控專用，維持原介面）+ addFrameHook(fn)（可多個訂閱，例：手把輪詢），皆在 endFrame 清 pressed 之後呼叫
 import { isTouch, initMobile } from './mobile.js';
 import { initTouch } from './touch.js';
 import { createActionReader } from './core/actions.js';
@@ -48,6 +52,11 @@ function clamp(v, a, b) {
   return v < a ? a : v > b ? b : v;
 }
 
+// 兩個類比來源取絕對值較大者（同大取前者）
+function absMax(a, b) {
+  return Math.abs(b) > Math.abs(a) ? b : a;
+}
+
 function sensValue(v, fallback) {
   return typeof v === 'number' && Number.isFinite(v) ? clamp(v, SENS_MIN, SENS_MAX) : fallback;
 }
@@ -63,7 +72,11 @@ export class Input {
     this.dragging = false;
     this._enabled = false; // 遊戲開始後才接受輸入
     // 連續倍率（setSensitivity）；初值一律取設定
-    this.sens = { mouse: sensValue(settings.get('lookSensMouse'), 1), touch: sensValue(settings.get('lookSensTouch'), 1) };
+    this.sens = {
+      mouse: sensValue(settings.get('lookSensMouse'), 1),
+      touch: sensValue(settings.get('lookSensTouch'), 1),
+      pad: sensValue(settings.get('lookSensPad'), 1),
+    };
     this.invertY = settings.get('invertY') === true;
 
     // 按住狀態的來源
@@ -74,6 +87,11 @@ export class Input {
     this.blockKeys = new Set(); // 遮罩期間強制的鍵（駕駛中拉手煞車）
     this.stick = { x: 0, y: 0 };
     this.pedals = { throttle: 0, brake: 0 }; // 觸控踏板類比深度 0..1
+    this.padKeys = new Set(); // 手把按住的虛擬鍵（gamepad.js）
+    this.padStick = { x: 0, y: 0 }; // 手把左搖桿（已套死區重映射）
+    this.padPedals = { throttle: 0, brake: 0 }; // 手把 RT / LT（駕駛）
+    this.padDrive = false; // 手把類比量是否以駕駛方式解讀（gamepad.js 依 main.js mode 寫入）
+    this._frameHooks = [];
     this.touchMode = 'walk';
     this.onFrame = null; // 觸控模組每幀的檢查（initTouch 設定）
     this.onDisable = null; // enabled 轉為 false 時呼叫（initTouch 設定：釋放所有觸控指標）
@@ -163,6 +181,7 @@ export class Input {
     this.mouseKeys.clear();
     this.pressed.clear();
     this.dragging = false;
+    this.resetPad();
     this.resetTouch();
   }
 
@@ -173,6 +192,7 @@ export class Input {
     for (const c of this.touchHolds.keys()) this.keys.add(c);
     for (const c of this.stickKeys) this.keys.add(c);
     for (const c of this.blockKeys) this.keys.add(c);
+    for (const c of this.padKeys) this.keys.add(c);
   }
 
   down(code) {
@@ -191,14 +211,18 @@ export class Input {
   moveAxis() {
     let x = (this._digital('KeyD', 'ArrowRight') ? 1 : 0) - (this._digital('KeyA', 'ArrowLeft') ? 1 : 0);
     let y = (this._digital('KeyW', 'ArrowUp') ? 1 : 0) - (this._digital('KeyS', 'ArrowDown') ? 1 : 0);
-    const sx = this.stick.x;
-    if (this.touchMode === 'drive') {
-      const { throttle, brake } = this.pedals;
+    // 觸控與手把並存：每軸取絕對值較大者、踏板各取較大深度（任一來源歸零不會把另一來源蓋掉）
+    const ps = this.padStick;
+    const pp = this.padPedals;
+    const sx = absMax(this.stick.x, ps.x);
+    if (this.touchMode === 'drive' || this.padDrive) {
+      const throttle = Math.max(this.pedals.throttle, pp.throttle);
+      const brake = Math.max(this.pedals.brake, pp.brake);
       x = clamp(x + sx, -1, 1);
       y = clamp(y + throttle - brake, -1, 1);
       return { x, y, mag: Math.min(1, Math.hypot(x, y)), analog: sx !== 0 || throttle !== 0 || brake !== 0 };
     }
-    const sy = this.stick.y;
+    const sy = absMax(this.stick.y, ps.y);
     x += sx;
     y += sy;
     const len = Math.hypot(x, y);
@@ -211,9 +235,10 @@ export class Input {
 
   // ---------- 鏡頭靈敏度 ----------
   // 連續倍率（0.3–3.0，1.0 = 中檔）；省略或非法的欄位維持原值
-  setSensitivity({ mouse, touch } = {}) {
+  setSensitivity({ mouse, touch, pad } = {}) {
     this.sens.mouse = sensValue(mouse, this.sens.mouse);
     this.sens.touch = sensValue(touch, this.sens.touch);
+    this.sens.pad = sensValue(pad, this.sens.pad);
   }
 
   setInvertY(on) {
@@ -334,6 +359,59 @@ export class Input {
     this._syncKeys();
   }
 
+  // ---------- 遊戲手把介面（gamepad.js 呼叫） ----------
+  // 按下：比照 keydown（非 repeat）進 pressed 並按住；停用中不吃
+  padDown(code, edge = true) {
+    if (!this._enabled) return;
+    if (edge) this.pressed.add(code);
+    this.padKeys.add(code);
+    this._syncKeys();
+  }
+
+  padUp(code) {
+    if (this.padKeys.delete(code)) this._syncKeys();
+  }
+
+  // 左搖桿（x 右正、y 前正，已套死區重映射）與 RT / LT 深度（0..1）；drive = 以駕駛方式解讀
+  setPadAnalog(x, y, throttle, brake, drive) {
+    if (!this._enabled) {
+      x = y = throttle = brake = 0;
+    }
+    this.padStick.x = clamp(Number(x) || 0, -1, 1);
+    this.padStick.y = clamp(Number(y) || 0, -1, 1);
+    this.padPedals.throttle = clamp(Number(throttle) || 0, 0, 1);
+    this.padPedals.brake = clamp(Number(brake) || 0, 0, 1);
+    this.padDrive = !!drive;
+  }
+
+  // 右搖桿視角：ux / uy 為「倍率 1.0 下的滑鼠 px」，乘手把倍率與反轉 Y
+  padLook(ux, uy) {
+    if (!this._enabled) return;
+    const k = this.sens.pad;
+    this.dx += ux * k;
+    this.dy += uy * k * (this.invertY ? -1 : 1);
+  }
+
+  // 釋放手把所有按住鍵與類比量（斷線 / 停用）；不動其他來源
+  resetPad() {
+    this.padKeys.clear();
+    this.padStick.x = 0;
+    this.padStick.y = 0;
+    this.padPedals.throttle = 0;
+    this.padPedals.brake = 0;
+    this._syncKeys();
+  }
+
+  // 每幀 hook（endFrame 清 pressed 之後呼叫）；回傳取消訂閱函式
+  addFrameHook(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._frameHooks.push(fn);
+    return () => {
+      const i = this._frameHooks.indexOf(fn);
+      if (i >= 0) this._frameHooks.splice(i, 1);
+    };
+  }
+
   clearKeyboard() {
     this.kbKeys.clear();
     this.mouseKeys.clear();
@@ -352,5 +430,6 @@ export class Input {
   endFrame() {
     this.pressed.clear();
     if (this.onFrame) this.onFrame();
+    if (this._frameHooks && this._frameHooks.length) for (const fn of this._frameHooks.slice()) fn();
   }
 }

@@ -62,6 +62,7 @@
 | `quality` | `'auto'\|'low'\|'mid'\|'high'\|'ultra'` | `'auto'` |
 | `lookSensMouse` | number 0.3–3.0（step 0.1） | 1.0 |
 | `lookSensTouch` | number 0.3–3.0（step 0.1） | 1.0 |
+| `lookSensPad` | number 0.3–3.0（step 0.1） | 1.0（遊戲手把右搖桿，§4.6） |
 | `invertY` | boolean | false |
 | `volumeMaster` | number 0–1 | 0.8 |
 | `volumeMusic` | number 0–1 | 0.6 |
@@ -199,6 +200,17 @@
 
 - 每個 pointerId 只綁一個控制，多指互不搶；`registerTouchButton(def)` 可擴充；已移除的 `tb-flip` / `tb-sens` / `tb-punch` / `tb-gas` / `tb-brake` 再註冊會被忽略（回 null）
 - `setTouchMode('walk'|'drive')`（hud.js 依是否駕駛呼叫）、`getTouchMode()`
+
+### 4.6 遊戲手把（`src/gamepad.js`，Gamepad API）
+
+- `createGamepad(input, { getMode, getSlot })` → `{ supported, connected, poll(), rumble(strong, weak, ms), release(), dispose() }`；`navigator.getGamepads` 不存在時回 no-op 物件（不拋例外）
+- 輪詢：`input.addFrameHook(poll)`（`endFrame` 清 `pressed` 之後；`onFrame` 仍為觸控專用）；取第一支 `mapping === 'standard'`，無則第一支非 null；斷線（事件或輪詢不到）→ `input.resetPad()` + 視角累積量歸零
+- Input 來源：`padKeys`（併入 `_syncKeys`）、`padDown(code, edge)` / `padUp(code)`（按下沿進 `pressed`，停用中不吃）、`setPadAnalog(x, y, throttle, brake, drive)`、`padLook(ux, uy)`（× `lookSensPad`、尊重 `invertY`）、`resetPad()`；觸控與手把類比量並存規則：每軸取絕對值較大者、踏板各取較大深度；`padDrive` 只在手把類比量非 0 時影響 `moveAxis` 分支（純鍵盤不變）
+- 步行 / 駕駛：`getMode()` = main.js `state.mode`（未給時 `input.touchMode`）
+- 配置（standard 索引）：左搖桿移動（死區 0.15 重映射）；右搖桿視角（死區 0.12、平方曲線、推到底 ≈ 225°/s × 倍率，垂直 0.65）；RT(7) 步行 Mouse0 / 駕駛油門類比；LT(6) 步行 Mouse2 / 駕駛煞車倒車類比；A(0) Space；B(1) KeyE；X(2) 步行 KeyR / 駕駛 KeyH；Y(3) KeyF；LB(4) KeyQ；RB(5) KeyV；Back(8) KeyM；Start(9) Escape；L3(10) ShiftLeft；R3(11) KeyC；↑ KeyT；↓ KeyN；←（步行）Digit{上一格}（讀 `getSlot()`）；→（步行）KeyQ
+- 選單模式（`input.enabled === false`）：十字鍵 / 左搖桿 → 合成 `keydown`+`keyup` ArrowUp/Down/Left/Right（按住 400 ms 後每 120 ms，`repeat: true`）；A = Enter、B = Escape、Start = Escape、Back = KeyM，dispatch 到 `window`（menu.js / phone.js / 大地圖既有鍵盤處理生效）；模式切換時仍按著的鍵鎖到放開
+- 震動（main.js）：`weapon:fire`（byPlayer）短震；`vehicle:crash` 依 relSpeed；無 `vibrationActuator.playEffect` 時略過
+- 說明表：`GAMEPAD_HELP`（`src/core/actions.js`，結構同 `TOUCH_HELP`），選單「操作說明」頁籤「手把」（`createMenu({ gamepadHelp })`）
 
 ## 5. 第二波模組間轉接器
 

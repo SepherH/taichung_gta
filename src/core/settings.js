@@ -13,6 +13,7 @@ export const SETTINGS_SCHEMA = {
   quality: { type: 'enum', values: ['auto', 'low', 'mid', 'high', 'ultra'], default: 'auto', label: '畫質' },
   lookSensMouse: { type: 'number', min: 0.3, max: 3.0, step: 0.1, default: 1.0, label: '滑鼠視角靈敏度' },
   lookSensTouch: { type: 'number', min: 0.3, max: 3.0, step: 0.1, default: 1.0, label: '觸控視角靈敏度' },
+  lookSensPad: { type: 'number', min: 0.3, max: 3.0, step: 0.1, default: 1.0, label: '手把視角靈敏度' }, // 遊戲手把右搖桿（gamepad.js）
   invertY: { type: 'boolean', default: false, label: '反轉 Y 軸' },
   // Phase 6（§23.2）：鏡頭段位（camera.js WALK_DISTS / CAR_DISTS·BIKE_DISTS 索引）；舊存檔缺鍵 → 預設 1（中段）
   camWalkView: { type: 'number', min: 0, max: 2, step: 1, default: 1, label: '步行鏡頭距離' },

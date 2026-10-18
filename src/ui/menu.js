@@ -1,6 +1,6 @@
 // 選單 UI：開始畫面（含內容標示）、暫停選單（繼續 / 地圖 / 圖鑑 / 設定 / 操作說明 / 統計 / 全螢幕 / 回主選單）、選單內確認對話框
 // 狀態與鍵盤導覽由 menu-model.js 決定，本檔只負責 DOM、事件與把效果轉成 bus 事件 / settings.set
-// 依賴全部注入（settings / bus / keymapHelp / touchHelp / getStats / getMoney / hasSave / mapView / onOpenGuide），不 import src/core/**
+// 依賴全部注入（settings / bus / keymapHelp / touchHelp / gamepadHelp / getStats / getMoney / hasSave / mapView / onOpenGuide），不 import src/core/**
 // 「圖鑑」只在有給 onOpenGuide 時列出：點下後選單關閉（不 emit game:pause）並呼叫 onOpenGuide()，圖鑑關閉後由整合層決定回暫停選單或繼續
 // 音效：選單操作一律 bus.emit('ui:sound', { kind })（開頁 / 開選單 open、繼續 close、開始 / 確定 confirm、返回 / 取消 cancel、其餘 click）
 // 天氣（Phase 5）：設定列 key 'weather'（enum auto / clear / rain / fog，預設 auto）寫進 settings（core/settings.js schema 已有此鍵、會持久化）；
@@ -37,6 +37,7 @@ const SETTING_ROWS = [
   },
   { key: 'lookSensMouse', type: 'range', label: '滑鼠靈敏度', min: 0.3, max: 3, step: 0.1, fmt: mul },
   { key: 'lookSensTouch', type: 'range', label: '觸控靈敏度', min: 0.3, max: 3, step: 0.1, fmt: mul },
+  { key: 'lookSensPad', type: 'range', label: '手把靈敏度', min: 0.3, max: 3, step: 0.1, fmt: mul },
   { key: 'invertY', type: 'toggle', label: '反轉 Y 軸' },
   // Phase 6（§23.2）：鏡頭段位（數值 option；遊戲中按 V 改段位也會寫回這兩鍵）
   { key: 'camWalkView', type: 'segment', label: '步行鏡頭', options: VIEW_OPTIONS, note: '遊戲中按 V 也可切換' },
@@ -90,6 +91,7 @@ export function createMenu({
   bus,
   keymapHelp = [],
   touchHelp = [],
+  gamepadHelp = [],
   isTouch = false,
   attribution = '',
   getStats = () => ({}),
@@ -378,6 +380,7 @@ export function createMenu({
   const helpSets = [
     ['keyboard', '鍵盤', keymapHelp],
     ['touch', '觸控', touchHelp],
+    ['gamepad', '手把', gamepadHelp],
   ].filter(([, , list]) => Array.isArray(list) && list.length);
   let helpTab = isTouch && helpSets.some((s) => s[0] === 'touch') ? 'touch' : helpSets[0] ? helpSets[0][0] : null;
   const helpTabBtns = new Map();
