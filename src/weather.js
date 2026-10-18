@@ -2,7 +2,7 @@
 //
 // 對外 API（docs 不可改，介面以本檔頭為準）：
 //   createWeather({ scene, camera, quality, THREE, rng, auto, initial }) →
-//     { update(dt, simDt), setWeather(kind, opts), getState(), getEnv(), setQuality(q), setAuto(on), stats(), dispose() }
+//     { update(dt, simDt), setWeather(kind, opts), getState(), getEnv(), setQuality(q), getTier(), setAuto(on), stats(), dispose() }
 //   - scene / camera / THREE：任一缺少就不建粒子（狀態機照跑）；camera 只讀 position.x/y/z
 //   - quality：畫質 id（'low'|'mid'|'high'|'ultra'，沿用 core/quality.js qualityBudget）或 budget 物件（取 .id）；預設 high
 //   - rng：() → [0,1)，預設 Math.random（隨機切換與過場長度用）
@@ -271,6 +271,7 @@ export function createWeather({ scene = null, camera = null, quality = 'high', T
     getState: () => state,
     getEnv: () => env,
     setQuality,
+    getTier: () => tier, // 目前畫質 id（environment → neon 濕亮 / 閃爍開關；不配置物件）
     setAuto(on) {
       autoOn = !!on;
       hold = randRange(HOLD_MIN, HOLD_MAX);

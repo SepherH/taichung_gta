@@ -16,12 +16,17 @@
 //     { sky: {r,g,b}, fog: { color: {r,g,b}, near, far }, hemi: { intensity, color, groundColor }, sun: { intensity, color },
 //       weather: { rain, fog }, day, night }
 // 呼叫順序（整合層）：dayNight.update(dt, focus) → weather.update(dt, simDt) → environment.update(dt, { dayNight, weather })
+// v1-neon：夜間天空 / 霧往 Vice City 深紫偏移（NIGHT_TINT，白天 night = 0 不變；霧色仍 = 天空色）；
+//   並驅動 neon.js（招牌閃爍 uniform、濕亮路面），畫質 id 取 weather.getTier()（未提供則沿用 neon 目前值）
+import { updateNeon } from './neon.js';
 
 const CLEAR = { rain: 0, fog: 0, fogNearMul: 1, fogFarMul: 1, sunMul: 1, hemiMul: 1, overcast: 0, haze: 0 };
 const FALLBACK_SKY = { r: 0.36, g: 0.58, b: 0.82 };
 const FALLBACK_HEMI_SKY = { r: 0.62, g: 0.79, b: 1 };
 const FALLBACK_HEMI_GROUND = { r: 0.1, g: 0.14, b: 0.07 };
 const WHITE = { r: 1, g: 1, b: 1 };
+// 夜色參數表（v1-neon）：天空 / 霧往深紫混合 amt × night（雨 / 陰天灰化後重新帶回紫調）
+const NIGHT_TINT = { color: { r: 0.075, g: 0.035, b: 0.16 }, amt: 0.35 };
 
 function num(v, d) {
   return Number.isFinite(v) ? v : d;
@@ -72,6 +77,7 @@ export function createEnvironment({
   let vd = viewDist;
   let range = fogRange(vd, fogNear, fogFar, fogNearRatio);
 
+  const neonIn = { night: 0, rain: 0, tier: null }; // updateNeon 參數（重用，每幀不配置）
   const params = {
     sky: rgb(),
     fog: { color: rgb(), near: range.near, far: range.far },
@@ -125,6 +131,14 @@ export function createEnvironment({
       sky.b += (g * 1.02 - sky.b) * haze * 0.6;
     }
 
+    // 夜間深紫（Vice City）：night = 0 時不動
+    const nt = night * NIGHT_TINT.amt;
+    if (nt > 0) {
+      sky.r += (NIGHT_TINT.color.r - sky.r) * nt;
+      sky.g += (NIGHT_TINT.color.g - sky.g) * nt;
+      sky.b += (NIGHT_TINT.color.b - sky.b) * nt;
+    }
+
     // 霧：色同天空（遠處融入背景）；距離 = 視距夾過的基準 × 天氣倍率
     copyRgb(params.fog.color, sky);
     params.fog.far = range.far * num(w.fogFarMul, 1);
@@ -143,6 +157,12 @@ export function createEnvironment({
     towardGrey(params.hemi.groundColor, overcast * 0.3, 0.9);
 
     if (apply) applyToScene(dn);
+
+    const ws = src && src.weather;
+    neonIn.night = night;
+    neonIn.rain = rain;
+    neonIn.tier = ws && typeof ws.getTier === 'function' ? ws.getTier() : null;
+    updateNeon(dt, neonIn);
   }
 
   function applyToScene(dn) {

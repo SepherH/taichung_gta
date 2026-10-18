@@ -6,6 +6,7 @@
 // 外牆依建築類型與固定亂數分成帷幕玻璃（glass_blue / glass_dark）、石材（stone_cream / stone_granite，住宅與低層）、混凝土（施工中 / 頂蓋），
 //   每組一個 draw call；屋頂合併成一組混凝土。先用 canvas 窗格貼圖，再由 street.js applyTile 換成 public/art/tiles/ 可平鋪貼圖（失敗保留 canvas）：
 //   玻璃 = 一開間 × 一層一張、窗光 emissiveMap 保留 canvas；石材 = uv1（公尺）平鋪，canvas 窗格改在 shader 疊乘成白天窗洞、emissiveMap 照舊。
+// 霓虹招牌由 neon.js 產生（buildNeon，掛在名稱牌之後）。
 // 末尾接上 facade.js 的樓宇細節（女兒牆、退台、騎樓、雨棚、陽台）；有屋頂退台者主體降 tierH，總高維持 OSM 高度（colliders 不變）。
 // 紅橋 glb 載入成功時移除 qiuhonggu.js 的程序化紅橋網格（main.js 先建 qiuhonggu、後載地標，只能在這裡銜接）。
 import * as THREE from 'three';
@@ -16,6 +17,7 @@ import { registerNight } from './daynight.js';
 import { buildFacadeDetails } from './facade.js';
 import { applyTile } from './street.js';
 import { RED_BRIDGE_LANDMARK_ID, dropProceduralRedBridge } from './qiuhonggu.js';
+import { buildNeon } from './neon.js';
 
 const FACADE_SEED = 20260930; // 樓宇細節固定種子
 const LOW_RISE_H = 18; // 低層（約 5 層以下，推測門檻）：商業 / 一般建築改用石材外牆
@@ -394,7 +396,7 @@ function wallMaterial(skin, anisotropy, seed) {
 }
 
 // landmarks：src/landmarks/index.js 的 loadLandmarkModels() 結果（Map<id, { entry, object }>；OSM 建築為數字 id）
-// 回傳 { meshes, colliders: [{ id, poly, base, h, name }], plates, overridden: [id], landmarkObjects, facade }
+// 回傳 { meshes, colliders: [{ id, poly, base, h, name }], plates, overridden: [id], landmarkObjects, facade, neon }
 // colliders：base = 底部高度（terrain.buildingBase）、h = 自底部起算的 OSM 高度（牆頂 / 退台頂 = base + h）
 export function buildBuildings(scene, { anisotropy = 4, landmarks = new Map() } = {}) {
   const terrain = getTerrain();
@@ -471,5 +473,9 @@ export function buildBuildings(scene, { anisotropy = 4, landmarks = new Map() } 
 
   scene.add(facade.group);
   const plates = buildPlates(scene, plateList, anisotropy);
-  return { meshes, colliders, plates, overridden, landmarkObjects, facade };
+  // 霓虹招牌（v1-neon）：填充透天厝店面帶 / 直立招牌、大樓頂 / 側面；單一 mesh（+1 draw call），夜間亮度走 registerNight
+  const neon = buildNeon(scene, {
+    THREE, registerNight, buildings, roads: surfaceRoads, terrain, bodies: facade.bodies, skip: new Set(replaced.keys()), anisotropy,
+  });
+  return { meshes, colliders, plates, overridden, landmarkObjects, facade, neon };
 }

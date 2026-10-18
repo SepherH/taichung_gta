@@ -13,6 +13,7 @@ import { triangulate, pointInPolygon, polygonArea } from './geom.js';
 import { getTerrain, heightAt as terrainHeightAt, buildPatchMesh, drapeTriangle, drapeRibbon, SURFACES } from './terrain.js';
 import { makeCanvas, mulberry32, buildTextAtlas, fitText } from './utils.js';
 import { registerNight } from './daynight.js';
+import { registerWetSurface } from './neon.js';
 import { buildStreetDetails, applyTile, dropVertexColors } from './street.js';
 
 // 各圖層高度（拉開間距避免 z-fighting）
@@ -806,6 +807,7 @@ export function buildWorld(scene, { anisotropy = 4 } = {}) {
     const mat = new THREE.MeshStandardMaterial({ map: makeAsphaltTexture(anisotropy), vertexColors: true, roughness: 0.92, ...layer(4) });
     // asphalt 貼圖自帶柏油深灰：關掉依類型的頂點色，與 street.js 路口鋪面（同一貼圖、同一 UV 尺度）一致不露接縫
     applyTile(mat, 'asphalt', { uvUnit: ROAD_UV, anisotropy, onApply: dropVertexColors });
+    registerWetSurface(mat); // 夜間 / 雨天濕亮（neon.js；mid 以上）
     group.add(flatMesh(w, mat));
   }
 

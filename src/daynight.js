@@ -15,20 +15,28 @@ export function registerNight(material, max = 1) {
   nightMaterials.push({ material, max });
   return material;
 }
+export function unregisterNight(material) {
+  for (let i = nightMaterials.length - 1; i >= 0; i--) {
+    if (nightMaterials[i].material === material) nightMaterials.splice(i, 1);
+  }
+}
 
 // 天空色關鍵影格（小時, 顏色）
+// v1-neon（Vice City）：白天（引擎 day=1 的 6.75–17.25 全段）與舊版完全相同；黃昏洋紅 / 橘紫、夜晚深藍紫、黎明紫粉
 const SKY_KEYS = [
-  [0, '#0a0f24'],
-  [4.5, '#0d1330'],
-  [5.4, '#3a3560'],
+  [0, '#120a30'],
+  [4.5, '#160d38'],
+  [5.4, '#4a2a6e'],
   [6.2, '#f2a36b'],
   [7.4, '#a8cdee'],
   [12, '#8ec5f2'],
   [16.5, '#a3c9ea'],
   [17.7, '#f0a060'],
-  [18.5, '#6a4a78'],
-  [19.4, '#1a1c40'],
-  [24, '#0a0f24'],
+  [17.9, '#ff6f61'],
+  [18.4, '#d9428c'],
+  [18.9, '#7a2e8e'],
+  [19.6, '#2a1652'],
+  [24, '#120a30'],
 ];
 const SKY_COLORS = SKY_KEYS.map(([h, c]) => [h, new THREE.Color(c)]);
 
@@ -67,13 +75,14 @@ export class DayNight {
     scene.add(this.sun.target);
 
     this._dir = new THREE.Vector3();
+    // 夜間色（v1-neon）：月光偏紫、半球光天側藍紫 / 地側暗紫（霓虹街道的環境色）
     this._warm = new THREE.Color(0xffb070);
     this._white = new THREE.Color(0xfff6e8);
-    this._moon = new THREE.Color(0x8899ff);
+    this._moon = new THREE.Color(0x9a86ff);
     this._hemiDaySky = new THREE.Color(0xcfe6ff);
-    this._hemiNightSky = new THREE.Color(0x6070b0);
+    this._hemiNightSky = new THREE.Color(0x6a5cb8);
     this._hemiDayGround = new THREE.Color(0x5a6a48);
-    this._hemiNightGround = new THREE.Color(0x303040);
+    this._hemiNightGround = new THREE.Color(0x3a2a4a);
 
     this.base = {
       hour: this.hour,

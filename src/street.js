@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { SpatialGrid, closestOnSegment, closestOnPolygon, pointInPolygon, polygonBBox, samplePolyline } from './geom.js';
 import { makeCanvas, mulberry32 } from './utils.js';
+import { registerWetSurface } from './neon.js';
 
 // 測試 / 除錯用開關（false 時回傳空群組）
 export const ENABLE_STREET = true;
@@ -925,6 +926,7 @@ export function buildStreetDetails({
   applyTile(walkMat, 'sidewalk_gray', { uvUnit: SIDEWALK_UV, anisotropy, onApply: releaseSlab });
   applyTile(stripMat, 'sidewalk_redbrick', { uvUnit: SIDEWALK_UV, anisotropy, onApply: releaseSlab });
   applyTile(asphaltMat, 'asphalt', { uvUnit: JUNCTION_UV, anisotropy, onApply: dropVertexColors });
+  registerWetSurface(asphaltMat); // 與車道同步濕亮（neon.js）
   const markMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.8, ...layer(7) });
   const pitMat = new THREE.MeshStandardMaterial({ map: makeGrateTexture(anisotropy), roughness: 0.85, metalness: 0.2, ...layer(1) });
   const furnMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.3 });
