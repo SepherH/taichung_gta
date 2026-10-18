@@ -51,6 +51,12 @@
 // V3 街頭隨機犯罪事件（§32）：createStreetEvents（street-events.js 純邏輯排程）+ createStreetWorld（徵用骨架行人 / 事件車 / 既有警車 adapters / gangs.skirmish）；
 //   每幀 updateStreetEvents 接在 updateExplosions / handleCarKo 之後（手機 / BUSTED・WASTED / 噴漆 → 凍結；搶劫 / 警車任務 / 委託類 → 不生成新事件、既有照常收尾）；
 //   事件歹徒 / 罪犯車經 vigHooks 豁免犯行；street:start 80 m 內 toast、小地圖 kind 'street-event' 黃點閃爍；開新局 / 回主選單 → cancelStreetEvents()
+// 街頭競速（Phase 12，§34）：createRaces（missions/race.js 純邏輯，RACES 三條七期地標賽道）+ createRivalWorld（對手車 = vehicles.adopt + dmg.attach、
+//   沿 findRoute 路網開往下一檢查點）+ createRaceHud（任務條 / 倒數 / 方向箭頭）+ 起點橘色光柱、檢查點大光柱圈 + 小地圖旗幟 'race-start' / 'race-cp'；
+//   駕車進起點光柱時互動鍵（E / 手把 B / tb-interact）優先給 raceInteractable（有星數 toast 不開賽）；倒數中玩家車煞停（races.locked）；
+//   每幀 updateRace 接在 updateVigilante 之後（手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆 / 搶劫 / 警車任務中不推進、對手車煞停）；
+//   互斥：state.racing（getter）併入 otherMissionBusy（警車任務）與搶劫守門、vigHooks.active 併入（委託類 / 噴漆）；比賽中犯行照常；
+//   vigHooks.end 併入退賽（BUSTED / WASTED）；開新局 / 回主選單 → cancelRace()；最佳成績存檔 races.best（races.serialize / restore）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -133,6 +139,7 @@ import { createBeaconPool } from './missions/light-pillar.js';
 import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
+import { createRaces, createRivalWorld, createRaceHud, arrowAngle as raceArrowAngle, promptText as racePromptText, CP_RADIUS as RACE_CP_RADIUS } from './missions/race.js';
 import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 import { createStreetEvents, createStreetWorld } from './street-events.js';
 
@@ -152,6 +159,10 @@ const CLERK_COLORS = { shirt: '#2E7D32', pants: '#1B3A1F' }; // 店員綠色系�
 const CLERK_HP = 100;
 const VIG_URGENT_SEC = 30; // 警車任務條剩此秒數內轉紅（.vig-urgent）
 const VIG_PRIORITY = 4; // 警車任務互動優先序（高於委託 3：駕駛警車時 E 優先開始警車任務）
+const RACE_LOCK_CONTROLS = Object.freeze({ throttle: 0, steer: 0, brake: 1, handbrake: true }); // 倒數鎖車控制（重用，不每幀配置）
+const RACE_PRIORITY = 5; // 街頭競速起點互動優先序（高於警車任務 4 / 委託 3：駕車進起點光柱時 E 優先開賽）
+const RACE_CP_BEACON = { height: 45, radius: RACE_CP_RADIUS, sink: 2 }; // 競速檢查點大光柱圈（半徑 = 通過判定半徑 12 m；顏色 BEACON_COLORS.race 橘 #fb8c00）
+const RACE_SPAWN_PAD = 2.5; // 對手車生成格位離建築輪廓至少（m，buildingAt pad）
 const STORE_BEACON = { height: 7, radius: 0.7, sink: 1 }; // 超商門口小光柱（createBeaconPool 選項；顏色 BEACON_COLORS.store 綠 #43a047）
 const AUTOSAVE_SEC = 15; // 自動存檔間隔（s）
 const MAX_STEP_DIST = 30; // 單幀位移超過此值（傳送 / 重生）不計入里程（m）
@@ -1049,6 +1060,7 @@ async function init() {
     pushAll(out, robberyMarkers);
     pushAll(out, fugitiveMarkers());
     pushAll(out, streetMarkers());
+    pushAll(out, raceMarkers());
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1074,7 +1086,7 @@ async function init() {
   // interactable 仲裁的候選（重用）；小吃 / 彈藥只在步行時問
   const interCands = [null, null, null, null];
   const nearestInteractable = (pos, walking) => {
-    interCands[0] = vigilante.active ? null : missions.nearest(pos); // 警車任務進行中不接委託（互斥）
+    interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos); // 警車任務 / 街頭競速進行中不接委託（互斥）
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1194,6 +1206,7 @@ async function init() {
         weapons: weapons.serialize(),
         missions: missions.serialize(),
         collect: { checkins: checkins.serialize(), foods: food.serialize() },
+        races: races.serialize(), // Phase 12：街頭競速最佳成績（無紀錄 = null，存檔省略）
       };
     },
   });
@@ -1749,7 +1762,7 @@ async function init() {
   // 警車：警力生成的警車（policeAdapters，含被玩家開走的）或路邊停放的 police 車型
   const isPoliceCar = (v) => !!v && (v.type === 'police' || policeAdapters.isPoliceVehicle(v));
   // 其他任務進行中（委託 / 外送 / 追垃圾車 / 打工 / 搶劫 / 噴漆）→ 不可開始警車任務
-  const otherMissionBusy = () => !!(missions.active() || missions.eventActive() || missions.jobActive() || robberies.active || state.spraying);
+  const otherMissionBusy = () => !!(missions.active() || missions.eventActive() || missions.jobActive() || robberies.active || state.spraying || state.racing); // state.racing：街頭競速段定義的 getter
   const vigCtx = {
     player: { x: 0, z: 0 },
     inPolice: false,
@@ -1935,6 +1948,7 @@ async function init() {
     robCtx.player.z = p.z;
     robCtx.player.yaw = player.yaw;
     robCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0 || state.respawn || combat.isDown(player.actor) || vigilante.active); // 倒地 / KO / 送醫中 / 警車任務中不能搶
+    if (state.racing) robCtx.onFoot = false; // 街頭競速中（下車 10 s 內）也不能搶（互斥）
     robCtx.aiming = robCtx.onFoot && aim.aiming;
     setRobBar(robberies.update(dt, robCtx));
   };
@@ -1969,6 +1983,109 @@ async function init() {
     if (traffic.ambient) traffic.ambient.setContext(ambientCtx);
   };
   const ambientCtx = { hour: 12, aiming: false, aimDirX: 0, aimDirZ: 1 };
+
+  // ---------- 街頭競速（Phase 12，§34）：src/missions/race.js（純邏輯 + 對手車世界介面 + HUD）+ 起點 / 檢查點光柱 + 小地圖旗幟 ----------
+  const races = createRaces({ bus, rng: Math.random });
+  // 對手車：一般動態剛體車（會被撞、會撞車流車）；回收時保留玩家正駕駛 / 上車 / 搶車中的車，併入 adopted
+  const rivalWorld = createRivalWorld({
+    vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng: Math.random,
+    isFree: (x, z) => !buildingAt(x, z, RACE_SPAWN_PAD),
+    isKept: (v) => v === state.vehicle || v === cj.vehicle,
+    onKeep: (v) => adopted.add(v),
+  });
+  const raceHud = createRaceHud({ root: document.body });
+  const raceStartBeacons = createBeaconPool({ scene, heightAt });
+  const raceCpBeacons = createBeaconPool({ scene, heightAt, ...RACE_CP_BEACON });
+  // 互斥旗標：警車任務段的 otherMissionBusy、搶劫守門讀 state.racing（getter，不另存狀態）
+  Object.defineProperty(state, 'racing', { get: () => races.active, enumerable: true, configurable: true });
+  // vigHooks.active = 「排他任務進行中」（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口）：併入競速
+  const vigActiveHook = vigHooks.active;
+  vigHooks.active = () => vigActiveHook() || races.active;
+  // BUSTED / WASTED：beginRespawn → vigHooks.end(kind) → 退賽（races 另訂閱 player:busted / player:wasted 保底）
+  const vigEndHook = vigHooks.end;
+  vigHooks.end = (kind) => {
+    vigEndHook(kind);
+    races.end(kind);
+    raceHud.set(null);
+  };
+  const raceMk = [];
+  const raceMarkers = () => {
+    raceMk.length = 0;
+    return races.markers(raceMk);
+  };
+  let raceCar = null; // 開賽 / 比賽中駕駛的車（耐久歸零 = 車毀退賽）
+  const raceCtx = {
+    player: { x: 0, z: 0 },
+    inCar: false,
+    wrecked: false,
+    world: rivalWorld,
+    earn: (n) => economy.add(n, 'race'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+  };
+  const raceBusy = () => otherMissionBusy() || vigilante.active;
+  const startRace = (id) => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const p = playerPos();
+    // 熄火 / 翻車 / 未停車（車速 ≥ START_MAX_SPEED）→ races.start toast 不開賽
+    const car = v ? { speed: v.speed || 0, stalled: dmg.healthOf(v) === 0, overturned: !!v.fallen || v.isOverturned() } : {};
+    if (races.start(id, { inCar: !!v, player: { x: p.x, z: p.z }, stars: wanted.stars, busy: raceBusy(), toast: raceCtx.toast, ...car })) raceCar = v;
+  };
+  const raceInter = { text: '', priority: RACE_PRIORITY, dist: 0, raceId: null, act: () => startRace(raceInter.raceId) };
+  // 駕車在某賽道起點光柱內、未開賽、無其他任務 → 互動提示（有星數仍顯示，按下 toast 提示不開賽）
+  const raceInteractable = (v) => {
+    if (!v || races.active || state.respawn || raceBusy()) return null;
+    const def = races.nearestStart(v.pos.x, v.pos.z);
+    if (!def) return null;
+    raceInter.text = racePromptText(def);
+    raceInter.raceId = def.id;
+    return raceInter;
+  };
+  // 光柱：未開賽 → 各起點橘色光柱；比賽中 → 下一個檢查點大光柱圈（換點時重放）
+  const raceBeaconAt = { start: false, cp: null };
+  const syncRaceBeacons = (dt) => {
+    const b = races.beacons();
+    const wantStarts = b.starts.length > 0;
+    if (wantStarts !== raceBeaconAt.start) {
+      raceStartBeacons.releaseAll();
+      if (wantStarts) for (const s of b.starts) raceStartBeacons.acquire('race', s.x, s.z, s);
+      raceBeaconAt.start = wantStarts;
+    }
+    if (b.checkpoint !== raceBeaconAt.cp) {
+      raceCpBeacons.releaseAll();
+      if (b.checkpoint) raceCpBeacons.acquire('race', b.checkpoint.x, b.checkpoint.z, b.checkpoint);
+      raceBeaconAt.cp = b.checkpoint;
+    }
+    raceStartBeacons.update(dt);
+    raceCpBeacons.update(dt);
+  };
+  // 暫停 / 全螢幕面板（updateGame 不跑）、手機開著、BUSTED・WASTED、噴漆中、搶劫中、警車任務中：不推進（計時停、HUD 維持）、對手車煞停
+  const updateRace = (dt, skip) => {
+    if (skip || !!state.respawn || !!state.spraying || !!robberies.active || vigilante.active) {
+      rivalWorld.brakeAll();
+      syncRaceBeacons(0);
+      return;
+    }
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    if (v && races.active) raceCar = v;
+    const p = playerPos();
+    raceCtx.player.x = p.x;
+    raceCtx.player.z = p.z;
+    raceCtx.inCar = !!v;
+    raceCtx.wrecked = !!raceCar && dmg.healthOf(raceCar) === 0;
+    rivalWorld.update(dt);
+    const r = races.update(dt, raceCtx);
+    if (!r.active) raceCar = null;
+    const yaw = v ? v.yaw : player.yaw;
+    raceHud.set(r, r.next ? raceArrowAngle(p.x, p.z, yaw, r.next.x, r.next.z) : 0);
+    syncRaceBeacons(dt);
+  };
+  // 回主選單 / 開局：無聲退賽（對手車回收、HUD 收起、光柱回起點）
+  const cancelRace = () => {
+    races.cancel();
+    raceCar = null;
+    raceHud.set(null);
+    syncRaceBeacons(0);
+  };
 
   // ---------- V2 幫派地盤（src/gangs.js，純邏輯）+ 幫派車（createGangCars：一般車型換幫派車色、前座兩名幫派配色乘客）----------
   // 每幀 updateGangs（updateVigilante 之後）；暫停 / 全螢幕面板（updateGame 不跑）、手機、BUSTED・WASTED、噴漆中 → frozen（成員停手、幫派車煞停）
@@ -2543,6 +2660,11 @@ async function init() {
       const braked = phoneOpen || !!state.spraying;
       v.setControls(braked ? driveControls({ x: 0, y: 0 }, true) : driveControls(snap.move, snap.down.jump));
       lastThrottle = braked ? 0 : snap.move.y;
+      if (races.locked) {
+        // 街頭競速 3–2–1 倒數：玩家車鎖定（全煞 + 手煞，煞停並維持位置；開賽已要求低速）
+        v.setControls(RACE_LOCK_CONTROLS);
+        lastThrottle = 0;
+      }
       if (input.actions.down('horn')) v.honk(); // 按住連續響（honk 自帶冷卻）
       // Q（或觸控 tb-radio 送的虛擬 KeyQ）：駕駛中 = 換台（步行時 Q 仍是換武器，見 handleWeaponInput）
       if (input.actions.pressedIn('radioNext', 'vehicle')) radio.next();
@@ -2563,6 +2685,7 @@ async function init() {
     if (!phoneOpen) updateSprayShops(dt);
     updateRobberies(dt, phoneOpen);
     updateVigilante(dt, phoneOpen);
+    updateRace(dt, phoneOpen);
     updateGangs(dt, phoneOpen);
     updateExplosions(dt);
     handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
@@ -2609,7 +2732,8 @@ async function init() {
       if (flipped) vehiclePrompt = '翻車了！按 F 扶起';
       else if (dmg.healthOf(v) === 0) vehiclePrompt = '車子熄火了，按 F 下車';
       // 駕駛中也可接委託 / 打卡（E）；小吃與彈藥只在步行
-      inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
+      inter = raceInteractable(v); // 街頭競速起點優先（比賽中 / 其他任務中回 null）
+      if (!inter) inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
@@ -2911,6 +3035,7 @@ async function init() {
     resetExtraStats(save.stats);
     closePanels();
     cancelVigilante();
+    cancelRace();
     gangs.cancel();
     clearExplosions();
     cancelStreetEvents();
@@ -2922,6 +3047,7 @@ async function init() {
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
     missions.restore(save.missions);
+    races.restore(save.races); // 舊存檔無 races → 清空最佳成績
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -2982,6 +3108,7 @@ async function init() {
     state.mode = 'walk';
     player.locked = false;
     cancelVigilante();
+    cancelRace();
     gangs.cancel();
     clearExplosions();
     cancelStreetEvents();
@@ -3073,6 +3200,8 @@ async function init() {
       robberies, clerks,
       // Phase 11：警車任務（vigilante.fugitives 看逃犯車狀態；fugitiveWorld.cars = 受控逃犯車）
       vigilante, fugitiveWorld, vigBar,
+      // Phase 12：街頭競速（races.start('qiqi-classic') 除錯開賽；races.rivals 看對手車進度；rivalWorld.cars = 受控對手車）
+      races, rivalWorld, raceHud,
       // V3：街頭事件（streetEvents.events 看各 slot；streetWorld.stats() 看事件車 / 待回收行人）
       streetEvents, streetWorld,
       // 補手槍備彈（回實際加入數，上限 120）

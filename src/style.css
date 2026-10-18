@@ -1592,3 +1592,62 @@ body.touch .rob-bar {
   border-color: rgba(255, 23, 68, 0.95);
   color: #ffd0d8;
 }
+
+/* 街頭競速 HUD（Phase 12，src/missions/race.js createRaceHud）：上方中央任務條（與委託 / 警車任務互斥，共用位置）、
+   畫面中央大字倒數 3–2–1 / GO!、任務條下方指向下一個檢查點的箭頭（main.js 依車頭方向每幀設 rotate） */
+.race-bar {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 55;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: rgba(12, 16, 32, 0.72);
+  border: 1px solid rgba(251, 140, 0, 0.9);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--tg-ui-scale, 1));
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.race-count {
+  position: fixed;
+  top: 32%;
+  left: 50%;
+  z-index: 56;
+  color: #ffb74d;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(56px, 8vw, 120px) * var(--tg-ui-scale, 1));
+  font-weight: 900;
+  text-shadow: 0 0 12px rgba(251, 140, 0, 0.8), 0 3px 6px rgba(0, 0, 0, 0.8);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.race-arrow {
+  position: fixed;
+  top: calc(52px + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 55;
+  color: #fb8c00;
+  font-size: calc(28px * var(--tg-ui-scale, 1));
+  line-height: 1;
+  text-shadow: 0 0 4px #000, 0 2px 4px rgba(0, 0, 0, 0.8);
+  transform: translateX(-50%);
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.race-bar[hidden],
+.race-count[hidden],
+.race-arrow[hidden] {
+  display: none !important;
+}

@@ -34,6 +34,8 @@ export const MARKER_LABELS = {
   fugitive: '逃犯車', // Phase 11：警車任務（src/missions/vigilante.js）
   store: '超商', // Phase 9：超商搶劫（src/wanted/robbery.js）
   'street-event': '街頭事件', // V3：街頭隨機犯罪事件（src/street-events.js，短暫閃爍）
+  'race-start': '競速起點', // Phase 12：街頭競速（src/missions/race.js）
+  'race-cp': '競速檢查點',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);

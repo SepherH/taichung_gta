@@ -5,6 +5,8 @@
 // schema v2（契約 §18）：新增 weapons / missions / collect 與三個統計欄位；v1 存檔讀入時補預設、保留原有全部值
 // Phase 5（§18 增補，不升版）：missions.events（時段事件，missions/events.js serialize）選填——
 //   { completed: { id: 正整數 }, cooldowns: { id: 正秒數 } }；格式錯誤整欄丟棄（不影響其他欄位），清洗後兩表皆空也省略
+// Phase 12（§34 增補，不升版）：races（街頭競速，missions/race.js serialize）選填頂層欄位——{ best: { raceId: 正秒數 } }；
+//   舊存檔沒有此欄 → 省略（無最佳成績）；格式錯誤整欄丟棄、非法值的鍵個別丟棄，清洗後為空也省略（defaultSave 不含此欄）
 
 export const SAVE_VERSION = 2;
 
@@ -97,6 +99,14 @@ function missionEvents(src) {
   return { completed, cooldowns };
 }
 
+// 街頭競速最佳成績（races）：必須是物件且 best 為物件，否則整欄作廢（回 null）；best 只收 > 0 的有限秒數；空 → null
+function raceRecords(src) {
+  if (!isObj(src) || !isObj(src.best)) return null;
+  const best = numMap(src.best, false);
+  for (const k of Object.keys(best)) if (!(best[k] > 0)) delete best[k];
+  return Object.keys(best).length ? { best } : null;
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -158,6 +168,8 @@ export function validateSave(obj) {
   const cl = isObj(m.collect) ? m.collect : {};
   out.collect.checkins = strList(cl.checkins);
   out.collect.foods = strList(cl.foods);
+  const rc = raceRecords(m.races);
+  if (rc) out.races = rc;
   return out;
 }
 

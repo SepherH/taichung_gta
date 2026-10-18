@@ -58,7 +58,7 @@ const GROUPS = [
     'fugitiveWorld.update(dt);',
   ]],
   ['互動鍵：駕駛中 vigilanteInteractable 優先', ['inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);']],
-  ['互斥：任務中 nearestInteractable 不列委託', ['interCands[0] = vigilante.active ? null : missions.nearest(pos);']],
+  ['互斥：任務中 nearestInteractable 不列委託', ['interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos);']],
   ['掛鉤 vigHooks（通緝段宣告預設無作用、警車任務段覆寫）', [
     'const vigHooks = { fugitiveActor: () => false, fugitiveShot: () => false, end: () => {}, active: () => false };',
     'vigHooks.fugitiveActor = (a) => vigilante.isFugitiveActor(a);',

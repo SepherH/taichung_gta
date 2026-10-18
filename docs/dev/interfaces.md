@@ -49,6 +49,10 @@
 | `vigilante:level` | `{ level, phase: 'start', count, timeSec, speed }`（每關開始）/ `{ level, phase: 'clear', reward, earned }`（全部制伏，賞金已 `ctx.earn`） | missions/vigilante.js |
 | `vigilante:end` | `{ reason: 'timeout'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'cancel', levels, earned, level }`（levels = 完成關數、earned = 本次共得 NT$） | missions/vigilante.js |
 | `vigilante:subdued` | `{ id, level, x, z, remaining }`（單台逃犯車制伏；附加事件） | missions/vigilante.js |
+| `race:start` | `{ id, name, rivals, checkpoints, countdown }`（駕車在起點光柱內按互動鍵開賽；開始 3–2–1 倒數） | missions/race.js（§34） |
+| `race:checkpoint` | `{ id, index, total, time, rank, name }`（玩家依序通過第 index 個檢查點；time = 比賽秒數、rank = 當下名次） | missions/race.js |
+| `race:finish` | `{ id, name, rank, total, time, reward, best, newBest }`（玩家過終點；獎金已 `ctx.earn`、最佳成績已更新） | missions/race.js |
+| `race:abort` | `{ id, reason: 'left'\|'wrecked'\|'busted'\|'wasted'\|'cancel', time, cp }`（退賽；對手車已回收） | missions/race.js |
 | `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
 | `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
@@ -1056,6 +1060,40 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 33.5 回歸
 - `node tools/test/v5-police.mjs`（純邏輯 + 替身，無 three：星數行為表、直升機出現 / 離開 / 射手、避障高度、探照燈 seen、打下墜毀、命中率曲線、清除條件、上限、cancel、幀率無關、每幀成本）；`p7-police` / `p7-adapters` / `p7-ui` / `integration-p7` 不放寬
+
+## 34. Phase 12 街頭競速 Street Race（P12；接線點在 `src/main.js`，介面以 `src/missions/race.js` 檔頭為準）
+
+### 34.1 模組介面（`src/missions/race.js`，純邏輯，不 import three / rapier；DOM 只在 `createRaceHud`）
+- `RACES`：3 條賽道 `{ id, name, difficulty 1–3, rivals 2–3, start: { name, x, z, heading, src }, checkpoints: [{ name, x, z, src }] × 5–7 }`——`qiqi-classic` 七期經典賽（老虎城 → 新光三越 → 大遠百 → 臺中市政府 → 國家歌劇院 → 秋紅谷）、`civic-loop` 市政環線賽（夏綠地公園 → 臺中市政府 → 捷運市政府站 → 都市發展局 → 惠中公園 → 新光三越 → 國家歌劇院）、`qiuhonggu-sprint` 秋紅谷飆速賽（秋紅谷 → 林酒店 → 惠泰公園 → 小來公園 → 第六分局 → 國家歌劇院 → 寶輝秋紅谷 → 老虎城）
+  - 點位 = 地標（OSM B 層具名建築 / L 層公園，`src` 欄註明 id）旁的車道折線頂點（= `buildRoadGraph` 節點，最大連通塊、非橋梁）；起點取 ≥ 12 m 寬車道的直線段，`heading` = 起跑方向 `atan2(dx, dz)`
+- `createRaces({ bus, rng?, config? })` → `{ update(dt, ctx) → snapshot, start(raceId, startCtx?) → boolean, cancel(), end(reason), canStart(raceId, startCtx) → { ok, reason }, nearestStart(x, z), markers(out), beacons(), serialize(), restore(data), bestOf(id), rank(), isRivalHandle(h), dispose(), active, phase, locked, race, elapsed, checkpoint, rivals, races }`
+  - `startCtx = { inCar, player: { x, z }, stars, busy, speed?, stalled?, overturned?, toast? }`；`reason` ∈ `active` / `unknown` / `notDriving` / `far`（起點 `START_RADIUS` 8 m 外）/ `busy` / `wanted` / `stalled`（熄火）/ `overturned`（翻車 / 機車倒地）/ `moving`（\|speed\| ≥ `START_MAX_SPEED` 3 m/s）；`start` 遇 `wanted` toast「被通緝中不能開賽…」、`busy` / `stalled` / `overturned` / `moving`（「先停車再開賽」）toast 後回 false；省略 `startCtx` 不檢查（除錯）
+  - `ctx = { player: { x, z }, inCar, wrecked, world, earn(n), toast?(text, sec) }`；`world` = `{ spawn(pt, { index, raceId }) → h | null, state(h) → { x, z, speed, health, exists, driven }, drive(h, { x, z, maxSpeed }), hold(h), remove(h) }`
+  - `snapshot = { active, phase: 'idle'|'countdown'|'running', raceId, name, rank, total, cp, cpTotal, time, locked, countdown: 3|2|1|null, go, next: 檢查點|null, text: '名次 n/m｜檢查點 k/K｜mm:ss.s' }`
+  - 倒數 `COUNTDOWN_SEC` 3 s：`locked` 真（整合層 `RACE_LOCK_CONTROLS` 全煞 + 手煞，煞停並維持位置）、對手車在 `gridSlots(start)`（起點兩側 ±3.5 m 並排、後排 8 m 遞補；被佔回 null 換下一格）生成並 `world.hold`；計時從 GO 起算（倒數多扣的時間計入，幀率無關）
+  - 檢查點：本幀與上幀位置連線離「下一個」檢查點 ≤ `CP_RADIUS` 12 m 即通過（掃掠判定）；漏點不算（不會跳點）；對手車同規則
+  - 對手車：`world.drive(h, 下一檢查點, DIFFICULTY_SPEED[難度] (19 / 22 / 25 m/s) × 個體差 ±4% × rubberBand(玩家進度 − 對手進度))`，橡皮筋 ±`RUBBER_MAX` 10%（進度差 150 m 飽和）；完賽後 `hold`（完賽判定優先：之後被撞毀 / 搶走不判退出）；未完賽而 `state` 不存在 / `driven`（被玩家搶走）/ 耐久 0 → 退出（名次排最後）並 `world.hold`（棄置車不再自行行駛）
+  - 名次：完賽者依完賽時間（完賽後車況不影響）；未完賽先比已過檢查點數，同檢查點再比離下一點距離；比賽中 `nearestInteractable` 遮掉委託（同警車任務）
+  - 完賽：`REWARDS` 第 1 / 2 / 3 名 NT$1000 / 400 / 150（`ctx.earn`）、toast「完賽！第 n 名｜mm:ss.s｜獎金 NT$X（｜新紀錄！）」、`best[id]` 取較小者、emit `race:finish`、對手車 `world.remove`
+  - 退賽：下車 > `LEFT_SEC` 10 s `left`、`ctx.wrecked` `wrecked`（倒數中也算）、`end('busted'\|'wasted')`（另訂閱 `player:busted` / `player:wasted` 保底）→ toast「退賽：…」；`cancel()` 無聲（仍 emit `race:abort { reason: 'cancel' }`）
+  - 標記：未開賽 → 各起點 `{ kind: 'race-start' }`；比賽中 → 下一檢查點 `{ kind: 'race-cp' }`；`beacons()` → `{ starts, checkpoint, last }`
+  - 存檔：`serialize()` → `{ best: { raceId: 秒 } }` | null；`restore(data)`（undefined = 舊存檔 → 清空）
+  - 時間吃呼叫端 dt（clamp ≤ 0.1 s），幀率無關
+- `createRivalWorld({ vehicles, dmg?, traffic?, findRoute?, rng?, isFree?, isKept?, onKeep? })` → 上述 `world` + `update(dt)` / `brakeAll()` / `dispose()` / `cars`：`vehicles.adopt`（sedan / suv，`v.ai = true`、`v.racer = true`）+ `dmg.attach`；一般動態剛體（會被撞、會撞車流車），生成後不改寫座標（不瞬移）；生成格位與既有車輛（VehicleManager / `traffic.cars`）格位座標系淨空 2.8 × 5.5 m、`isFree(x, z)` 假（建築內）回 null；駕駛同 vigilante `createFugitiveWorld`（findRoute 路線跟隨、彎道減速、卡住 2.5 s 倒車）
+- `createRaceHud({ root })` → `{ set(snapshot | null, arrowRad), dispose() }`：`.race-bar`（任務條）/ `.race-count`（3–2–1 / GO!）/ `.race-arrow`（下一檢查點方向箭頭，`arrowAngle(px, pz, yaw, tx, tz)` 順時針 rad）（`style.css`）
+- 其他：`MARKER_COLORS['race-start'] = '#fb8c00'`（小地圖 `hud.js FLAG_KINDS` 畫旗幟）、`MARKER_COLORS['race-cp'] = '#ffca28'`（`EDGE_KINDS` 貼邊）、`MARKER_LABELS` 競速起點 / 競速檢查點；`BEACON_COLORS.race = 0xfb8c00`；入帳 reason `race` 跳字「競速」；`save.js` 選填頂層欄位 `races: { best }`（不升版；舊存檔無此欄 → 省略，格式錯誤整欄丟棄）
+
+### 34.2 接線（main.js）
+- 建立（車流外部狀態段之後、幫派段之前）：`races = createRaces({ bus, rng })`、`rivalWorld = createRivalWorld({ vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng, isFree: !buildingAt(x, z, RACE_SPAWN_PAD), isKept: v === state.vehicle \|\| v === cj.vehicle, onKeep: adopted.add })`、`raceHud`、起點光柱池（220 m 柱）與檢查點光柱池（`RACE_CP_BEACON`：半徑 12 m、高 45 m）；`raceMarkers()` 併入 `collectMarkers`
+- 互斥：`state.racing`（getter = `races.active`）併入警車任務 `otherMissionBusy()` 與搶劫守門（`robCtx.onFoot = false`）；`vigHooks.active` 包裝為「警車任務 \|\| 競速」（委託 / 外送 / 垃圾車 / 打工 `extraBusy`、噴漆廠入口）；開賽 `busy` = `otherMissionBusy() \|\| vigilante.active`；比賽中犯行照常（`vigHooks.fugitiveActor / fugitiveShot` 未併入）
+- 互動：駕駛中 `inter = raceInteractable(v)`（起點 8 m 內、priority 5），null 才走 `vigilanteInteractable(v) \|\| nearestInteractable(...)`；E / 手把 B / tb-interact 同一路徑；有星數仍顯示提示，按下 toast 不開賽
+- 倒數：`races.locked` → 駕駛段 `v.setControls(driveControls({ x: 0, y: 0 }, true))`（手煞）
+- 每幀 `updateRace(dt, phoneOpen)` 接在 `updateVigilante` 之後：手機 / `state.respawn` / `state.spraying` / 搶劫 / 警車任務中不推進並 `rivalWorld.brakeAll()`；`raceCar`（開賽 / 比賽中駕駛的車）`dmg.healthOf === 0` → `wrecked`；`rivalWorld.update(dt)` → `races.update` → `raceHud.set(r, arrowAngle(玩家, 車頭 yaw, 下一點))` → 光柱同步
+- `beginRespawn` → `vigHooks.end(kind)`（包裝：先原警車任務掛鉤，再 `races.end(kind)`、收 HUD）；`quitToMenu` / `startGame` → `cancelRace()`（緊接 `cancelVigilante()`）；存檔 `getState().races = races.serialize()`、`startGame` → `races.restore(save.races)`
+- 除錯：`window.__game.races` / `rivalWorld` / `raceHud`（`races.start('qiqi-classic')` 不檢查條件直接開賽）
+
+### 34.3 回歸
+- `node tools/test/p12-race.mjs`（賽道點位在路網上、純邏輯、對手車世界 / HUD 替身、save.js 相容）、`node tools/test/integration-p12.mjs`（main.js 抽段執行 + hud / 標記 / CSS / 文件靜態檢查）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

@@ -33,6 +33,7 @@
 //   state.policeCars（[{ x, z }]，police.cars 的 pos）→ 小地圖紅藍交替閃爍點（每 POLICE_BLINK_SEC 秒換色，超出半徑不畫）
 // Phase 9（超商搶劫）：hud.setRobberyProgress(frac | null, label?) → 畫面中下（互動提示膠囊上方）進度條「搶劫中…」（.rob- 前綴，樣式在 style.css 末段）；
 //   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
+//   markers kind 'race-start'（街頭競速起點）畫橘色旗幟（FLAG_KINDS），不貼邊；'race-cp'（下一個檢查點）超出半徑時貼邊
 // V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
@@ -61,16 +62,17 @@ export const RADIO_BTN_ID = 'tb-radio';
 const RADIO_FLASH_SEC = 2.5; // 換台時台名強調顯示秒數
 // 天氣圖示（weather.getState().icon）→ 顯示字元與無障礙名稱
 export const WEATHER_ICONS = { sun: ['☀️', '晴'], rain: ['🌧️', '雨'], fog: ['🌫️', '霧'] };
-const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ', robbery: '搶劫 ', vigilante: '警車任務 ' }; // economy 入帳原因 → 跳動文字前綴（robbery = Phase 9 超商搶劫、vigilante = Phase 11 警車任務）
+const MONEY_REASON_LABEL = { event: '外送 ', garbage: '清運 ', job: '打工 ', robbery: '搶劫 ', vigilante: '警車任務 ', race: '競速 ' }; // economy 入帳原因 → 跳動文字前綴（robbery = Phase 9 超商搶劫、vigilante = Phase 11 警車任務）
 const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空白）
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event', 'race-cp']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
 const ICON_KINDS = { store: '超' }; // 畫成「色塊 + 白字」小方塊圖示的 kind（Phase 9 超商）
+const FLAG_KINDS = new Set(['race-start']); // 畫成旗幟圖示（旗桿 + 三角旗）的 kind（Phase 12 街頭競速起點），不貼邊
 const ICON_PX = 6; // 圖示方塊半邊長（螢幕 px）
 export const ROB_LABEL = '搶劫中…'; // 超商搶劫進度條預設文字（src/wanted/robbery.js PROGRESS_LABEL 同字）
 const EDGE_PAD = 9; // 貼邊標記距外框的內縮（px）
@@ -920,6 +922,29 @@ export class HUD {
         ctx.lineWidth = 1.5;
         ctx.fill();
         ctx.stroke();
+        continue;
+      }
+      if (FLAG_KINDS.has(m.kind)) {
+        // 旗幟：黑色旗桿（底端在標記點）+ 黑框色塊三角旗
+        const cx = R + dx;
+        const cz = R + dz;
+        ctx.save();
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - ICON_PX + 1, cz + ICON_PX);
+        ctx.lineTo(cx - ICON_PX + 1, cz - ICON_PX - 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx - ICON_PX + 1, cz - ICON_PX - 2);
+        ctx.lineTo(cx + ICON_PX + 2, cz - ICON_PX / 2 - 1);
+        ctx.lineTo(cx - ICON_PX + 1, cz + 1);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
         continue;
       }
       const glyph = m.kind ? ICON_KINDS[m.kind] : undefined;
