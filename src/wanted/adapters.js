@@ -31,9 +31,21 @@
 // - 開槍：命中率依距離 HIT_MAX（≤ FIRE_MIN）線性降到 HIT_MIN（≥ FIRE_MAX），命中走 combat.applyHit（weapon 'pistol'，傷害 SHOT_DAMAGE）
 // - canSee：物理世界射線（只查 WORLD 固定體，起訖眼高 EYE_HEIGHT）；無物理時以 footprints 線段相交；都沒有 → true
 // - findSpawnPoint：traffic.spawnSpots 的環帶點隨機抽 ≤ SPAWN_TRIES 次，取 canSee(玩家 → 點) 為 false 者；全部看得見時退回最遠的候選
+// V5 警方升級（deps 增補皆選用：damageVehicle(v, n) 玩家車中彈扣耐久、graph 車道路網（buildRoadGraph，取度數 ≥ 3 的節點當路口）、
+//   createCone() → Object3D（路障路錐網格；省略 = 路障只有警車））：
+// - 命中率 hitChance(d, speed) = 距離曲線 × speedHitFactor(玩家速度)；getPlayer 回傳 inVehicle / speed / vehicle 時，車內中彈走 throughVehicle
+//   並 damageVehicle(vehicle, CAR_HIT_VEHICLE_DAMAGE)
+// - carFire(car, { x, z })：車上警察開槍（槍口 = 車頂、命中率 × CAR_HIT_MULT、傷害 CAR_SHOT_DAMAGE），同樣 emit weapon:fire（police true、car）
+// - spawnSwat({ x, z, heading })：特警廂型車 = vehicles.adopt(SWAT_TYPE, 深色 SWAT_COLOR)、耐久 × SWAT_TOUGHNESS；
+//   spawnOfficer({ swat: true })：黑色重裝制服、hp × SWAT_TOUGHNESS、每發 SWAT_SHOT_DAMAGE
+// - findRoadblockPoint(px, pz, dirX, dirZ, min, max)：路網路口（無 graph 時退回 traffic.spawnSpots）中位於玩家前進方向 ±ROADBLOCK_HALF_ANGLE、
+//   距離 min–max 者取最接近中段且最正前方的一個，退回玩家側 ROADBLOCK_SETBACK m；兩台車位不得在建築 / 水域內或貼著其他車
+// - spawnRoadblock({ x, z, heading })：2 台橫停警車（vehicles.adopt 停放車，v.ai false → 靜止後 kinematic、可被撞開 / 搶走）+ 路錐（池化，≤ MAX_CONES）；
+//   despawnRoadblock(rb)：移除未被搶的車、路錐回池；路障車警示燈照閃、isPoliceVehicle 為真
+// - 警笛強度隨星數：增益 × sirenStarGain(stars)；≥ SIREN_FAST_STARS 星改 SIREN_HALF_FAST 急促節奏
 import { createPedestrianBody } from '../physics/npc-bodies.js';
 import { queryGroups, WORLD } from '../physics/groups.js';
-import { FIRE_MIN, FIRE_MAX } from './police.js';
+import { FIRE_MIN, FIRE_MAX, speedHitFactor } from './police.js';
 
 export const DT_MAX = 0.1; // s，dt clamp
 export const POLICE_TYPE = 'police'; // VEHICLE_TYPES / 車輛 manifest id
@@ -71,6 +83,9 @@ export const SIREN_FADE = 40; // m，SIREN_RANGE 前此距離內淡出
 export const SIREN_VOICES = 3; // 同時發聲的警車數上限（取最近者）
 export const SIREN_CUTOFF = 2400; // Hz，低通濾波（鋸齒波去刺耳）
 export const SIREN_SMOOTH = 0.05; // s，增益平滑時間常數
+export const SIREN_STAR_GAIN = [0, 1, 1.1, 1.2, 1.35, 1.5]; // 依星數的增益倍率（V5：越高星越響）
+export const SIREN_FAST_STARS = 4; // 幾星起改急促節奏
+export const SIREN_HALF_FAST = 0.3; // s
 
 // 視線 / 生成
 export const EYE_HEIGHT = 1.6; // m
@@ -94,6 +109,30 @@ export const MUZZLE_HEIGHT = 1.4; // m
 export const CHEST_HEIGHT = 1.2; // m，瞄準點高度
 export const MISS_SPREAD = 1.5; // m，未命中時落點的水平偏移
 
+// V5：車上開槍 / 車內中彈 / 特警 / 路障
+export const CAR_SHOT_DAMAGE = 12; // 車上警察每發傷害
+export const CAR_HIT_MULT = 0.8; // 車上開槍命中率倍率（移動中射擊）
+export const CAR_MUZZLE_HEIGHT = 1.3; // m
+export const CAR_HIT_VEHICLE_DAMAGE = 20; // 玩家在車內中彈時扣車耐久（vehicle-damage 滿 1000）
+export const SWAT_TYPE = 'suv';
+export const SWAT_COLOR = '#16181d';
+export const SWAT_TOUGHNESS = 2; // 特警車耐久 / 特警 hp 倍率
+export const SWAT_VAN_HEALTH = 1000 * SWAT_TOUGHNESS;
+export const SWAT_COLORS = { shirt: '#121418', pants: '#0b0c0f' };
+export const SWAT_SHOT_DAMAGE = 18;
+export const ROADBLOCK_HALF_ANGLE = Math.PI / 7; // rad，前進方向 ±25.7°
+export const ROADBLOCK_SETBACK = 6; // m，從路口中心往玩家側退
+export const ROADBLOCK_CAR_GAP = 2.7; // m，兩台車中心離路障中心的橫向距離
+export const ROADBLOCK_CLEAR = 4; // m，車位與既有車輛的最小距離
+export const ROADBLOCK_CONES = [
+  [-6.2, 1.5],
+  [6.2, 1.5],
+  [-4.6, 3.2],
+  [4.6, 3.2],
+]; // 路錐（橫向, 往玩家側）m
+export const MAX_ROADBLOCK_SETS = 2;
+export const MAX_CONES = ROADBLOCK_CONES.length * MAX_ROADBLOCK_SETS;
+
 const TAU = Math.PI * 2;
 
 function wrapAngle(a) {
@@ -114,8 +153,8 @@ export function lightbarPhase(t) {
 }
 
 // 警笛頻率：offset 讓多台車不同步
-export function sirenFreq(t, offset = 0) {
-  return Math.floor((t + offset) / SIREN_HALF + 1e-9) % 2 === 0 ? SIREN_LOW : SIREN_HIGH;
+export function sirenFreq(t, offset = 0, half = SIREN_HALF) {
+  return Math.floor((t + offset) / half + 1e-9) % 2 === 0 ? SIREN_LOW : SIREN_HIGH;
 }
 
 // 警笛距離衰減 0..1：SIREN_REF 內 1，之後 ∝ 1/d，SIREN_RANGE 前 SIREN_FADE 內淡到 0
@@ -126,10 +165,30 @@ export function sirenGain(d) {
   return fall * Math.min(1, (SIREN_RANGE - d) / SIREN_FADE);
 }
 
-// 開槍命中率：FIRE_MIN 內 HIT_MAX，FIRE_MAX 外 HIT_MIN，中間線性
-export function hitChance(d) {
+// 開槍命中率：FIRE_MIN 內 HIT_MAX，FIRE_MAX 外 HIT_MIN，中間線性；× speedHitFactor(玩家速度 m/s)
+export function hitChance(d, speed = 0) {
   const k = clamp((d - FIRE_MIN) / (FIRE_MAX - FIRE_MIN), 0, 1);
-  return HIT_MAX + (HIT_MIN - HIT_MAX) * k;
+  return (HIT_MAX + (HIT_MIN - HIT_MAX) * k) * speedHitFactor(speed);
+}
+
+// 警笛增益的星數倍率（0 星 0）
+export function sirenStarGain(stars) {
+  const n = Math.max(0, Math.min(SIREN_STAR_GAIN.length - 1, Math.floor(Number(stars) || 0)));
+  return SIREN_STAR_GAIN[n];
+}
+
+// 車道路網的路口（度數 ≥ 3 的節點）→ { x: Float64Array, z: Float64Array, n }
+export function graphJunctions(graph) {
+  if (!graph || !graph.offsets || !graph.x || !graph.z) return { x: new Float64Array(0), z: new Float64Array(0), n: 0 };
+  const idx = [];
+  for (let i = 0; i < graph.nodeCount; i++) if (graph.offsets[i + 1] - graph.offsets[i] >= 3) idx.push(i);
+  const x = new Float64Array(idx.length);
+  const z = new Float64Array(idx.length);
+  idx.forEach((i, k) => {
+    x[k] = graph.x[i];
+    z[k] = graph.z[i];
+  });
+  return { x, z, n: idx.length };
 }
 
 // 線段 ab 與線段 cd 是否相交（含端點接觸）
@@ -220,6 +279,9 @@ export function createPoliceAdapters(deps = {}) {
     isNight = () => false,
     footprints = null,
     rng = Math.random,
+    damageVehicle = null,
+    graph = null,
+    createCone = null,
   } = deps;
   const pw = physics && physics.pw ? physics.pw : null;
   const rayGroups = queryGroups(WORLD);
@@ -236,6 +298,10 @@ export function createPoliceAdapters(deps = {}) {
   let disposed = false;
   const spotBuf = [];
   const offs = [];
+  const roadblocks = new Set(); // spawnRoadblock 回傳的路障
+  const blockCars = new Set(); // 路障警車（未被搶、未回收）：只煞停 + 警示燈
+  const conePool = []; // { obj, used }
+  let junctions = null; // graphJunctions(graph)，第一次找路障點時建立
 
   const dist = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
   const groundY = (x, z) => {
@@ -318,14 +384,29 @@ export function createPoliceAdapters(deps = {}) {
   }
 
   function spawnCar({ x, z, heading = 0 } = {}) {
+    return makeCar({ x, z, heading, type: POLICE_TYPE });
+  }
+
+  // 特警廂型車：深色休旅車、耐久 × SWAT_TOUGHNESS；駕駛 / 警笛同一般警車
+  function spawnSwat({ x, z, heading = 0 } = {}) {
+    const car = makeCar({ x, z, heading, type: SWAT_TYPE, color: SWAT_COLOR, maxHealth: SWAT_VAN_HEALTH });
+    if (car) car.swat = true;
+    return car;
+  }
+
+  function makeCar({ x, z, heading = 0, type, color, maxHealth }) {
     if (disposed || !vehicles) return null;
-    const v = vehicles.adopt({ type: POLICE_TYPE, x, z, yaw: heading });
+    const v = vehicles.adopt(color ? { type, color, x, z, yaw: heading } : { type, x, z, yaw: heading });
     if (!v) return null;
     v.ai = true;
-    if (dmg && typeof dmg.attach === 'function') dmg.attach(v);
+    if (dmg && typeof dmg.attach === 'function') {
+      if (maxHealth) dmg.attach(v, { maxHealth });
+      else dmg.attach(v);
+    }
     const car = {
       id: `police-car-${++seq}`,
       police: true,
+      swat: false,
       v,
       cmd: { x, z, mode: 'patrol', maxSpeed: 0, set: false },
       route: null,
@@ -562,11 +643,12 @@ export function createPoliceAdapters(deps = {}) {
       }
       if (vo) vo.car = car;
     }
-    const vol = SIREN_GAIN * sfxVolume();
+    const vol = SIREN_GAIN * sfxVolume() * sirenStarGain(stars);
+    const half = stars >= SIREN_FAST_STARS ? SIREN_HALF_FAST : SIREN_HALF;
     for (const vo of voices) {
       const g = vo.car ? vol * sirenGain(chosen.get(vo.car)) : 0;
       vo.gain.gain.setTargetAtTime(g, now, SIREN_SMOOTH);
-      if (vo.car) vo.osc.frequency.setValueAtTime(sirenFreq(time, vo.car.sirenOffset), now);
+      if (vo.car) vo.osc.frequency.setValueAtTime(sirenFreq(time, vo.car.sirenOffset, half), now);
     }
   }
 
@@ -595,10 +677,10 @@ export function createPoliceAdapters(deps = {}) {
     );
   }
 
-  function spawnOfficer({ x, z, car = null } = {}) {
+  function spawnOfficer({ x, z, car = null, swat = false } = {}) {
     // CharacterAnimator 必要：combat.register 會直接呼叫 actor.anim.on
     if (disposed || !characters || typeof characters.createCharacter !== 'function' || typeof characters.CharacterAnimator !== 'function') return null;
-    const character = characters.createCharacter({ variant: OFFICER_VARIANT, colors: UNIFORM_COLORS });
+    const character = characters.createCharacter({ variant: OFFICER_VARIANT, colors: swat ? SWAT_COLORS : UNIFORM_COLORS });
     if (!character) return null;
     const mesh = character.root;
     if (mesh.rotation) mesh.rotation.order = 'YXZ';
@@ -609,6 +691,7 @@ export function createPoliceAdapters(deps = {}) {
     const o = {
       id: `police-officer-${++seq}`,
       police: true,
+      swat: !!swat,
       pos: { x, y, z },
       yaw,
       car,
@@ -641,8 +724,8 @@ export function createPoliceAdapters(deps = {}) {
       faction: 'police',
       pos: o.pos,
       yaw,
-      hp: OFFICER_HP,
-      maxHp: OFFICER_HP,
+      hp: swat ? OFFICER_HP * SWAT_TOUGHNESS : OFFICER_HP,
+      maxHp: swat ? OFFICER_HP * SWAT_TOUGHNESS : OFFICER_HP,
       anim,
       recoverOnKo: true,
       officer: o,
@@ -703,40 +786,200 @@ export function createPoliceAdapters(deps = {}) {
   }
 
   function fire(o, tx, tz) {
-    const p = o.pos;
-    const d = dist(p.x, p.z, tx, tz);
-    const hit = rng() < hitChance(d);
+    const hit = shoot(o.pos.x, o.pos.y + MUZZLE_HEIGHT, o.pos.z, tx, tz, { attacker: o.actor, shooter: o, damage: o.swat ? SWAT_SHOT_DAMAGE : SHOT_DAMAGE, mult: 1 });
+    o.shots++;
+    if (hit) o.hits++;
+    if (o.anim && typeof o.anim.playUpper === 'function') o.anim.playUpper('pistol_fire');
+  }
+
+  // 車上警察開槍（police.js 決定時機）：槍口在車頂，命中率 × CAR_HIT_MULT
+  function carFire(car, { x, z } = {}) {
+    if (!car || car.removed || car.stolen || !carAlive(car)) return;
+    const p = car.v.pos;
+    const hit = shoot(p.x, (p.y || 0) + CAR_MUZZLE_HEIGHT, p.z, x, z, { attacker: null, shooter: car, damage: CAR_SHOT_DAMAGE, mult: CAR_HIT_MULT });
+    car.shots = (car.shots || 0) + 1;
+    if (hit) car.hits = (car.hits || 0) + 1;
+  }
+
+  // 共用射擊：命中率 hitChance(水平距離, 玩家速度) × mult；玩家在車內走 throughVehicle 並扣車耐久；回傳是否實際命中
+  function shoot(mx, my, mz, tx, tz, { attacker, shooter, damage, mult }) {
     const pl = getPlayer();
+    const d = dist(mx, mz, tx, tz);
+    const hit = rng() < hitChance(d, pl && pl.speed) * mult;
     let applied = null;
-    const dx = tx - p.x;
-    const dz = tz - p.z;
+    const dx = tx - mx;
+    const dz = tz - mz;
     const h = Math.hypot(dx, dz) || 1;
+    const inCar = !!(pl && pl.inVehicle);
     if (hit && pl && pl.actor && combat && typeof combat.applyHit === 'function') {
       applied = combat.applyHit({
-        attacker: o.actor,
+        attacker,
         target: pl.actor,
-        damage: SHOT_DAMAGE,
+        damage,
         weapon: 'pistol',
         dir: { x: dx / h, z: dz / h },
         swingId: typeof combat.newSwingId === 'function' ? combat.newSwingId() : null,
+        throughVehicle: inCar,
       });
+      if (applied && inCar && pl.vehicle && typeof damageVehicle === 'function') damageVehicle(pl.vehicle, CAR_HIT_VEHICLE_DAMAGE);
     }
-    o.shots++;
-    if (applied) o.hits++;
-    if (o.anim && typeof o.anim.playUpper === 'function') o.anim.playUpper('pistol_fire');
-    if (!bus) return;
+    if (!bus) return !!applied;
     // 落點：命中 = 目標胸口；未命中 = 目標旁 MISS_SPREAD 內偏移
     const side = (rng() * 2 - 1) * MISS_SPREAD;
     const ex = hit ? tx : tx + (-dz / h) * side;
     const ez = hit ? tz : tz + (dx / h) * side;
-    const my = p.y + MUZZLE_HEIGHT;
     const ey = groundY(tx, tz) + CHEST_HEIGHT;
-    const len = Math.hypot(ex - p.x, ey - my, ez - p.z) || 1;
+    const len = Math.hypot(ex - mx, ey - my, ez - mz) || 1;
     bus.emit('weapon:fire', {
-      weapon: 'pistol', x: p.x, y: my, z: p.z,
-      dirX: (ex - p.x) / len, dirY: (ey - my) / len, dirZ: (ez - p.z) / len,
-      byPlayer: false, police: true, shooter: o, hit: !!applied, miss: !hit, ex, ey, ez, dist: len,
+      weapon: 'pistol', x: mx, y: my, z: mz,
+      dirX: (ex - mx) / len, dirY: (ey - my) / len, dirZ: (ez - mz) / len,
+      byPlayer: false, police: true, shooter, hit: !!applied, miss: !hit, ex, ey, ez, dist: len,
     });
+    return !!applied;
+  }
+
+  // ---------- 路障 ----------
+  function vehicleNear(x, z, gap) {
+    const g2 = gap * gap;
+    if (vehicles) for (const v of vehicles.vehicles) if ((v.pos.x - x) ** 2 + (v.pos.z - z) ** 2 < g2) return true;
+    if (traffic && traffic.cars) {
+      for (const c of traffic.cars) {
+        const p = c.v ? c.v.pos : c.pos;
+        if (p && (p.x - x) ** 2 + (p.z - z) ** 2 < g2) return true;
+      }
+    }
+    return false;
+  }
+
+  // 路障中心 (x, z)、玩家來向 heading（yaw：forward = (sin, cos)）→ 車位是否可用
+  function roadblockFits(x, z, heading) {
+    const px = Math.cos(heading);
+    const pz = -Math.sin(heading);
+    for (const s of [-1, 0, 1]) {
+      const cx = x + px * ROADBLOCK_CAR_GAP * s;
+      const cz = z + pz * ROADBLOCK_CAR_GAP * s;
+      if (blocked && blocked(cx, cz)) return false;
+      if (s !== 0 && vehicleNear(cx, cz, ROADBLOCK_CLEAR)) return false;
+    }
+    return true;
+  }
+
+  function findRoadblockPoint(px, pz, dirX, dirZ, minDist, maxDist) {
+    if (disposed) return null;
+    const dl = Math.hypot(dirX, dirZ);
+    if (!(dl > 1e-6)) return null;
+    const fx = dirX / dl;
+    const fz = dirZ / dl;
+    const cosMin = Math.cos(ROADBLOCK_HALF_ANGLE);
+    const mid = (minDist + maxDist) / 2;
+    let best = null;
+    let bestScore = -Infinity;
+    const consider = (x, z) => {
+      const vx = x - px;
+      const vz = z - pz;
+      const d = Math.hypot(vx, vz);
+      if (d < minDist || d > maxDist) return;
+      const c = (vx * fx + vz * fz) / d;
+      if (c < cosMin) return;
+      const score = c - (Math.abs(d - mid) / maxDist) * 0.5;
+      if (score <= bestScore) return;
+      // 從路口中心往玩家側退 ROADBLOCK_SETBACK（擋在來向的路段上）
+      const bx = x - (vx / d) * ROADBLOCK_SETBACK;
+      const bz = z - (vz / d) * ROADBLOCK_SETBACK;
+      const heading = Math.atan2(vx, vz);
+      if (!roadblockFits(bx, bz, heading)) return;
+      bestScore = score;
+      best = { x: bx, z: bz, heading };
+    };
+    if (graph && !junctions) junctions = graphJunctions(graph);
+    if (junctions && junctions.n) {
+      for (let i = 0; i < junctions.n; i++) consider(junctions.x[i], junctions.z[i]);
+    } else if (traffic && typeof traffic.spawnSpots === 'function') {
+      for (const sp of traffic.spawnSpots(px, pz, minDist, maxDist, spotBuf) || []) consider(sp.x, sp.z);
+    }
+    return best;
+  }
+
+  function takeCone() {
+    let c = conePool.find((k) => !k.used);
+    if (!c) {
+      if (conePool.length >= MAX_CONES || typeof createCone !== 'function') return null;
+      const obj = createCone();
+      if (!obj) return null;
+      if (scene) scene.add(obj);
+      c = { obj, used: false };
+      conePool.push(c);
+    }
+    c.used = true;
+    c.obj.visible = true;
+    return c;
+  }
+
+  function spawnRoadblock({ x, z, heading = 0 } = {}) {
+    if (disposed || !vehicles || roadblocks.size >= MAX_ROADBLOCK_SETS) return null;
+    const px = Math.cos(heading);
+    const pz = -Math.sin(heading);
+    const fx = Math.sin(heading);
+    const fz = Math.cos(heading);
+    const rb = { id: `police-roadblock-${++seq}`, roadblock: true, pos: { x, z }, heading, cars: [], cones: [], removed: false };
+    for (const s of [-1, 1]) {
+      const cx = x + px * ROADBLOCK_CAR_GAP * s;
+      const cz = z + pz * ROADBLOCK_CAR_GAP * s;
+      // 橫停：車身長軸垂直來向，兩台車頭相反
+      const v = vehicles.adopt({ type: POLICE_TYPE, x: cx, z: cz, yaw: heading + (s * Math.PI) / 2 });
+      if (!v) continue;
+      v.ai = false; // 一般停放車：靜止後 kinematic，可被撞開 / 搶走
+      if (dmg && typeof dmg.attach === 'function') dmg.attach(v);
+      const car = {
+        id: `police-block-car-${++seq}`, police: true, roadblock: true, v, lightbar: takeLightbar(v), stolen: false, removed: false, dead: false,
+        get pos() {
+          return v.pos;
+        },
+        get alive() {
+          return carAlive(car);
+        },
+      };
+      v.setControls({ throttle: 0, steer: 0, brake: 1, handbrake: true });
+      byVehicle.set(v, car);
+      blockCars.add(car);
+      rb.cars.push(car);
+      setLightbar(car, lightbarPhase(time), isNight());
+    }
+    if (!rb.cars.length) return null;
+    for (const [lat, back] of ROADBLOCK_CONES) {
+      const c = takeCone();
+      if (!c) break;
+      const cx = x + px * lat - fx * back;
+      const cz = z + pz * lat - fz * back;
+      if (c.obj.position) c.obj.position.set(cx, groundY(cx, cz) + surfaceOffset, cz);
+      rb.cones.push(c);
+    }
+    Object.defineProperty(rb, 'alive', { get: () => !rb.removed && rb.cars.some((c) => carAlive(c)) });
+    roadblocks.add(rb);
+    return rb;
+  }
+
+  function despawnRoadblock(rb) {
+    if (!rb || rb.removed) return;
+    rb.removed = true;
+    roadblocks.delete(rb);
+    for (const car of rb.cars) {
+      blockCars.delete(car);
+      if (car.removed) continue;
+      car.removed = true;
+      if (car.stolen) continue; // 被搶的留給玩家，警示燈由 stolen 清單繼續閃
+      byVehicle.delete(car.v);
+      if (vehicleExists(car.v)) {
+        if (dmg && typeof dmg.detach === 'function') dmg.detach(car.v);
+        vehicles.remove(car.v);
+      }
+      releaseLightbar(car);
+    }
+    for (const c of rb.cones) {
+      c.used = false;
+      c.obj.visible = false;
+    }
+    rb.cones.length = 0;
   }
 
   function placeOfficerMesh(o) {
@@ -818,6 +1061,15 @@ export function createPoliceAdapters(deps = {}) {
         car.v.setControls({ throttle: 0, steer: 0, brake: 1, handbrake: true });
       }
     }
+    for (const car of blockCars) {
+      if (!car.stolen && car.v.driven) {
+        car.stolen = true;
+        stolen.add(car);
+        continue;
+      }
+      if (car.stolen) continue;
+      setLightbar(car, phase, night);
+    }
     for (const car of [...stolen]) {
       if (!vehicleExists(car.v)) {
         stolen.delete(car);
@@ -837,6 +1089,8 @@ export function createPoliceAdapters(deps = {}) {
 
   function dispose() {
     if (disposed) return;
+    for (const rb of [...roadblocks]) despawnRoadblock(rb);
+    for (const c of conePool.splice(0)) if (c.obj.removeFromParent) c.obj.removeFromParent();
     for (const o of [...officers]) despawnOfficer(o);
     for (const car of [...cars]) despawnCar(car);
     stolen.clear();
@@ -846,7 +1100,10 @@ export function createPoliceAdapters(deps = {}) {
   }
 
   function stats() {
-    return { cars: cars.size, stolen: stolen.size, officers: officers.size, sirens: voices.filter((v) => v.car).length };
+    return {
+      cars: cars.size, stolen: stolen.size, officers: officers.size, sirens: voices.filter((v) => v.car).length,
+      roadblocks: roadblocks.size, blockCars: blockCars.size, cones: conePool.filter((c) => c.used).length,
+    };
   }
 
   return {
@@ -860,6 +1117,12 @@ export function createPoliceAdapters(deps = {}) {
     moveOfficer,
     officerAim,
     canSee,
+    // V5
+    carFire,
+    spawnSwat,
+    findRoadblockPoint,
+    spawnRoadblock,
+    despawnRoadblock,
     // 整合層
     update,
     isPoliceVehicle,

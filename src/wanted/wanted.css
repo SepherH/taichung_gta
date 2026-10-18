@@ -48,11 +48,7 @@
   text-shadow: 0 0 2px #000, 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
-/* 搜尋中：亮星閃爍 */
-.wanted-stars.wanted-flashing .wanted-star.wanted-on {
-  animation: wanted-blink 0.7s steps(2, jump-none) infinite;
-}
-
+/* 搜尋中：亮星閃爍（規則在 V5 脈動之後宣告，見下方） */
 @keyframes wanted-blink {
   0% {
     opacity: 1;
@@ -60,6 +56,70 @@
   100% {
     opacity: 0.2;
   }
+}
+
+/* V5：星數越高越躁動——4★ 亮星脈動、5★ 急促脈動 + 紅光（搜尋中的 wanted-blink 在後面宣告，優先） */
+.wanted-stars.wanted-lv-4 .wanted-star.wanted-on {
+  animation: wanted-pulse 0.9s ease-in-out infinite;
+}
+
+.wanted-stars.wanted-lv-5 .wanted-star.wanted-on {
+  animation: wanted-pulse 0.5s ease-in-out infinite;
+  text-shadow: 0 0 6px rgba(255, 40, 40, 0.9), 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.wanted-stars.wanted-flashing .wanted-star.wanted-on {
+  animation: wanted-blink 0.7s steps(2, jump-none) infinite;
+}
+
+@keyframes wanted-pulse {
+  0% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.18);
+    filter: brightness(1.35);
+  }
+}
+
+/* V5：4★ 以上畫面邊緣紅藍警示光暈（ui.js 掛 body；z 52 在星星列之下、不吃點擊）；5★ 加快 */
+.wanted-alert {
+  position: fixed;
+  inset: 0;
+  z-index: 52;
+  pointer-events: none;
+  animation: wanted-alert-cycle 1s ease-in-out infinite;
+}
+
+.wanted-alert.wanted-alert-max {
+  animation-duration: 0.6s;
+}
+
+.wanted-alert[hidden] {
+  display: none !important;
+}
+
+@keyframes wanted-alert-cycle {
+  0% {
+    box-shadow: inset 70px 0 80px -50px rgba(255, 30, 45, 0.55), inset -70px 0 80px -50px rgba(40, 90, 255, 0.18);
+  }
+  100% {
+    box-shadow: inset 70px 0 80px -50px rgba(255, 30, 45, 0.55), inset -70px 0 80px -50px rgba(40, 90, 255, 0.18);
+  }
+  50% {
+    box-shadow: inset 70px 0 80px -50px rgba(255, 30, 45, 0.18), inset -70px 0 80px -50px rgba(40, 90, 255, 0.55);
+  }
+}
+
+/* 系統「減少動態效果」（ui.js 以 matchMedia 判斷，不建立光暈、星星列加 wanted-calm）：只關 4★ 以上脈動；
+   搜索中閃爍（wanted-flashing）是 active / searching 唯一的區分提示，保留 */
+.wanted-stars.wanted-calm:not(.wanted-flashing) .wanted-star.wanted-on {
+  animation: none;
 }
 
 /* ---------- 被捕 / 送醫 ---------- */

@@ -13,6 +13,18 @@
 // - 減星 / wanted:cleared：超出 MAX_CARS / MAX_OFFICERS 的警力標記回收，回收時刻在 RECALL_SEC 內依遠近錯開，
 //   到時且「離開玩家視線」（距 > DESPAWN_VIEW_DIST 或 canSee=false）才 despawn；回收中的車一律 patrol
 // - 死亡（!alive）的車 / 警員立刻從 cars / officers 移除，殘骸同樣等離開玩家視線才 despawn
+// V5 警方升級（adapters 未提供對應函式時該功能關閉，行為同 Phase 7）：
+// - 車上開槍：≥FIRE_STARS 星、active、追捕中（沒有警員在外等）的警車距玩家 CAR_FIRE_MIN–CAR_FIRE_MAX 且看得見 →
+//   每 CAR_FIRE_INTERVAL_MIN–MAX 秒 adapters.carFire(car, { x, z })，emit police:carshoot（police:shoot 仍只代表下車警員）
+// - 命中率速度係數 speedHitFactor(玩家速度)：adapters / helicopter 共用（玩家越快越難打中）
+// - 路障（≥ROADBLOCK_STARS 星、active）：每 ROADBLOCK_INTERVAL 秒至多 1 組、同時 ≤ MAX_ROADBLOCKS 組；
+//   adapters.findRoadblockPoint(px, pz, dirX, dirZ, ROADBLOCK_MIN, ROADBLOCK_MAX) → 玩家前進方向的路口 → adapters.spawnRoadblock；
+//   玩家已通過（在其後方 > ROADBLOCK_PASSED）/ 距離 > ROADBLOCK_RECYCLE / 星數不足 / 解除通緝 → 離開玩家視線即 despawnRoadblock；emit police:roadblock
+//   （searching 只停止生成、既有路障保留——回 active 不重生）
+// - 特警（≥SWAT_STARS 星）：至多 1 台 adapters.spawnSwat（不佔 MAX_CARS），比照警車追捕，靠近停車放 SWAT_OFFICERS 名特警
+//   （spawnOfficer({ swat: true })，不佔 MAX_OFFICERS）；星數不足 / 解除 → 全員回收（同一般回收規則）；回收中重回 SWAT_STARS → 取消回收（孤兒除外）；emit police:swat
+// - 玩家倒地（player.down：KO / BUSTED / WASTED 畫面）：車上警察與下車警員都不開槍
+// - cancelExtras()：開新局 / 回主選單時立即回收路障與特警（含特警車被毀後的孤兒特警、特警車殘骸；不等離開視線）
 
 export const MAX_CARS = [1, 2, 3, 4, 5, 6]; // 依星數；0 星 = 1 台巡邏車
 export const MAX_OFFICERS = [0, 2, 4, 6, 8, 10];
@@ -63,6 +75,42 @@ export const BUST_DECAY = 1; // bustProgress 每秒衰減量
 
 export const RECALL_SEC = 20; // s，減星 / 解除後逐步回收到目標配置的時限
 
+// V5：車上開槍、命中率速度係數
+export const CAR_FIRE_MIN = 6; // m
+export const CAR_FIRE_MAX = 35; // m
+export const CAR_FIRE_INTERVAL_MIN = 1.2; // s
+export const CAR_FIRE_INTERVAL_MAX = 2.0; // s
+export const HIT_SPEED_REF = 30; // m/s，玩家速度達此值時命中率降到 HIT_SPEED_FLOOR 倍
+export const HIT_SPEED_FLOOR = 0.35;
+
+// V5：路障 / 特警
+export const ROADBLOCK_STARS = 5;
+export const MAX_ROADBLOCKS = 2; // 同時組數上限
+export const ROADBLOCK_MIN = 150; // m，玩家前方生成距離
+export const ROADBLOCK_MAX = 250; // m
+export const ROADBLOCK_INTERVAL = 12; // s，兩組路障生成的最短間隔
+export const ROADBLOCK_RETRY = 3; // s，找不到路口時的冷卻
+export const ROADBLOCK_PASSED = 60; // m，玩家已越過路障此距離 → 可回收
+export const ROADBLOCK_RECYCLE = 400; // m，太遠即回收
+export const HEADING_SAMPLE = 4; // m，玩家位移超過此值才更新前進方向
+export const SWAT_STARS = 5;
+export const MAX_SWAT = 1; // 特警車上限
+export const SWAT_OFFICERS = 4;
+export const SWAT_RETRY = 6; // s，特警車生成失敗的冷卻
+export const SWAT_RESPAWN = 30; // s，特警車被毀 / 回收後多久才再派
+export const SWAT_DEPLOY_OFFSETS = [
+  [1, 0.8],
+  [-1, 0.8],
+  [1, -0.8],
+  [-1, -0.8],
+]; // 特警下車點（側向 × DEPLOY_OFFSET, 縱向 × 2 m）
+
+// 玩家速度 → 命中率係數：0 m/s = 1，線性降到 HIT_SPEED_REF 時 HIT_SPEED_FLOOR（之後夾住）
+export function speedHitFactor(speed) {
+  const s = Math.abs(Number(speed) || 0);
+  return Math.max(HIT_SPEED_FLOOR, 1 - ((1 - HIT_SPEED_FLOOR) * s) / HIT_SPEED_REF);
+}
+
 const MAX_STARS = MAX_CARS.length - 1;
 const NOOP = () => {};
 
@@ -81,6 +129,11 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     moveOfficer: NOOP,
     officerAim: NOOP,
     canSee: () => true,
+    carFire: NOOP,
+    findRoadblockPoint: () => null,
+    spawnRoadblock: () => null,
+    despawnRoadblock: NOOP,
+    spawnSwat: null,
     ...adapters,
   };
   const recallSec = config.recallSec ?? RECALL_SEC;
@@ -95,7 +148,15 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
   let bustProgress = 0;
   let busted = false;
   let disposed = false;
-  let player = { x: 0, z: 0, inVehicle: false, speed: 0, down: false };
+  const player = { x: 0, z: 0, inVehicle: false, speed: 0, down: false };
+  const roadblocks = []; // { obj, recall }（obj = adapters.spawnRoadblock 回傳，含 pos）
+  let roadblockCooldown = 0;
+  let swat = null; // 特警車 carRec（rec.swat = true）
+  let swatCooldown = 0;
+  const heading = { x: 0, z: 0, ok: false, ax: 0, az: 0, anchored: false }; // 玩家前進方向（位移取樣）
+  const emitEvt = (name, payload) => {
+    if (bus) bus.emit(name, payload);
+  };
 
   const unsub = [];
   if (bus) {
@@ -126,6 +187,11 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
   }
 
   function removeCar(rec, despawn) {
+    if (rec === swat) {
+      swat = null;
+      swatCooldown = SWAT_RESPAWN;
+      emitEvt('police:swat', { type: 'despawn', x: rec.car.pos.x, z: rec.car.pos.z });
+    }
     const i = cars.indexOf(rec.car);
     if (i >= 0) cars.splice(i, 1);
     carRec.delete(rec.car);
@@ -175,7 +241,108 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
       return;
     }
     cars.push(car);
-    carRec.set(car, { car, recallAt: null, waypoint: null, officers: new Set() });
+    carRec.set(car, { car, recallAt: null, waypoint: null, officers: new Set(), fireTimer: carInterval(), swat: false });
+  }
+
+  const carInterval = () => CAR_FIRE_INTERVAL_MIN + rng() * (CAR_FIRE_INTERVAL_MAX - CAR_FIRE_INTERVAL_MIN);
+  const regularOfficers = () => {
+    let n = 0;
+    for (const r of offRec.values()) if (!r.swat) n++;
+    return n;
+  };
+
+  // 特警車：不佔 MAX_CARS；生成點同一般警車環帶
+  function trySpawnSwat() {
+    if (swatCooldown > 0 || typeof a.spawnSwat !== 'function') return;
+    const sp = a.findSpawnPoint(player.x, player.z, SPAWN_MIN, SPAWN_MAX);
+    const car = sp ? a.spawnSwat({ x: sp.x, z: sp.z, heading: sp.heading ?? 0 }) : null;
+    if (!car) {
+      swatCooldown = SWAT_RETRY;
+      return;
+    }
+    cars.push(car);
+    swat = { car, recallAt: null, waypoint: null, officers: new Set(), fireTimer: carInterval(), swat: true, lost: 0 };
+    carRec.set(car, swat);
+    emitEvt('police:swat', { type: 'spawn', x: car.pos.x, z: car.pos.z });
+  }
+
+  function deploySwat(rec) {
+    const c = rec.car.pos;
+    const dx = player.x - c.x;
+    const dz = player.z - c.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const sx = -dz / len;
+    const sz = dx / len;
+    const n = SWAT_OFFICERS - rec.lost; // 殉職的不補
+    for (let k = 0; k < n && k < SWAT_DEPLOY_OFFSETS.length; k++) {
+      const [side, fwd] = SWAT_DEPLOY_OFFSETS[k];
+      const x = c.x + sx * side * DEPLOY_OFFSET + (dx / len) * fwd * 2;
+      const z = c.z + sz * side * DEPLOY_OFFSET + (dz / len) * fwd * 2;
+      const o = a.spawnOfficer({ x, z, car: rec.car, swat: true });
+      if (!o) break;
+      const r = { officer: o, car: rec, fireTimer: interval(), recallAt: null, orphan: false, swat: true };
+      officers.push(o);
+      offRec.set(o, r);
+      rec.officers.add(r);
+    }
+    emitEvt('police:swat', { type: 'deploy', x: c.x, z: c.z, officers: rec.officers.size });
+  }
+
+  // 玩家前進方向：位移超過 HEADING_SAMPLE 才更新（與幀率無關）；player.dirX / dirZ（車頭方向）優先
+  function updateHeading(pl) {
+    if (pl && Number.isFinite(pl.dirX) && Number.isFinite(pl.dirZ) && Math.hypot(pl.dirX, pl.dirZ) > 1e-6) {
+      const l = Math.hypot(pl.dirX, pl.dirZ);
+      heading.x = pl.dirX / l;
+      heading.z = pl.dirZ / l;
+      heading.ok = true;
+    }
+    if (!heading.anchored) {
+      heading.ax = player.x;
+      heading.az = player.z;
+      heading.anchored = true;
+      return;
+    }
+    const dx = player.x - heading.ax;
+    const dz = player.z - heading.az;
+    const d = Math.hypot(dx, dz);
+    if (d < HEADING_SAMPLE) return;
+    if (!(pl && Number.isFinite(pl.dirX))) {
+      heading.x = dx / d;
+      heading.z = dz / d;
+      heading.ok = true;
+    }
+    heading.ax = player.x;
+    heading.az = player.z;
+  }
+
+  function removeRoadblock(i) {
+    const rb = roadblocks[i];
+    roadblocks.splice(i, 1);
+    a.despawnRoadblock(rb.obj);
+    emitEvt('police:roadblock', { type: 'despawn', x: rb.obj.pos.x, z: rb.obj.pos.z });
+  }
+
+  function updateRoadblocks(stars, state) {
+    const want = stars >= ROADBLOCK_STARS && state === 'active';
+    for (let i = roadblocks.length - 1; i >= 0; i--) {
+      const rb = roadblocks[i];
+      const p = rb.obj.pos;
+      const d = dist(p.x, p.z, player.x, player.z);
+      const behind = heading.ok && (p.x - player.x) * heading.x + (p.z - player.z) * heading.z < -ROADBLOCK_PASSED;
+      if (stars < ROADBLOCK_STARS || state === 'clear' || behind || rb.obj.alive === false) rb.recall = true;
+      if (d > ROADBLOCK_RECYCLE || (rb.recall && !inPlayerView(p))) removeRoadblock(i);
+    }
+    if (!want || roadblockCooldown > 0 || !heading.ok) return;
+    if (roadblocks.length >= MAX_ROADBLOCKS) return;
+    const pt = a.findRoadblockPoint(player.x, player.z, heading.x, heading.z, ROADBLOCK_MIN, ROADBLOCK_MAX);
+    const obj = pt ? a.spawnRoadblock({ x: pt.x, z: pt.z, heading: pt.heading ?? Math.atan2(heading.x, heading.z) }) : null;
+    if (!obj) {
+      roadblockCooldown = ROADBLOCK_RETRY;
+      return;
+    }
+    roadblocks.push({ obj, recall: false });
+    roadblockCooldown = ROADBLOCK_INTERVAL;
+    emitEvt('police:roadblock', { type: 'spawn', x: obj.pos.x, z: obj.pos.z, count: roadblocks.length });
   }
 
   function deployOfficers(rec, cap) {
@@ -186,7 +353,7 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     const len = Math.hypot(dx, dz) || 1;
     const sx = -dz / len;
     const sz = dx / len;
-    for (let k = 0; k < OFFICERS_PER_CAR && officers.length < cap; k++) {
+    for (let k = 0; k < OFFICERS_PER_CAR && regularOfficers() < cap; k++) {
       const side = k % 2 === 0 ? 1 : -1;
       const o = a.spawnOfficer({ x: c.x + sx * side * DEPLOY_OFFSET, z: c.z + sz * side * DEPLOY_OFFSET, car: rec.car });
       if (!o) break;
@@ -197,7 +364,7 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     }
   }
 
-  function driveCars(stars, state) {
+  function driveCars(dt, stars, state) {
     const circle = state === 'searching' && wanted ? wanted.searchCircle : null;
     for (const car of cars) {
       const rec = carRec.get(car);
@@ -231,6 +398,7 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
         continue;
       }
       rec.waypoint = null;
+      carFire(rec, dt, stars, d);
       if (player.inVehicle && stars >= RAM_STARS && d <= RAM_DIST) {
         a.driveCar(car, { x: player.x, z: player.z, mode: 'ram', maxSpeed: RAM_SPEED });
       } else if (!player.inVehicle && d <= DEPLOY_DIST) {
@@ -238,10 +406,27 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
       } else {
         a.driveCar(car, { x: player.x, z: player.z, mode: 'pursue', maxSpeed: PURSUE_SPEED });
       }
-      if (d <= DEPLOY_DIST && (car.speed ?? 0) < DEPLOY_SPEED && rec.officers.size === 0 && officers.length < MAX_OFFICERS[stars]) {
+      if (rec.swat) {
+        if (rec.officers.size === 0 && rec.lost < SWAT_OFFICERS && d <= DEPLOY_DIST && (car.speed ?? 0) < DEPLOY_SPEED) deploySwat(rec);
+      } else if (d <= DEPLOY_DIST && (car.speed ?? 0) < DEPLOY_SPEED && rec.officers.size === 0 && regularOfficers() < MAX_OFFICERS[stars]) {
         deployOfficers(rec, MAX_OFFICERS[stars]);
       }
     }
+  }
+
+  // 車上警察開槍（追捕中、沒有警員在外）：距離 / 視線門檻同步行警員概念，射擊由 adapters.carFire 執行
+  function carFire(rec, dt, stars, d) {
+    rec.fireTimer -= dt;
+    const able = stars >= FIRE_STARS && !player.down && d >= CAR_FIRE_MIN && d <= CAR_FIRE_MAX;
+    if (!able || !a.canSee(rec.car.pos.x, rec.car.pos.z, player.x, player.z)) {
+      if (rec.fireTimer < 0) rec.fireTimer = 0;
+      return;
+    }
+    if (rec.fireTimer > 0) return;
+    rec.fireTimer += carInterval();
+    if (rec.fireTimer < 0) rec.fireTimer = carInterval();
+    a.carFire(rec.car, { x: player.x, z: player.z });
+    emitEvt('police:carshoot', { car: rec.car, x: rec.car.pos.x, z: rec.car.pos.z, targetX: player.x, targetZ: player.z });
   }
 
   function driveOfficers(dt, stars, state) {
@@ -265,7 +450,7 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
         }
         continue;
       }
-      if (stars >= FIRE_STARS && d >= FIRE_MIN && d <= FIRE_MAX && a.canSee(p.x, p.z, player.x, player.z)) {
+      if (stars >= FIRE_STARS && !player.down && d >= FIRE_MIN && d <= FIRE_MAX && a.canSee(p.x, p.z, player.x, player.z)) {
         a.moveOfficer(o, { x: p.x, z: p.z, run: false });
         const firing = rec.fireTimer <= 0;
         a.officerAim(o, { x: player.x, z: player.z, firing });
@@ -331,7 +516,16 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     dt = Math.max(0, Math.min(DT_MAX, Number(dt) || 0));
     time += dt;
     spawnCooldown = Math.max(0, spawnCooldown - dt);
-    if (pl) player = { x: pl.x ?? 0, z: pl.z ?? 0, inVehicle: !!pl.inVehicle, speed: pl.speed ?? 0, down: !!pl.down };
+    roadblockCooldown = Math.max(0, roadblockCooldown - dt);
+    swatCooldown = Math.max(0, swatCooldown - dt);
+    if (pl) {
+      player.x = pl.x ?? 0;
+      player.z = pl.z ?? 0;
+      player.inVehicle = !!pl.inVehicle;
+      player.speed = pl.speed ?? 0;
+      player.down = !!pl.down;
+      updateHeading(pl);
+    }
     const stars = curStars();
     const state = curState();
 
@@ -344,7 +538,9 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     }
     for (const o of officers.slice()) {
       if (o.alive === false) {
-        removeOfficer(offRec.get(o), false);
+        const r = offRec.get(o);
+        if (r.swat && r.car) r.car.lost++;
+        removeOfficer(r, false);
         wrecks.push({ obj: o, kind: 'officer' });
       }
     }
@@ -356,9 +552,17 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
       else a.despawnOfficer(w.obj);
     }
 
-    // 2. 依星數排定回收，到時且離開視線才 despawn
-    planRecall([...carRec.values()], MAX_CARS[stars], (r) => r.car.pos);
-    planRecall([...offRec.values()], MAX_OFFICERS[stars], (r) => r.officer.pos);
+    // 2. 依星數排定回收，到時且離開視線才 despawn（特警不佔名額，另依 SWAT_STARS 回收）
+    planRecall([...carRec.values()].filter((r) => !r.swat), MAX_CARS[stars], (r) => r.car.pos);
+    planRecall([...offRec.values()].filter((r) => !r.swat), MAX_OFFICERS[stars], (r) => r.officer.pos);
+    if (stars < SWAT_STARS) {
+      for (const r of carRec.values()) if (r.swat && r.recallAt === null) r.recallAt = time;
+      for (const r of offRec.values()) if (r.swat && r.recallAt === null) r.recallAt = time;
+    } else {
+      // 回到 SWAT_STARS：取消回收（比照 planRecall 叫回；孤兒特警沒車可回，回收不取消）
+      for (const r of carRec.values()) if (r.swat) r.recallAt = null;
+      for (const r of offRec.values()) if (r.swat && !r.orphan) r.recallAt = null;
+    }
     for (const rec of [...offRec.values()]) {
       if (rec.recallAt !== null && time >= rec.recallAt && !inPlayerView(rec.officer.pos)) removeOfficer(rec, true);
     }
@@ -370,14 +574,16 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
 
     // 3. 補車（每幀至多 1 台）
     let active = 0;
-    for (const rec of carRec.values()) if (rec.recallAt === null) active++;
+    for (const rec of carRec.values()) if (rec.recallAt === null && !rec.swat) active++;
     if (active < MAX_CARS[stars]) trySpawnCar(stars);
+    if (stars >= SWAT_STARS && state === 'active' && !swat) trySpawnSwat();
 
-    // 4. 駕駛、警員、視線、逮捕
-    driveCars(stars, state);
+    // 4. 駕駛、警員、視線、逮捕、路障
+    driveCars(dt, stars, state);
     driveOfficers(dt, stars, state);
     const seen = computeSeen(state);
     updateBust(dt, stars);
+    updateRoadblocks(stars, state);
     return { seen };
   }
 
@@ -392,9 +598,31 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     return false;
   }
 
+  // 開新局 / 回主選單：路障與特警立即回收（不等離開視線）
+  function cancelExtras() {
+    while (roadblocks.length) removeRoadblock(roadblocks.length - 1);
+    if (swat) {
+      for (const r of [...swat.officers]) removeOfficer(r, true);
+      removeCar(swat, true);
+    }
+    for (const r of [...offRec.values()]) if (r.swat) removeOfficer(r, true); // 特警車先被毀留下的孤兒特警
+    for (let i = wrecks.length - 1; i >= 0; i--) {
+      const w = wrecks[i];
+      if (!w.obj.swat) continue; // 特警車殘骸 / 殉職特警
+      wrecks.splice(i, 1);
+      if (w.kind === 'car') a.despawnCar(w.obj);
+      else a.despawnOfficer(w.obj);
+    }
+    roadblockCooldown = 0;
+    swatCooldown = 0;
+    heading.ok = false;
+    heading.anchored = false;
+  }
+
   // 釋放全部警力與訂閱；之後 update / witness 皆為空操作
   function dispose() {
     if (disposed) return;
+    cancelExtras();
     disposed = true;
     for (const u of unsub) u();
     for (const rec of [...offRec.values()]) removeOfficer(rec, true);
@@ -410,6 +638,16 @@ export function createPolice({ bus, wanted, adapters = {}, rng = Math.random, co
     update,
     witness,
     dispose,
+    cancelExtras,
+    get roadblocks() {
+      return roadblocks;
+    },
+    get swat() {
+      return swat ? swat.car : null;
+    },
+    get heading() {
+      return heading.ok ? { x: heading.x, z: heading.z } : null;
+    },
     get cars() {
       return cars;
     },

@@ -125,6 +125,7 @@ import { createWanted, CRIMES } from './wanted/wanted.js';
 import { createPolice } from './wanted/police.js';
 import { createPoliceAdapters } from './wanted/adapters.js';
 import { createWantedUI } from './wanted/ui.js';
+import { createHelicopter, createHeliObstacleTop } from './wanted/helicopter.js';
 import { respawnPlace, SPRAY_SHOPS } from './wanted/places.js';
 import { createSprayShops } from './wanted/spray.js';
 import { createBeaconPool } from './missions/light-pillar.js';
@@ -302,6 +303,25 @@ function impactSpeedFromDamage(vehicle, delta) {
   const k = impactDamage(vehicle, DAMAGE_MIN_SPEED + 1, 'static'); // = K × 質量係數（relSpeed − 4 = 1）
   if (!(k > 0) || !(delta > 0)) return 0;
   return DAMAGE_MIN_SPEED + Math.pow(delta / k, 1 / DAMAGE_EXP);
+}
+
+// V5 路障路錐（policeAdapters.createCone；最多 MAX_CONES 個由 adapters 池化重用）：橘色圓錐 + 白色反光環，幾何 / 材質全部共用
+let roadConeParts = null;
+function createRoadCone() {
+  if (!roadConeParts) {
+    roadConeParts = {
+      cone: new THREE.ConeGeometry(0.22, 0.75, 10).translate(0, 0.375, 0),
+      band: new THREE.CylinderGeometry(0.15, 0.17, 0.12, 10).translate(0, 0.42, 0),
+      base: new THREE.BoxGeometry(0.5, 0.05, 0.5).translate(0, 0.025, 0),
+      orange: new THREE.MeshStandardMaterial({ color: 0xff5a10, roughness: 0.6 }),
+      white: new THREE.MeshStandardMaterial({ color: 0xf2f2f2, emissive: 0x444444, roughness: 0.4 }),
+    };
+  }
+  const p = roadConeParts;
+  const g = new THREE.Group();
+  g.name = 'police-cone';
+  g.add(new THREE.Mesh(p.base, p.orange), new THREE.Mesh(p.cone, p.orange), new THREE.Mesh(p.band, p.white));
+  return g;
 }
 
 // V4 爆炸物理衝量（explosions.js 的 physics.radialImpulse）：球形查詢半徑內的車（停放車先轉 dynamic）/ 車流車（轉 wrecked）/ 動態雜物，
@@ -1355,10 +1375,15 @@ async function init() {
     bus,
     getPlayer: () => {
       const p = playerPos();
-      return { x: p.x, z: p.z, actor: player.actor };
+      const v = state.mode === 'drive' ? state.vehicle : null;
+      return { x: p.x, z: p.z, actor: player.actor, inVehicle: !!v, speed: v ? Math.abs(v.speed || 0) : 0, vehicle: v };
     },
     isNight: () => dayNight.night > 0.5,
     surfaceOffset: SURFACE_OFFSET,
+    // V5：車內中彈扣玩家車耐久、路障找路口（車道路網度數 ≥ 3 的節點）、路障路錐
+    damageVehicle: (v, n) => dmg.addDamage(v, n),
+    graph,
+    createCone: () => createRoadCone(),
   });
   const police = createPolice({ bus, wanted, adapters: policeAdapters });
   // 掛 document.body（同 weapons hud；#hud 是 z-index 10 的堆疊環境，wanted.css 的 z 53–54 要在 body 層才生效）；回主選單時 cancelRespawn 清星 → 星星列隱藏
@@ -1373,6 +1398,8 @@ async function init() {
   bus.on('wanted:state', () => syncStars());
   // 警車任務（Phase 11）掛鉤：犯行豁免（下車逃犯 / 子彈落點在逃犯車旁）與被捕 / 送醫結束任務；預設無作用，警車任務段建立 vigilante 後覆寫
   const vigHooks = { fugitiveActor: () => false, fugitiveShot: () => false, end: () => {}, active: () => false };
+  // V5 警方升級掛鉤（直升機 seen / 開新局回收）：預設無作用，V5 段（爆炸段之後）建立直升機後覆寫
+  const policeV5 = { update: () => false, cancel: () => {} };
 
   // ---------- 噴漆廠（Phase 8）：src/wanted/spray.js（純邏輯）+ 入口光柱 + 小地圖 / 大地圖標記 ----------
   const sprayShops = createSprayShops({ bus, wanted, police, shops: SPRAY_SHOPS });
@@ -1511,7 +1538,7 @@ async function init() {
   // 每幀（updateGame，暫停 / 全螢幕面板 / 手機開著時不跑）：policeAdapters.update → police.update → wanted.update(seen)
   const adapterCtx = { stars: 0, listener: null, paused: false };
   const adapterIdle = { stars: 0, listener: null, paused: true }; // 不更新時以 dt 0 靜音警笛
-  const policeCtx = { player: { x: 0, z: 0, inVehicle: false, speed: 0, down: false } };
+  const policeCtx = { player: { x: 0, z: 0, inVehicle: false, speed: 0, down: false, dirX: NaN, dirZ: NaN } };
   const wantedCtx = { playerX: 0, playerZ: 0, seen: false };
   const updateWanted = (dt, skip) => {
     if (skip) {
@@ -1529,7 +1556,10 @@ async function init() {
     pl.inVehicle = !!v;
     pl.speed = v ? Math.abs(v.speed || 0) : 0;
     pl.down = state.koTimer > 0 || !!state.respawn || combat.isDown(player.actor);
-    const { seen } = police.update(dt, policeCtx);
+    pl.dirX = v ? Math.sin(v.yaw) : NaN; // 駕駛中以車頭方向當前進方向（路障）；步行由 police.js 以位移取樣
+    pl.dirZ = v ? Math.cos(v.yaw) : NaN;
+    const { seen: groundSeen } = police.update(dt, policeCtx);
+    const seen = policeV5.update(dt, pl) || groundSeen; // V5：直升機探照燈照到也算被看見
     lastPoliceSeen = seen; // 噴漆廠（spray.js）「被警力看見中」沿用本幀結果，不重算
     wantedCtx.playerX = p.x;
     wantedCtx.playerZ = p.z;
@@ -2090,6 +2120,50 @@ async function init() {
   };
   const clearExplosions = () => explosions.clear();
 
+  // ---------- V5 警方升級（罪惡之都；介面見 docs/dev/interfaces.md §33）：直升機 src/wanted/helicopter.js；路障 / 特警在 police.js + adapters.js ----------
+  // 避障高度場：地面與建築碰撞體頂（buildings.colliders：base + h，地標替換建築已用模型高）取高，
+  //   地標 glb 另用 LANDMARK_SOLIDS 分層量體（含伸出 OSM 輪廓外的部分）；直升機以機身圓盤 + 前方取樣取最大值
+  const heliObstacleTop = createHeliObstacleTop({ heightAt, solids: buildings.colliders });
+  const heli = createHelicopter({
+    THREE,
+    scene,
+    bus,
+    wanted,
+    combat,
+    heightAt,
+    obstacleTop: heliObstacleTop,
+    explode: (x, y, z, { byPlayer, radius, power }) => explosions.explode(x, y, z, { radius, power, source: byPlayer ? player.actor : null }),
+    damageVehicle: (n) => (state.mode === 'drive' && state.vehicle ? dmg.addDamage(state.vehicle, n) : 0),
+    getPlayerActor: () => player.actor,
+    isNight: () => dayNight.night,
+    quality: () => tier,
+    rng: Math.random,
+  });
+  const heliCtx = { player: null, paused: false };
+  // updateWanted 內呼叫（暫停 / 全螢幕面板 / 手機開著時 updateWanted 不跑 = 凍結）；噴漆換色、BUSTED / WASTED 期間 paused（不推進、不開槍）
+  policeV5.update = (dt, pl) => {
+    heliCtx.player = pl;
+    heliCtx.paused = !!state.spraying || !!state.respawn;
+    return heli.update(dt, heliCtx);
+  };
+  // 開新局 / 回主選單：直升機立即收起、路障與特警立即回收（一般警力照 Phase 7 由 wanted.clear 逐步回收）
+  policeV5.cancel = () => {
+    heli.cancel();
+    police.cancelExtras();
+  };
+  // 打下直升機 = 襲警致死（警方當然知道是誰）；首次出動 / 路障 / 特警出提示
+  bus.on('police:heli', (e) => {
+    if (!e) return;
+    if (e.type === 'down' && e.byPlayer) wanted.report(CRIMES.killPolice, { x: e.x, z: e.z, witnessed: true });
+    if (e.type === 'arrive' && settings.get('showHints')) wantedUI.showHint('heli', '🚁 警用直升機出動！被探照燈光圈照到就會被看見——高速甩開光圈，或用手槍把它打下來。');
+  });
+  bus.on('police:roadblock', (e) => {
+    if (e && e.type === 'spawn' && settings.get('showHints')) wantedUI.showHint('roadblock', '🚧 前方路口有警方路障！換條路，或高速撞開警車。');
+  });
+  bus.on('police:swat', (e) => {
+    if (e && e.type === 'spawn') hud.toast('⚠️ 特警出動！', 2.5);
+  });
+
   // ---------- V3 街頭隨機犯罪事件（src/street-events.js；介面見 docs/dev/interfaces.md §32）----------
   // 純邏輯排程 createStreetEvents + 世界轉接 createStreetWorld：搶劫 / 槍戰徵用附近骨架行人（brain.override）、追車 / 酒駕 = vehicles.adopt 事件車，
   // 追車警車走既有 policeAdapters（spawnCar / driveCar / despawnCar；不經 police.js，0 星不追玩家）、槍戰走 gangs.skirmish（成員換色掛槍）
@@ -2216,6 +2290,7 @@ async function init() {
     adaptive = tier === 'low';
     applyViewDist(budget.viewDist);
     weather.setQuality(budget); // 雨絲數依畫質
+    heli.setQuality(); // V5：low 檔關探照燈陰影
   };
   const applyUiScale = (k) => {
     const root = document.documentElement.style;
@@ -2837,6 +2912,7 @@ async function init() {
     cancelRobbery(!continued);
     cancelSpray();
     cancelRespawn();
+    policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     placePlayer(save);
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
@@ -2907,6 +2983,7 @@ async function init() {
     cancelRobbery();
     cancelSpray();
     cancelRespawn();
+    policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     state.started = false;
     state.paused = false;
     input.enabled = false;
@@ -2983,6 +3060,8 @@ async function init() {
       weather, env, radio,
       // Phase 7：通緝 / 警力（wanted.setStars(3)、police.cars / officers、policeAdapters.stats()）
       wanted, police, policeAdapters, wantedUI,
+      // V5：警方升級（heli.stats()、police.roadblocks / swat）
+      heli,
       // Phase 8：噴漆廠（sprayShops.shops 看每間店的 cooldown / hold）
       sprayShops,
       // Phase 9：超商搶劫（robberies.stores 看每間店 state / cooldown；clerks = 目前生成的店員）

@@ -3,6 +3,9 @@
 // 樣式在 wanted.css（比照 missions/ui.js：本檔不 import css，由整合層載入），node 可用假 DOM 測試
 // 星星列 / 提示卡掛在 root（HUD 容器）；BUSTED / WASTED 掛在 body 以蓋過所有面板，元素一律 pointer-events none，
 // 點擊跳過改由 doc 層 pointerdown / click 監聽（提示卡關閉鈕是唯一可點元素）
+// V5：星星列依星數加 class wanted-lv-N（wanted.css：4★ 脈動、5★ 急促紅光）；≥ ALERT_STARS 星時 body 層顯示紅藍警示光暈 .wanted-alert
+//   （第一次需要時才建立；alert 選項 false / () => false 或 setAlertEnabled(false) 關閉；reducedMotion()（預設 matchMedia prefers-reduced-motion）
+//   為真時不顯示光暈、星星列加 wanted-calm 停止脈動）
 
 export const STAR_COUNT = 5;
 export const OVERLAY_SEC = 3.5; // 被捕 / 送醫畫面自動結束秒數
@@ -11,6 +14,7 @@ export const HINT_SEC = 8; // 提示卡自動收起秒數
 export const HINTS_STORAGE_KEY = 'tcgta.hints'; // localStorage：已看過的通緝提示 key（JSON 陣列；僅未注入 hints（HUD）時的獨立退路）
 export const OVERLAY_REASONS = Object.freeze(['done', 'skipped', 'preempted', 'disposed']); // 被捕 / 送醫 Promise resolve 的 reason
 export const GRAYSCALE_FILTER = 'grayscale(1) contrast(1.1)';
+export const ALERT_STARS = 4; // 幾星起顯示畫面邊緣紅藍警示光暈
 export const SEARCH_BLINK_SEC = 0.5; // 搜索圈藍紅交替週期（每段秒數）
 export const SEARCH_COLORS = {
   blue: { fill: 'rgba(60, 140, 255, 0.22)', stroke: 'rgba(60, 140, 255, 0.85)' },
@@ -70,7 +74,15 @@ function saveSeen(seen) {
 }
 
 // hints 選用：HUD（showHint(id, text)）；注入時通緝提示改走 HUD 的提示卡與 tcgta.hints.seen（hud.resetHints() 一併重置），本檔不另存
-export function createWantedUI({ root, canvas, doc = globalThis.document, hints = null } = {}) {
+function systemReducedMotion() {
+  try {
+    return typeof globalThis.matchMedia === 'function' && !!globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+export function createWantedUI({ root, canvas, doc = globalThis.document, hints = null, alert = true, reducedMotion = systemReducedMotion } = {}) {
   if (!doc || typeof doc.createElement !== 'function') return createNullUi();
   const host = root || doc.body;
   const overlayHost = doc.body || host;
@@ -97,6 +109,24 @@ export function createWantedUI({ root, canvas, doc = globalThis.document, hints 
   row.hidden = true;
   host.appendChild(row);
   const shown = { n: 0, flashing: false };
+  let alertOn = alert;
+  let alertEl = null; // 紅藍警示光暈（第一次需要時建立，掛 body）
+
+  const alertAllowed = () => (typeof alertOn === 'function' ? !!alertOn() : !!alertOn);
+
+  function syncAlert() {
+    const calm = !!reducedMotion();
+    row.classList.toggle('wanted-calm', calm);
+    const want = shown.n >= ALERT_STARS && alertAllowed() && !calm;
+    if (want && !alertEl) {
+      alertEl = el('div', 'wanted-alert');
+      alertEl.setAttribute('aria-hidden', 'true');
+      overlayHost.appendChild(alertEl);
+    }
+    if (!alertEl) return;
+    alertEl.hidden = !want;
+    alertEl.classList.toggle('wanted-alert-max', shown.n >= STAR_COUNT);
+  }
 
   function setStars(n, { flashing = false } = {}) {
     const v = Math.max(0, Math.min(STAR_COUNT, Math.floor(Number(n) || 0)));
@@ -105,12 +135,20 @@ export function createWantedUI({ root, canvas, doc = globalThis.document, hints 
       for (let i = 0; i < STAR_COUNT; i++) stars[i].classList.toggle('wanted-on', i < v);
       row.setAttribute('aria-label', `通緝等級 ${v}`);
       row.hidden = v === 0;
+      row.classList.remove(`wanted-lv-${shown.n}`);
+      if (v > 0) row.classList.add(`wanted-lv-${v}`);
       shown.n = v;
     }
     if (f !== shown.flashing) {
       row.classList.toggle('wanted-flashing', f);
       shown.flashing = f;
     }
+    syncAlert();
+  }
+
+  function setAlertEnabled(on) {
+    alertOn = on;
+    syncAlert();
   }
 
   // ---------- 提示卡 ----------
@@ -204,11 +242,13 @@ export function createWantedUI({ root, canvas, doc = globalThis.document, hints 
   function dispose() {
     finish('disposed');
     closeHint();
-    for (const n of [row, hint]) if (n.parentNode) n.parentNode.removeChild(n);
+    for (const n of [row, hint, alertEl]) if (n && n.parentNode) n.parentNode.removeChild(n);
+    alertEl = null;
   }
 
   return {
     setStars,
+    setAlertEnabled,
     showBusted,
     showWasted,
     showHint,
@@ -216,7 +256,12 @@ export function createWantedUI({ root, canvas, doc = globalThis.document, hints 
     get overlayActive() {
       return active !== null;
     },
-    els: { row, stars, hint, hintText, hintClose },
+    get alertActive() {
+      return !!alertEl && !alertEl.hidden;
+    },
+    els: { row, stars, hint, hintText, hintClose, get alert() {
+      return alertEl;
+    } },
   };
 }
 
@@ -225,6 +270,8 @@ function createNullUi() {
   const noop = () => {};
   return {
     setStars: noop,
+    setAlertEnabled: noop,
+    alertActive: false,
     showBusted: () => Promise.resolve({ reason: 'done' }),
     showWasted: () => Promise.resolve({ reason: 'done' }),
     showHint: () => false,

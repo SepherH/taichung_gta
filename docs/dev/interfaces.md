@@ -1012,6 +1012,51 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ### 32.4 回歸
 - `node tools/test/v3-events.mjs`（純邏輯 + 替身，無 three：排程頻率 / 權重、同時上限 / 冷卻、生成距離 / 視野、四種事件開始・結束・制伏・逃脫、賞金與犯行豁免（真 wanted）、busy、cancel、幀率無關、每幀不配置、每幀成本 < 0.3 ms、world 轉接、接線）
 
+## 33. V5 警方升級（罪惡之都；接線點在 `src/main.js`，介面以 `src/wanted/helicopter.js` / `police.js` / `adapters.js` 檔頭為準）
+
+### 33.1 星數行為表
+| 星數 | 下車警員開槍 | 車上警察開槍 | 直升機 | 艙門射手 | 路障 | 特警車 |
+|---|---|---|---|---|---|---|
+| 0–2 | ✗（追捕 / 拘捕，同 Phase 7） | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 3 | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| 4 | ✓ | ✓ | ✓（1 架） | ✗ | ✗ | ✗ |
+| 5 | ✓ | ✓ | ✓ | ✓ | ✓（≤ 2 組） | ✓（≤ 1 台、4 名特警） |
+- 命中率：`police.js speedHitFactor(speed)` = 1 − 0.65 × 速度 / 30 m/s（下限 0.35）；警員 `hitChance(d, speed)` = 距離曲線（70% → 30%）× 速度係數；車上 × 0.8；直升機 `heliHitChance(d3, speed)` = 55% → 25%（45–95 m）× 速度係數。玩家在車內一律 `throughVehicle`，並扣玩家車耐久（警員 / 車上 20、直升機 20）
+
+### 33.2 模組介面
+- `src/wanted/helicopter.js`（純邏輯，不 import three；THREE / scene 注入才建模型）：`createHelicopter({ THREE?, scene?, bus?, wanted, combat?, heightAt?, obstacleTop?, explode?(x, y, z, { byPlayer, radius, power }), damageVehicle?(n), getPlayerActor?, isNight?, quality?, rng? })` → `{ update(dt, { player: { x, z, inVehicle, speed, down }, paused }) → seen, damage(n, { byPlayer }) → 是否打下, rayHit(ox, oy, oz, dx, dy, dz, max) → t | -1, cancel(), dispose(), setQuality(), state, active, pos, hp, spot, seen, cooldown, stats(), view }`
+  - 狀態 `off → arrive → orbit → leave → off`；被打下 `down`（自旋墜落）→ 觸地 / 屋頂 `explode` → `off`、`HELI_RESPAWN` 60 s 內不再出動；同時至多 1 架（單一物件重用）
+  - 高度：離地 `ALT_BASE` 50 ± 6 m（44–56，規格帶 40–60）；避障 = 機身圓盤（半徑 6 m 內 1.4 m 格點 + 外緣環）+ 前方 2.5 s 的 `obstacleTop` 最大值 + 12 m；下一步（每 1.4 m 一段）外緣環淨空 < 4 m → 本幀不水平前進、急升 22 m/s（水平寬度 ≥ 2 m 的障礙保證不穿模）
+  - 高度場：`createHeliObstacleTop({ heightAt, solids, landmarkSolids? })`；main.js 傳 `buildings.colliders`（地標替換建築用模型高），地標另用 `src/ui/menu-tour.js` 的 `LANDMARK_SOLIDS` 分層量體（含伸出 OSM 輪廓外的部分）
+  - 探照燈：地面光點以 16 m/s（5★ 21 m/s）追玩家；searching 時沿搜索圈內半徑 r × 0.6 的玫瑰線掃描（掃描點速度 ≤ 光點速度 × 0.85，盤旋中心跟著掃描點）；玩家在光圈 7 m 內且機腹到玩家的線段未被 `obstacleTop` 擋住 = `seen`；光點離機身 ≤ 65 m；SpotLight 常駐場景（intensity 0 = 關），low 檔 `castShadow = false`，關閉時 `shadow.autoUpdate = false`
+  - 受擊：訂閱 `weapon:fire`（byPlayer、非 police），射線打機身球（3.2 m）/ 尾桁球（1.4 m），距離須 ≤ `e.dist` + 0.5；手槍每發 34、耐久 500（約 15 發）
+  - 射手（5★）：`seen`（含遮蔽）、玩家未倒地（`down`）、3D 距離 ≤ 95 m，每 1.0–1.6 s 一發 `combat.applyHit({ weapon: 'pistol', damage: 12, throughVehicle: 車內 })`，emit `weapon:fire { police: true, heli: true }`
+- `src/wanted/police.js` 增補：`createPolice` 回傳多 `cancelExtras()`、`roadblocks`（`[{ obj, recall }]`）、`swat`（特警車或 null）、`heading`；adapters 增補（皆選用，缺 = 功能關閉，Phase 7 測試替身不受影響）：`carFire(car, { x, z })`、`findRoadblockPoint(px, pz, dirX, dirZ, min, max) → { x, z, heading } | null`、`spawnRoadblock({ x, z, heading }) → { pos, alive }`、`despawnRoadblock(rb)`、`spawnSwat({ x, z, heading }) → car`、`spawnOfficer({ …, swat: true })`；`update` 的 `player` 可帶 `dirX / dirZ`（車頭方向，路障方向用；缺 = 位移取樣）
+  - 車上開槍：≥3★、active、追捕中（無警員在外）、距 6–35 m 且看得見，每 1.2–2.0 s；emit `police:carshoot`（`police:shoot` 仍只代表下車警員）
+  - 路障（5★、active）：前進方向 ±25.7°、150–250 m 的路口（`graph` 度數 ≥ 3 節點，退回玩家側 6 m），2 台橫停警車（停放車，可撞開 / 搶走，`isPoliceVehicle` 真）+ 4 個路錐（池化 ≤ 8）；生成間隔 ≥ 12 s、同時 ≤ 2 組；玩家越過 60 m / 距離 > 400 m / 星數 < 5 / 解除 → 離開玩家視線即回收（searching 只停止生成、既有路障保留）
+  - 特警（5★）：1 台深色休旅車（`suv` #16181d、耐久 2000）不佔 `MAX_CARS`；靠近停車放 4 名特警（黑制服、hp 200、每發 18）不佔 `MAX_OFFICERS`，殉職不補；被毀 / 回收後 30 s 才再派；星數 < 5 → 全員依一般回收規則回收，回收中重回 5★ → 取消回收（孤兒特警除外）；`cancelExtras()` 連孤兒特警與特警殘骸立即回收
+  - 玩家倒地（`player.down`：KO / BUSTED / WASTED）：車上警察、下車警員、直升機射手全部停火；main.js 在 `state.respawn` 期間凍結直升機
+- `src/wanted/adapters.js` 增補：`hitChance(d, speed = 0)`、`sirenStarGain(stars)`（1★ 1.0 → 5★ 1.5）、`sirenFreq(t, offset, half)`（≥4★ 0.3 s 急促）、`graphJunctions(graph)`；deps 多 `damageVehicle(v, n)`、`graph`、`createCone()`；`getPlayer` 可回 `inVehicle / speed / vehicle`；`stats()` 多 `roadblocks / blockCars / cones`
+- `src/wanted/ui.js` 增補：`createWantedUI({ …, alert = true, reducedMotion })`、`setAlertEnabled(on)`、`alertActive`；星星列 class `wanted-lv-N`（wanted.css：4★ 脈動、5★ 急促紅光）；≥4★ body 層 `.wanted-alert` 紅藍邊緣光暈（`reducedMotion()` 預設 `prefers-reduced-motion` 為真時不顯示、星星列加 `wanted-calm` 不脈動；搜索中閃爍 `wanted-flashing` 保留）
+
+### 33.3 事件（§10 增補）
+| 事件 | payload | 發出者 |
+|---|---|---|
+| `police:heli` | `{ type: 'arrive' \| 'orbit' \| 'leave' \| 'gone' \| 'down' \| 'crash' \| 'fire' \| 'cancel', x, y, z, byPlayer, stars }`（物件重用，聽者勿保存） | helicopter.js |
+| `police:roadblock` | `{ type: 'spawn' \| 'despawn', x, z, count? }` | police.js |
+| `police:swat` | `{ type: 'spawn' \| 'deploy' \| 'despawn', x, z, officers? }` | police.js |
+| `police:carshoot` | `{ car, x, z, targetX, targetZ }` | police.js |
+
+### 33.4 接線（main.js）
+- 通緝段 `policeAdapters` deps 加 `damageVehicle: (v, n) => dmg.addDamage(v, n)`、`graph`、`createCone`（模組層 `createRoadCone()`，幾何 / 材質共用）；`getPlayer` 多回 `inVehicle / speed / vehicle`；`vigHooks` 旁宣告 `policeV5 = { update, cancel }` 掛鉤（預設無作用）
+- `updateWanted`：`policeCtx.player.dirX / dirZ` = 駕駛中車頭方向；`seen = policeV5.update(dt, pl) || groundSeen`（直升機照到也算）→ `lastPoliceSeen` / `wanted.update`；暫停 / 全螢幕面板 / 手機開著時 updateWanted 不跑 = 凍結，噴漆換色中 `paused: true`
+- V5 段（爆炸段之後）：`heli = createHelicopter({ …, obstacleTop: 地面 + buildingAt(x, z).height, explode → explosions.explode(…, { source: byPlayer ? 玩家 : null }) })`；覆寫 `policeV5.update / cancel`；`police:heli` down（byPlayer）→ `wanted.report(killPolice, witnessed)`；首次直升機 / 路障提示卡、特警 toast
+- `startGame`、`quitToMenu` → `cancelRespawn()` 之後 `policeV5.cancel()`（直升機立即收起、路障 / 特警立即回收）；畫質切換 `applyQuality` → `heli.setQuality()`；除錯 `window.__game.heli`
+- 被捕 / 送醫 / 噴漆 / 擺脫：一律經 `wanted.clear` → 直升機飛離、路障 / 特警回收（離開視線才 despawn；被捕 / 送醫傳送後即離開視線）
+
+### 33.5 回歸
+- `node tools/test/v5-police.mjs`（純邏輯 + 替身，無 three：星數行為表、直升機出現 / 離開 / 射手、避障高度、探照燈 seen、打下墜毀、命中率曲線、清除條件、上限、cancel、幀率無關、每幀成本）；`p7-police` / `p7-adapters` / `p7-ui` / `integration-p7` 不放寬
+
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
 ### 共通
