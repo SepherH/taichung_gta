@@ -69,6 +69,12 @@
 //   'gun-shop' / 'safehouse'、步行互動經 nearestInteractable 仲裁（priority 2，委託 3 優先；搶車 F 與駕駛副任務不同鍵 / 不同模式）；
 //   武器店面板併入 panelOpen（開著時世界與輸入暫停）；每幀 updateShops 接在 updateStreetEvents 之後；開新局 / 回主選單 → cancelShops()；
 //   安全屋：存檔 + 回滿血 + 通緝清零、存檔 safehouse.last、繼續遊戲從該安全屋出生；死亡（WASTED）/ 被捕沿用既有規則：武器與彈藥保留
+// 暴走任務（Phase 15，§37 Rampage）：createRampage（missions/rampage.js 純邏輯，RAMPAGES 三幫地盤 + 市區 4 處）+ createRampageWorld（補敵人 = gangs.enlist 徵用附近骨架行人）
+//   + createRampageHud（.rampage-bar 任務條 / .rampage-edge 畫面邊緣紅色脈動）+ createSkullMarkers（旋轉紅色低模骷髏，emissive、無光源 / 貼圖 / 陰影）+ 小地圖骷髏 'rampage'；
+//   步行走進骷髏即開始（駕車經過不觸發）、暫發武器結束收回（rampage.js 內 weapons.serialize 快照 / restore）；每幀 updateRampage 接在 updateShops 之後
+//   （手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆中不推進）；互斥：state.rampage（getter）、state.racing getter 包裝併入（otherMissionBusy / 搶劫守門）、
+//   vigHooks.active / end 包裝（委託類 / 噴漆 / BUSTED・WASTED）、進行中不問委託 / 武器店 / 安全屋；通緝照常；存檔 rampage.done、進行中存開始前的武器；
+//   開新局 / 回主選單 → cancelRampage()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -158,6 +164,7 @@ import { createTaxi, createCurbPedWorld, createSideJobBar, PROMPT_START as TAXI_
 import { createEms, createAmbulanceDepot, ambulanceSpot, PROMPT_START as EMS_PROMPT_START, PROMPT_QUIT as EMS_PROMPT_QUIT } from './missions/ems.js';
 import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 import { createStreetEvents, createStreetWorld } from './street-events.js';
+import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers } from './missions/rampage.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -1089,6 +1096,7 @@ async function init() {
     pushAll(out, sideJobMarkers());
     pushAll(out, gunShop.markers()); // Phase 14 武器店 / 安全屋
     pushAll(out, safehouses.markers());
+    pushAll(out, rampageMarkers()); // Phase 15 暴走點（骷髏）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1121,6 +1129,7 @@ async function init() {
     interCands[3] = walking ? pickups.nearest(pos) : null;
     interCands[4] = walking ? gunShop.nearest(pos) : null; // Phase 14：priority 2（委託 3 優先、同級取近）
     interCands[5] = walking ? safehouses.nearest(pos) : null;
+    if (state.rampage) interCands[0] = interCands[4] = interCands[5] = null; // 暴走中不接委託、不進武器店 / 安全屋（暫發武器狀態不被購買 / 存檔改動）
     return pickInteractable(interCands);
   };
   // 互動提示與車輛提示互不覆蓋（hud 為單一膠囊，setPrompt / setInteractPrompt 各自會清掉另一則）：
@@ -1234,11 +1243,12 @@ async function init() {
         stats: statsWithExtra(snap.stats, extraStats),
         player: { x: p.x, z: p.z, yaw: player.yaw },
         world: { hour: dayNight.hour },
-        weapons: weapons.serialize(),
+        weapons: rampage.savedWeapons() || weapons.serialize(), // 暴走中存開始前的武器狀態（暫發武器不入檔）
         missions: missions.serialize(),
         collect: { checkins: checkins.serialize(), foods: food.serialize() },
         races: races.serialize(), // Phase 12：街頭競速最佳成績（無紀錄 = null，存檔省略）
         safehouse: safehouses.serialize(), // Phase 14：最後使用的安全屋（沒用過 = null，存檔省略）
+        rampage: rampage.serialize(), // Phase 15：已完成的暴走點（沒有 = null，存檔省略）
       };
     },
   });
@@ -2623,6 +2633,66 @@ async function init() {
     streetWorld.reset();
   };
 
+  // ---------- 暴走任務（Phase 15，§37）：src/missions/rampage.js（純邏輯 + 補敵人世界介面 + HUD + 骷髏標記）----------
+  // 擊殺只算目標幫派成員（gangs.gangOf）；炸車只算玩家弄爆、且不是玩家正駕駛的車；暫發 / 恢復武器在 rampage.js 內（weapons.serialize 快照）
+  const rampage = createRampage({ bus, weapons, gangOf: (a) => gangs.gangOf(a), isTargetVehicle: (v) => !!v && v !== state.vehicle });
+  const rampageWorld = createRampageWorld({
+    traffic, gangs, combat,
+    repaint: (p) => {
+      repaintCharacter(p.character, p.citizen.look);
+      p.look = p.citizen.look;
+      traffic._gangWeapon(p, p.citizen.gang ? p.citizen.gang.weapon : null);
+    },
+  });
+  const rampageHud = createRampageHud({ root: document.body });
+  const rampageSkulls = createSkullMarkers({ THREE, scene, heightAt });
+  // 互斥旗標：state.rampage（getter）；otherMissionBusy（警車任務 / 競速 / 副任務 / 街頭事件）與搶劫守門讀 state.racing（字串由 P12 / P13 測試鎖定）
+  //   → 包裝既有 racing getter 併入暴走（不改 otherMissionBusy 原文）
+  Object.defineProperty(state, 'rampage', { get: () => rampage.active, enumerable: true, configurable: true });
+  const racingGet = Object.getOwnPropertyDescriptor(state, 'racing').get;
+  Object.defineProperty(state, 'racing', { get: () => racingGet() || rampage.active, enumerable: true, configurable: true });
+  // vigHooks.active（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口）/ vigHooks.end（BUSTED / WASTED → 暴走失敗、恢復武器）
+  const vigActiveRampage = vigHooks.active;
+  vigHooks.active = () => vigActiveRampage() || rampage.active;
+  const vigEndRampage = vigHooks.end;
+  vigHooks.end = (kind) => {
+    vigEndRampage(kind);
+    rampage.end(kind);
+    rampageHud.set(null);
+  };
+  const rampageMk = [];
+  const rampageMarkers = () => {
+    rampageMk.length = 0;
+    return rampage.markers(rampageMk);
+  };
+  const rampageBusy = () => otherMissionBusy() || vigilante.active || !!state.respawn || !!state.spraying;
+  const rampageCtx = {
+    player: { x: 0, z: 0 },
+    onFoot: false,
+    busy: false,
+    frozen: false,
+    world: rampageWorld,
+    earn: (n) => economy.add(n, 'rampage'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+  };
+  // 每幀（updateShops 之後）：手機 / BUSTED・WASTED / 噴漆 → frozen（計時停、不觸發、不補敵人；HUD 維持）；暫停 / 全螢幕面板時 updateGame 不跑
+  const updateRampage = (dt, skip) => {
+    const p = playerPos();
+    rampageCtx.player.x = p.x;
+    rampageCtx.player.z = p.z;
+    rampageCtx.frozen = skip || !!state.respawn || !!state.spraying;
+    rampageCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0) && !combat.isDown(player.actor);
+    rampageCtx.busy = !rampage.active && rampageBusy();
+    rampageHud.set(rampage.update(dt, rampageCtx));
+    rampageSkulls.update(rampageCtx.frozen ? 0 : dt, rampage);
+  };
+  // 開新局 / 回主選單：無聲失敗（恢復開始前的武器、HUD 收起）
+  const cancelRampage = () => {
+    rampage.cancel();
+    rampageHud.set(null);
+    rampageSkulls.update(0, rampage);
+  };
+
   // 車流停車判斷用：玩家（或玩家的車）與路邊車輛
   const blockers = [];
   const collectBlockers = () => {
@@ -2962,6 +3032,7 @@ async function init() {
     handleCarKo(); // 爆炸在 updateGangs 之後：同一幀處理，F 下車不會繞過 WASTED
     updateStreetEvents(dt, phoneOpen);
     updateShops(dt);
+    updateRampage(dt, phoneOpen);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3320,6 +3391,7 @@ async function init() {
     cancelRobbery(!continued);
     cancelSpray();
     cancelShops();
+    cancelRampage();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     safehouses.restore(save.safehouse); // Phase 14：最後使用的安全屋（新局 defaultSave 無此欄 → null）；placePlayer 據此決定出生點
@@ -3329,6 +3401,7 @@ async function init() {
     weapons.restore(save.weapons);
     missions.restore(save.missions);
     races.restore(save.races); // 舊存檔無 races → 清空最佳成績
+    rampage.restore(save.rampage); // Phase 15：舊存檔無 rampage → 全部未完成
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3397,6 +3470,7 @@ async function init() {
     cancelRobbery();
     cancelSpray();
     cancelShops();
+    cancelRampage();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     state.started = false;
@@ -3499,6 +3573,8 @@ async function init() {
       giveWeapon(id = 'smg') {
         return weapons.give(id);
       },
+      // Phase 15：暴走（rampage.start('rampage-suits') 除錯開始；rampage.current / kills / remain 看進度；rampageWorld.alive / spawn 看補敵人）
+      rampage, rampageWorld, rampageHud,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

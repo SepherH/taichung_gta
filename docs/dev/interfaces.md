@@ -1199,6 +1199,46 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ### 36.7 回歸
 - `node tools/test/p14-weapons.mjs`、`node tools/test/p14-shops.mjs`（純邏輯 + 替身；點位以 osm-city.json 重驗）、`node tools/test/integration-p14.mjs`（main.js 靜態檢查）
 
+## 37. Phase 15 暴走任務 Rampage（P15；接線點在 `src/main.js`，介面以 `src/missions/rampage.js` 檔頭為準）
+
+### 37.1 暴走點（`RAMPAGES`，純資料）
+- 4 處：`rampage-nightmarket`（新光三越東側廣場 x 631.1, z −95.3；夜市角頭；散彈槍 36 發；60 s 擊殺 15；NT$2,000）、`rampage-qiuhonggu`（秋紅谷東側步道 x 181.1, z −289.4；秋紅谷飆車族；手槍；60 s 擊殺 12；NT$1,500）、`rampage-suits`（府會園道旁 x 926.5, z 381.0；七期西裝幫；衝鋒槍 240 發；90 s 擊殺 20；NT$3,000）、`rampage-opera`（市區，國家歌劇院西北惠民路旁 x 152.4, z 198.8；散彈槍 60 發；90 s 炸毀 6 台車；NT$2,500）
+- 欄位：`{ id, name, x, z, src, target: 'gang'|'vehicle', gang, gangName, weapon, ammo, goal, timeSec, reward }`；點位取 osm-city.json F 層步道頂點（離建築 ≥ 6 m），`tools/test/p15-rampage.mjs` 驗證地盤歸屬 / 不在建築內 / 彼此距離
+- 全部完成額外獎勵：直接給 `ALL_BONUS` NT$5,000（只在完成最後一處那次給）
+
+### 37.2 介面
+- `createRampage({ bus, weapons, gangOf(actor) → gangId|null, isTargetVehicle?(v), list?, config? })` → `{ update(dt, ctx) → out, start(id, ctx?), end(kind), cancel(), markers(out), isDone(id), doneCount, allDone, serialize() → { done }|null, restore(rec), savedWeapons() → 快照|null, active, current, kills, remain, dispose() }`
+  - `ctx = { player: { x, z }, onFoot, busy, frozen, world, earn(n, reason), toast?(text, sec) }`；`out = { active, id, def, kills, goal, remain, text, urgent }`（重用同一物件；`text` = 「暴走！ 擊殺 n/m｜mm:ss」，炸車點為「炸車」，只在擊殺數 / 剩餘整秒改變時重組）
+- 觸發：**步行**走進未完成點 `START_RADIUS` 2.5 m（「步行且在範圍內」上升緣；駕車經過不觸發，下車站在標記內即開始；結束後要離開再走進來才重開）；`busy` → toast `TOAST_BUSY` 不開始；有星數仍可開始
+- 武器：開始時 `snap = weapons.serialize()`（深拷貝）→ `weapons.restore(grantData(snap, weapon, ammo))`（擁有權加上該武器、彈匣滿、備彈 = min(ammo, reserveMax)、手持該槽）；結束（完成 / 失敗 / cancel）→ `weapons.restore(snap)`（原本未擁有 → 仍未擁有、原彈匣 / 備彈 / 槽位原樣）；進行中存檔 `weapons` 欄用 `savedWeapons()`（暫發武器不入檔）
+- 擊殺：`ped:dead`（byPlayer 且 `gangOf(ped) === def.gang`；路人 / 其他幫派 / 非玩家擊殺不算）；炸車：`vehicle:explode`（byPlayer 且 `isTargetVehicle(v)`）；達標只記 pending，下一次 `update` 才結算（不在開火呼叫堆疊內換武器）
+- 計時：`dt` clamp ≤ `MAX_DT` 0.1 s 累加（≥ 10 fps 與幀率無關）；`frozen` 時不前進、不觸發、不補敵人
+- 補敵人（gang 點）：每 `SPAWN_SEC` 2 s，玩家 `ENEMY_RADIUS` 60 m 內目標幫派存活成員 < `MIN_ENEMIES` 6 → `world.spawn(gang, x, z, ≤ SPAWN_BATCH 4)`
+- `createRampageWorld({ traffic, gangs, combat, repaint })` → `{ alive(gangId, x, z, r), spawn(gangId, x, z, n) }`：徵用半徑內、離玩家 ≥ `SPAWN_MIN_DIST` 12 m 的漫步骨架行人（同 street-events idle 條件）→ `gangs.enlist(peds, gangId)` → `repaint(p)`
+- `gangs.js` 增補：`enlist(peds, id, { weapon?, gain? })` → actor[]（換成該幫成員，武器省略 = 依 gunShare / batShare 抽；該幫敵意 + gain（預設 hostileAt）→ 圍攻玩家）、`gangOf(actor)` → 幫派 id | null
+- `createRampageHud({ root })` → `{ set(out|null), dispose() }`：`.rampage-bar` 任務條（上方中央，與其他任務條共用位置）+ `.rampage-edge` 畫面邊緣紅色脈動（CSS keyframes 只動 opacity；剩 ≤ `URGENT_SEC` 10 s 加快；`prefers-reduced-motion: reduce` 時關閉）；樣式在 `src/style.css`
+- `createSkullMarkers({ THREE, scene, heightAt, list? })` → `{ update(dt, rampage), groups, dispose() }`：程式產生的低模骷髏（Icosahedron 頭骨 + Box 下顎 + 眼窩 / 鼻），幾何 / 材質共用（`MeshStandardMaterial` 紅色 emissive 2.0、眼窩 `MeshBasicMaterial`），不新增 glb / 貼圖 / 光源 / 陰影；旋轉 + 浮動只改既有物件；已完成或暴走進行中隱藏
+- 小地圖 / 大地圖：kind `'rampage'`（`MARKER_COLORS` #d50000、hud.js `SKULL_KINDS` 畫骷髏、圖例「暴走」）；`markers(out)` 只列未完成點，進行中不列
+
+### 37.3 事件（bus）
+- `rampage:start { id, name, target, gang, goal, timeSec, weapon }`
+- `rampage:kill { id, kills, goal }`（每計入一次）
+- `rampage:complete { id, reward, kills, timeSec, all, bonus }`（`all` = 四處全部完成；`bonus` = 本次額外獎勵，否則 0）
+- `rampage:fail { id, reason: 'timeout'|'wasted'|'busted'|'cancel', kills }`（cancel = 回主選單 / 開新局，無 toast）
+- `toast`（ctx.toast 省略時）
+
+### 37.4 接線（main.js）
+- 建立（街頭事件段之後）：`rampage = createRampage({ bus, weapons, gangOf: gangs.gangOf, isTargetVehicle: v !== state.vehicle })`、`rampageWorld`、`rampageHud`、`rampageSkulls = createSkullMarkers({ THREE, scene, heightAt })`
+- 互斥：`state.rampage`（getter）；包裝既有 `state.racing` getter 併入 `rampage.active`（`otherMissionBusy` 原文由 P12 / P13 測試鎖定 → 警車任務 / 競速 / 計程車 / 救護車 / 街頭事件 / 搶劫守門經此不開始）；`vigHooks.active` 包裝（委託 / 外送 / 垃圾車 / 打工 / 噴漆）；`vigHooks.end` 包裝 → `rampage.end(kind)`（BUSTED / WASTED 失敗、恢復武器）；進行中 `interCands[0] / [4] / [5]` 清空（不接委託、不進武器店 / 安全屋）；開始條件 `busy = otherMissionBusy() || vigilante.active || respawn || spraying`
+- 每幀 `updateRampage(dt, phoneOpen)` 接在 `updateShops(dt)` 之後；`collectMarkers` 併入 `rampageMarkers()`
+- 存檔：getState `rampage: rampage.serialize()`、`weapons: rampage.savedWeapons() || weapons.serialize()`；`startGame` → `rampage.restore(save.rampage)`（`races.restore` 之後）；`startGame` / `quitToMenu` → `cancelRampage()`（`cancelShops` 之後、`cancelRespawn` 之前）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`rampage: { done: [id] }`（`[\w-]{1,64}`、去重；格式錯誤整欄丟棄、空 → 省略；舊存檔無此欄 = 全部未完成）
+- 除錯：`window.__game.rampage`（`rampage.start('rampage-suits')`）/ `rampageWorld` / `rampageHud`
+- 限制：未新增 shadow map / 貼圖單元 / 光源；每幀路徑不配置物件
+
+### 37.5 回歸
+- `node tools/test/p15-rampage.mjs`（純邏輯 + 替身，不 import three）、`node tools/test/integration-p15.mjs`（main.js 接線靜態檢查）
+
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
 ### 共通

@@ -42,6 +42,7 @@ export const MARKER_LABELS = {
   'ems-hospital': '醫院',
   'gun-shop': '武器店',
   safehouse: '安全屋',
+  rampage: '暴走', // Phase 15：暴走任務（src/missions/rampage.js）
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);

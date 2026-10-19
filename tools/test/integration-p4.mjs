@@ -171,7 +171,7 @@ const loopFn = (name) => (loopCode.match(new RegExp(`const ${name} = \\((?:dt|n,
     ['面板：開啟時停輸入 / 放開滑鼠鎖定 / 世界暫停；大地圖 / 圖鑑不渲染 3D；Esc 關閉；滑鼠鎖定遺失不誤開暫停選單', [
       'if (syncPanels()) return;', 'input.enabled = false;', 'missions.isModalOpen()', 'if (hide3D()) return;', "e.code === 'Escape'", "window.addEventListener('keydown', onPanelKey, true)", '!menu.isOpen() && !panelOpen()', 'touch || panelOpen()']],
     ['存檔 v2：version SAVE_VERSION、weapons / missions / collect、restore、統計 missionsDone / missionsFailed / shotsFired', [
-      'version: SAVE_VERSION', 'weapons: weapons.serialize()', 'missions: missions.serialize()', 'collect: { checkins: checkins.serialize(), foods: food.serialize() }',
+      'version: SAVE_VERSION', 'weapons: rampage.savedWeapons() || weapons.serialize()', 'missions: missions.serialize()', 'collect: { checkins: checkins.serialize(), foods: food.serialize() }',
       'weapons.restore(save.weapons)', 'missions.restore(save.missions)', 'checkins.restore(save.collect)', 'food.restore(save.collect)',
       'trackMissionStats(', 'extraStats.shotsFired++', 'getStats: () => currentStats()',
       // 完成 / 失敗計數由 missions/index.js 的 MISSION_STAT_EVENTS 訂閱（缺少時塞入必不命中的標籤，讓 lack 列出）

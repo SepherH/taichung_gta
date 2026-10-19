@@ -34,6 +34,7 @@
 // Phase 9（超商搶劫）：hud.setRobberyProgress(frac | null, label?) → 畫面中下（互動提示膠囊上方）進度條「搶劫中…」（.rob- 前綴，樣式在 style.css 末段）；
 //   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
 //   markers kind 'race-start'（街頭競速起點）畫橘色旗幟（FLAG_KINDS），不貼邊；'race-cp'（下一個檢查點）超出半徑時貼邊
+//   markers kind 'rampage'（Phase 15 暴走點）畫紅色骷髏（SKULL_KINDS），不貼邊
 // V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
@@ -72,6 +73,7 @@ export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
 const ICON_KINDS = { store: '超', 'gun-shop': '槍', safehouse: '家' }; // 畫成「色塊 + 白字」小方塊圖示的 kind（Phase 9 超商、Phase 14 武器店 / 安全屋）
+const SKULL_KINDS = new Set(['rampage']); // 畫成骷髏圖示（頭骨 + 下顎 + 黑眼窩）的 kind（Phase 15 暴走點），不貼邊
 const FLAG_KINDS = new Set(['race-start']); // 畫成旗幟圖示（旗桿 + 三角旗）的 kind（Phase 12 街頭競速起點），不貼邊
 const ICON_PX = 6; // 圖示方塊半邊長（螢幕 px）
 export const ROB_LABEL = '搶劫中…'; // 超商搶劫進度條預設文字（src/wanted/robbery.js PROGRESS_LABEL 同字）
@@ -922,6 +924,28 @@ export class HUD {
         ctx.lineWidth = 1.5;
         ctx.fill();
         ctx.stroke();
+        continue;
+      }
+      if (SKULL_KINDS.has(m.kind)) {
+        // 骷髏：黑框色塊頭骨（圓）+ 下顎（方）+ 兩個黑眼窩
+        const cx = R + dx;
+        const cz = R + dz;
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cz - 1, ICON_PX + 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillRect(cx - ICON_PX * 0.55, cz + ICON_PX * 0.4, ICON_PX * 1.1, ICON_PX * 0.9);
+        ctx.strokeRect(cx - ICON_PX * 0.55, cz + ICON_PX * 0.4, ICON_PX * 1.1, ICON_PX * 0.9);
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.arc(cx - ICON_PX * 0.4, cz - 1, ICON_PX * 0.3, 0, Math.PI * 2);
+        ctx.arc(cx + ICON_PX * 0.4, cz - 1, ICON_PX * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
         continue;
       }
       if (FLAG_KINDS.has(m.kind)) {

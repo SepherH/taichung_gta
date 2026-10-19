@@ -12,6 +12,8 @@
 //   weapons.ammo.smg / weapons.ammo.shotgun：{ mag, reserve }，只在 owned 含該槍時保留（缺 → 彈匣滿、附贈備彈；clamp 到上限）
 //   weapons.slot：{0,1,2} 之外只接受已擁有的 3（衝鋒槍）/ 4（散彈槍），其餘 → 0（舊存檔 slot 3 仍歸 0）
 //   safehouse：{ last: 安全屋 id（[\w-]{1,64} 字串）}——最後使用的安全屋（src/shops/safehouse.js）；格式錯誤整欄丟棄
+// Phase 15（§37，不升版，選填、defaultSave 不含）：rampage：{ done: 已完成的暴走點 id 陣列（[\w-]{1,64}、去重、≤ LIST_MAX）}
+//   （missions/rampage.js serialize）；舊存檔沒有此欄 → 省略（全部未完成）；格式錯誤整欄丟棄、非法 id 個別丟棄，清洗後為空也省略
 
 export const SAVE_VERSION = 2;
 
@@ -130,6 +132,13 @@ function safehouseRecord(src) {
   return { last: src.last };
 }
 
+// 暴走完成紀錄：{ done: [id] } → 同形；非物件 / done 非陣列 → null；只收 SAFEHOUSE_ID_RE 格式字串、去重；空 → null
+function rampageRecord(src) {
+  if (!isObj(src) || !Array.isArray(src.done)) return null;
+  const done = [...new Set(src.done.filter((id) => typeof id === 'string' && SAFEHOUSE_ID_RE.test(id)))].slice(0, LIST_MAX);
+  return done.length ? { done } : null;
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -205,6 +214,8 @@ export function validateSave(obj) {
   if (rc) out.races = rc;
   const sh = safehouseRecord(m.safehouse);
   if (sh) out.safehouse = sh;
+  const rp = rampageRecord(m.rampage);
+  if (rp) out.rampage = rp;
   return out;
 }
 
