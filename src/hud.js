@@ -38,6 +38,7 @@
 //   markers kind 'rampage'（Phase 15 暴走點）畫紅色骷髏（SKULL_KINDS），不貼邊
 //   markers kind 'stunt' / 'stunt-done'（Phase 16 特技跳台）畫坡道三角圖示（RAMP_KINDS），不貼邊；已完成（FADED_KINDS）灰色淡化
 //   markers kind 'story'（P20 故事任務線起點，marker-colors 金色）畫金底「S」字小方塊（ICON_KINDS），不貼邊；任務目標沿用 'mission-dest'（貼邊）
+//   markers kind 'minigame'（P21 夜市攤位小遊戲，marker-colors 青色）畫青底「玩」字小方塊（ICON_KINDS），不貼邊
 //   markers kind 'fire'（P18 消防車任務起火車，marker-colors 橘紅）超出半徑時貼邊（EDGE_KINDS）；任務條為 .fire-bar（taxi.js createSideJobBar）
 // V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
@@ -78,6 +79,7 @@ export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
 const ICON_KINDS = { store: '超', 'gun-shop': '槍', safehouse: '家' }; // 畫成「色塊 + 白字」小方塊圖示的 kind（Phase 9 超商、Phase 14 武器店 / 安全屋）
 ICON_KINDS.story = 'S'; // P20 故事任務起點：金底「S」（不貼邊）
+ICON_KINDS.minigame = '玩'; // P21 夜市攤位小遊戲（射氣球 / 彈珠台）：青底「玩」（不貼邊）
 const SKULL_KINDS = new Set(['rampage']); // 畫成骷髏圖示（頭骨 + 下顎 + 黑眼窩）的 kind（Phase 15 暴走點），不貼邊
 const RAMP_KINDS = new Set(['stunt', 'stunt-done']); // 畫成坡道圖示（黑框直角三角形）的 kind（Phase 16 特技跳台），不貼邊
 const FADED_KINDS = new Set(['stunt-done']); // 淡化畫（已完成的特技跳台）

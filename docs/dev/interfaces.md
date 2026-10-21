@@ -77,6 +77,8 @@
 | `story:chapter` | `{ chapter: 1, title: '七期夜雨', bonus: 5000, car }`（三關全完成；額外獎勵已入帳、專屬座車解鎖、已 `ctx.save()`；只發一次） | missions/story.js |
 | `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
 | `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
+| `minigame:start` | `{ id: 'balloon'\|'pachinko', price }`（夜市攤位付費開局；已 `spend(price, 'minigame')`） | minigames/nightmarket.js（§43） |
+| `minigame:end` | `{ id, score, reward, reason: 'done'\|'esc'\|'left'\|'wanted'\|'foul', best, newBest }`（score = 射氣球破幾顆 / 彈珠台 3 顆總分；reward > 0 時已 `earn(reward, 'minigame')`；非 done = 結束不退費、reward 0、不記最佳） | minigames/nightmarket.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
 
 表外的新事件名稱必須先加進本表。
@@ -1441,6 +1443,49 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 42.5 回歸
 - `node tools/test/p20-story.mjs`（純邏輯 + 替身世界 + save.js，不 import three / rapier）、`node tools/test/integration-p20.mjs`（main.js 接線靜態檢查 + interfaces.md 本節 + marker-colors / hud / big-map / light-pillar / style.css）
+
+## 43. P21 夜市攤位小遊戲（射氣球 / 彈珠台；接線點在 `src/main.js`，介面以 `src/minigames/nightmarket.js` 檔頭為準）
+
+### 43.1 攤位與規則（純資料 + 純函式，不 import three）
+- `BOOTHS`：`balloon`「夜市射氣球」（x 547.3, z −112.42）、`pachinko`「夜市彈珠台」（x 564.29, z −139.54），皆 yaw −2.13（面向攤位內側、背離道路）；夜市角頭地盤內、夜市外送取餐點所在的惠來路二段西側人行道（路緣外 3.6 m、中心線 10 m），沿路距既有攤位列（job-props.js `stallRow`，±3.9 m）約 16 m，不重疊、不進外送取餐 12 m 半徑
+  - P21 修正（驗收：攤位旁按 E 被垃圾車投入口 priority 3 搶走）：站位離任一車道中心線 ≥ 垃圾車 `laneOffsetM` 1.8 + `DUMP_RADIUS` 5 + `MINIGAME_RADIUS` 2.5 = 9.3 m；離委託 / 打工起點（外送取餐點、夜市跑單 stallBack、攤位列、泊車亭、新光三越委託起點觸發圈）≥ 12 m 且在其觸發圈 + 2.5 m 之外（p21-nightmarket 驗距離）
+- 互動：站位 `MINIGAME_RADIUS` 2.5 m 內按 E（priority `MINIGAME_PRIORITY` 2，同武器店 / 安全屋；同級取近）；站位半徑內攤位提示壓過 priority ≤ `MINIGAME_OVERRIDE_PRIORITY` 3（委託 / 外送 / 打工 / 垃圾車；interactable 帶 `override: 3`），故事對白等更高 priority 不壓；玩中走遠 > `LEAVE_DIST` 8 m 結束不退費
+- 外觀（`createNightMarketView({ THREE, scene, booths, heightAt, beaconColor })`）：攤位部件合併成 1 個頂點色網格 + 氣球牆 1 個 `InstancedMesh`（15 顆，instanceColor，破掉 = 縮放 0 矩陣）+ 兩攤小光柱共用 1 個 `InstancedMesh`（`MINIGAME_BEACON` 7 m / r 0.7，`BEACON_COLORS.minigame` 0x00b8d4）＝ draw call +3；無貼圖、無光源、不投影
+- 碰撞：`boothColliderBoxes(booths, heightAt)` → `addStaticBox`（射氣球：櫃台 / 後牆 / 兩側板；彈珠台：機台）
+- 射氣球：NT$50、5 × 3 氣球牆（攤位本地 +Z 3.65 m、離地 1.2–2.1 m、間距 0.45 m）、`BALLOON_SHOTS` 10 發（只算手槍；開局自動換手槍，無限備彈不變）；子彈穿透，射線 `BALLOON_HIT_R` 0.3 m 內全破（瞄兩顆中間一槍兩顆）；`balloonReward`：≥ 12 顆 NT$300、全破 NT$800；10 發打完 / 全破 → 下一次 `update` 結算（或同幀 `game:pause` 先結算）
+  - 豁免 / 違規：只有攤位武器 `BALLOON_WEAPON` 'pistol'、槍口離站位 ≤ `BALLOON_AIM_DIST` 12 m、射線與攤位正面夾角 ≤ `BALLOON_AIM_DEG` 30° 且在氣球牆平面左右 ≤ 1.5 m 的射擊才算發數 / 不報 gunfire / 不傷行人；其他武器或朝攤位外照常報 gunfire、不遮蔽行人、不算發數；局中換非攤位武器（`weapon:equip`）、用其他武器開火、或連續 `BALLOON_FOUL_SHOTS` 3 發朝外 → `reason 'foul'` 結束不退費
+- 彈珠台：NT$30、DOM / canvas 面板（`ms-panel` 樣式；世界暫停）；按住空白鍵 / Enter / 「發射」蓄力（`chargePower`，0.8 / s）、放開發射（`launchSpeed`：左上發射口水平初速 60–520），`pachinkoStep` 固定子步 1/240 s：重力、左右牆、釘子推出 + 法向反彈 0.45（正上方落下依列奇偶微推）、格子隔板，落入 9 格 `SLOT_SCORES` [10, 30, 50, 20, 100, 20, 50, 30, 10]；3 顆 `pachinkoReward`：3 顆全落 100 分格 NT$500，否則總分 ≥ `PACHINKO_WIN` 180 NT$200（不累加）；結果留在面板，Enter / Esc / 點擊關閉
+  - P21 修正（原本決定論，蓄滿力每顆必落 50 分格、每局必得 NT$200）：釘子反彈法向加隨機旋轉 ±`PEG_JITTER`/2（0.45 rad），亂數 `createRng(seed)`（mulberry32）以局為種子（`pachinkoSeed` 數字 = 固定、函式 = 每局取值、null = 開局時間 ⊕ 局數），同 seed 可重現；`pachinkoStep(ball, h, rng?)` / `simulatePachinko(power, ball?, rng?)` 不給 rng = 不偏移
+  - 期望值：均勻隨機力道 2000 局模擬期望獎金 ≈ NT$11 < 票價 30、NT$500 機率 ≈ 0.05–0.1%（≤ 2%）；最佳固定力道期望 ≈ NT$22（仍 < 30）；測試內跑模擬斷言
+- 資格 `checkPlay(booth, { stars, busy, money })`：通緝 ≥ 1 星 → `WANTED_TEXT`「…先甩掉警察再來玩！」（先判）；busy → 不可玩；錢不夠 → 不開局
+
+### 43.2 介面
+- `createNightMarket({ bus, booths, heightAt, getMoney, spend(n, reason), earn(n, reason), getStars, isBusy() → string|null, equipPistol, getWeapon?, pachinkoSeed?, toast, view?, doc?, root?, keyTarget? })` → `{ nearest(pos), start(id), update(dt, ctx), updatePanel(dt), pressLaunch(), releaseLaunch(), quit(reason), close(), cancel(), markers(), serialize(), restore(rec), stats(), best(id), exemptShot(e), shieldShots(origin, dir), setAutoPause(on), panelOpen(), active, playing, booth, balloon, pachinko（含 seed）, dispose() }`
+  - `ctx = { x, z, onFoot, frozen }`（main 每幀重用）；`!onFoot`（上車 / 倒地）/ `frozen`（重生中）/ 走遠 → `reason 'left'`；局中被通緝 → `'wanted'`；射氣球局中 `game:pause`（Esc 開暫停選單）→ `'esc'`（但最後一發已打完 `balloon.done` → 先正常結算 `'done'`；`setAutoPause(true)` 期間的暫停 = 切視窗自動暫停，不結束、局保留）；彈珠台面板 Esc / 「離開」→ `'esc'`；違規 → `'foul'`；皆不退費
+  - `exemptShot(e)`（weapon:fire payload）/ `shieldShots(origin, dir)`（raycast 參數，另驗 `getWeapon()` = 'pistol'）：射氣球局中（含 10 發打完、結算前那一幀）且手槍朝氣球牆才為真；不帶參數 → 假
+  - `cancel()`：無聲收場（不發事件、不退費、收面板與狀態條、氣球補滿）
+- 純函式：`balloonCenters` / `rayBalloonHits` / `balloonReward` / `chargePower` / `launchSpeed` / `launchBall` / `pachinkoStep` / `simulatePachinko` / `slotAt` / `pachinkoReward` / `checkPlay` / `minigameRecord` / `boothFootprint` / `boothColliderBoxes`
+
+### 43.3 事件（bus）
+- `minigame:start { id, price }` / `minigame:end { id, score, reward, reason, best, newBest }`（§1 事件表）；訂閱 `weapon:fire`（射氣球命中：槍口 x, y, z + dirX/Y/Z 射線，落點 ex, ey, ez 之後不算）、`game:pause`、`weapon:equip`（局中換非攤位武器 → foul）；氣球破 `ui:sound { kind: 'click' }`、結算 `ui:sound { kind: 'reward'|'fail' }`
+
+### 43.4 接線（main.js）
+- 建立（故事任務段之後、畫質段之前）：`nightMarketView = createNightMarketView({ THREE, scene, booths: MINIGAME_BOOTHS, heightAt, beaconColor: BEACON_COLORS.minigame })`、`nightMarket = createNightMarket({ … spend: economy.spend, earn: economy.add, getStars: wanted.stars, isBusy: minigameBusy, equipPistol: weapons.select(WEAPONS.pistol.slot), getWeapon: weapons.current, doc: document, keyTarget: window })`；`let nightMarket = null` 宣告在 `raycast` 之前
+- 碰撞：`for (const b of boothColliderBoxes(MINIGAME_BOOTHS, heightAt)) addStaticBox(…)`（接在夜市攤位 / 泊車亭那行之後）
+- 犯行 / 傷人：`weapon:fire` 犯行監聽 `if (typeof nightMarket !== 'undefined' && nightMarket.exemptShot(e)) return;`（新起一行）；`raycast` 在 `rayHit.actor` 之後 `if (… nightMarket.shieldShots(origin, dir)) rayHit.actor = null;`
+- 暫停：`pointerlockchange` 既有 `if (lost && …) menu.openPause();` 原文不改，前後各新起一行 `nightMarket.setAutoPause(true)` / `(false)`（typeof 守衛）→ 切視窗自動暫停不算放棄
+- 互動：步行 `inter = minigameInteractable(inter, free);` 接在 `nearestInteractable` 之後（storyInteractable 之後）；`minigameInteractable` 內 `if (inter && (inter.priority || 0) <= c.override) return c;`（站位半徑內攤位優先）；`nearestInteractable` `if (nightMarket && nightMarket.active) interCands[0] = null;`
+- 互斥：`minigameBusy = otherMissionBusy() || vigilante.active || rampage.active || stunts.active || firefighter.active || story.active || 重生 / 噴漆中`；包裝 `state.racing` getter 併入 `nightMarket.active`；彈珠台面板 → 包裝 `gunShop.isOpen` 併入 `panelOpen`（不改 panelOpen 原文）
+- 每幀：`nightMarket.updatePanel(dt)` 在 `syncPanels()` 之前；`updateNightMarket(dt, phoneOpen)` 接在 `updateStory(...)` 之後；`collectMarkers` 加 `pushAll(out, nightMarket.markers())`
+- 存檔：getState `minigames: nightMarket.serialize()`；`startGame` → `nightMarket.restore(save.minigames)`（`story.restore` 之後）；`startGame` / `quitToMenu` → `cancelNightMarket()`（`cancelStory()` 之後）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`minigames: { balloon: { best: 0..15 }, pachinko: { best: 0..300 } }`；非物件整欄丟棄、best 非法 → 0、兩項皆 0 → 省略（舊存檔相容）
+- 統計頁（`src/ui/menu.js`）：搶包列之後「射氣球最佳 N 顆」「彈珠台最佳 N 分」（`getStats` 併入 `nightMarket.stats()` → `minigameBalloonBest` / `minigamePachinkoBest`）
+- 地圖：marker-colors `minigame` #00b8d4、hud.js `ICON_KINDS.minigame = '玩'`、big-map 圖例「夜市小遊戲」
+- 除錯：`window.__game.nightMarket` / `nightMarketView`
+- 限制：未新增 shadow map / 貼圖單元 / 光源；draw call 增量 3；每幀路徑不配置物件（面板文字只在數值變化時重組）
+
+### 43.5 回歸
+- `node tools/test/p21-nightmarket.mjs`（純邏輯 + 假 THREE + save.js，不 import three）、`node tools/test/integration-p21.mjs`（main.js 接線靜態檢查 + interfaces.md 本節 + 統計頁字樣 + marker-colors / hud / big-map / light-pillar）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

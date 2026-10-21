@@ -442,6 +442,9 @@ export function createMenu({
     for (const [key, label, fmt] of STAT_ROWS) add(label, fmt(Number.isFinite(s[key]) ? s[key] : 0));
     // P19 飛車搶包：次數與累計金額併成一列「搶包 N 次 / NT$X」
     add('搶包', `${Number.isFinite(s.snatches) ? s.snatches : 0} 次 / ${formatMoney(Number.isFinite(s.snatchMoney) ? s.snatchMoney : 0)}`);
+    // P21 夜市小遊戲最佳成績（getStats 帶 minigameBalloonBest / minigamePachinkoBest；缺 → 0）
+    add('射氣球最佳', `${Number.isFinite(s.minigameBalloonBest) ? s.minigameBalloonBest : 0} 顆`);
+    add('彈珠台最佳', `${Number.isFinite(s.minigamePachinkoBest) ? s.minigamePachinkoBest : 0} 分`);
     // Phase 17 隱藏包裹進度（getStats 帶 hiddenPackagesTotal 才顯示）
     if (Number.isFinite(s.hiddenPackagesTotal)) add('隱藏包裹', `${Number.isFinite(s.hiddenPackages) ? s.hiddenPackages : 0} / ${s.hiddenPackagesTotal}`);
     statsPage.appendChild(grid);

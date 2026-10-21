@@ -22,6 +22,8 @@
 // P20（不升版，選填、defaultSave 不含）：story：{ chapter: 1, done: 已完成的故事任務 id 陣列（只收 STORY_IDS、依章節順序去重）, unlocked: boolean }
 //   （src/missions/story.js serialize；unlocked = 第一章全破的永久獎勵）；舊存檔沒有此欄 → 省略（從第一關開始）；非物件整欄丟棄；
 //   unlocked 只在三關皆完成時成立；done 為空且未解鎖 → 省略
+// P21（不升版，選填、defaultSave 不含）：minigames：{ balloon: { best: 0..15 整數（射氣球最多打破顆數）}, pachinko: { best: 0..300 整數（彈珠台 3 顆最高總分）} }
+//   （src/minigames/nightmarket.js serialize；規則同該檔 minigameRecord）；舊存檔沒有此欄 → 省略（兩項 0）；非物件整欄丟棄；best 非法 → 0；兩項皆 0 → 省略
 
 export const SAVE_VERSION = 2;
 
@@ -182,6 +184,20 @@ function storyRecord(src) {
   return { chapter: 1, done, unlocked };
 }
 
+// 夜市小遊戲最佳成績：{ balloon: { best }, pachinko: { best } } → 同形；規則同 src/minigames/nightmarket.js minigameRecord（測試交叉比對）
+const MINIGAME_MAX = { balloon: 15, pachinko: 300 }; // 與 nightmarket.js BALLOON_COUNT / PACHINKO_MAX_SCORE 一致
+function minigamesRecord(src) {
+  if (!isObj(src)) return null;
+  const pick = (o, max) => {
+    const b = isObj(o) ? o.best : undefined;
+    return Number.isInteger(b) && b > 0 ? Math.min(max, b) : 0;
+  };
+  const balloon = pick(src.balloon, MINIGAME_MAX.balloon);
+  const pachinko = pick(src.pachinko, MINIGAME_MAX.pachinko);
+  if (!balloon && !pachinko) return null;
+  return { balloon: { best: balloon }, pachinko: { best: pachinko } };
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -267,6 +283,8 @@ export function validateSave(obj) {
   if (ff) out.firefighter = ff;
   const sy = storyRecord(m.story);
   if (sy) out.story = sy;
+  const mg = minigamesRecord(m.minigames);
+  if (mg) out.minigames = mg;
   return out;
 }
 

@@ -30,6 +30,7 @@ export const MARKER_COLORS = {
   'stunt-done': '#8d8d8d', // 已完成的特技跳台（同圖示、灰色並淡化：hud.js / big-map.js FADED_KINDS）
   package: '#d4a017', // 已收集的隱藏包裹（Phase 17，src/collect/packages.js markers()；只進大地圖、淡化小點（big-map.js FADED_KINDS）；未收集者不標示）
   story: '#e6b422', // 故事任務起點「S」（P20，src/missions/story.js markers()；小地圖畫金底「S」字圖示（hud.js ICON_KINDS），不貼邊；任務目標沿用 mission-dest 圖釘）
+  minigame: '#00b8d4', // P21 夜市攤位小遊戲（src/minigames/nightmarket.js markers()；射氣球 / 彈珠台 2 攤，小地圖畫青底「玩」字圖示（hud.js ICON_KINDS），不貼邊，同小光柱青色）
   fire: '#ff3d00', // 起火車（P18 消防車任務，src/missions/firefighter.js markers()；會被推動，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色

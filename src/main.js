@@ -99,6 +99,12 @@
 //   每幀 updateStory 接在 updateSnatch 之後（手機 / BUSTED・WASTED / 噴漆中凍結）；對白：互動鍵下一句、STORY_SKIP_KEY（Enter）整段跳過（storyInteractable 於步行 / 駕駛提示鏈最後覆蓋）；
 //   互斥：state.story（getter）、包裝 state.racing getter（otherMissionBusy / 搶劫 / 暴走 / 特技 / 消防 / 副任務 / 競速皆擋）、vigHooks.active / end（委託類 / 噴漆 / BUSTED・WASTED → 任務失敗）；
 //   nearestInteractable 故事任務中不接委託；存檔 story（{ chapter, done, unlocked }）；章節獎勵 → 安全屋專屬座車 storyCars + autosave.flush('story')；開新局 / 回主選單 → cancelStory()
+// 夜市攤位小遊戲（P21，§43）：createNightMarket（src/minigames/nightmarket.js 純邏輯：射氣球 / 彈珠台 2 攤）+ createNightMarketView（攤位 / 氣球牆 / 小光柱共 3 draw calls）；
+//   攤位碰撞 boothColliderBoxes（物理世界建好後與夜市攤位同列補靜態方塊）；步行 minigameInteractable 接在 nearestInteractable 之後（priority 2，同級取近；站位半徑內壓過 priority ≤ 3）；
+//   射氣球：weapon:fire 命中判定（模組自行訂閱）、局中手槍朝氣球牆 exemptShot(e) → 不報 gunfire、shieldShots(origin, dir) → raycast 不回傳行人；
+//   失去滑鼠鎖定自動暫停前後 setAutoPause(true / false)（不算放棄）；彈珠台面板：gunShop.isOpen 包裝併入 panelOpen、
+//   updatePanel 在 syncPanels 之前（世界暫停中照跑）；互斥：包裝 state.racing getter；每幀 updateNightMarket 接在 updateStory 之後；存檔 minigames；統計頁兩項最佳成績；
+//   開新局 / 回主選單 → cancelNightMarket()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -180,6 +186,7 @@ import { createHelicopter, createHeliObstacleTop } from './wanted/helicopter.js'
 import { respawnPlace, SPRAY_SHOPS } from './wanted/places.js';
 import { createSprayShops } from './wanted/spray.js';
 import { createBeaconPool } from './missions/light-pillar.js';
+import { BEACON_COLORS } from './missions/light-pillar.js'; // P21：夜市小遊戲攤位光柱色（另起一行，integration-p8 鎖上一行字面）
 import { STORES } from './wanted/places.js';
 import { createRobberies, aimNear, AIM_HEIGHT, PROGRESS_LABEL } from './wanted/robbery.js';
 import { createVigilante, createFugitiveWorld, createVigilanteBar, PROMPT_TEXT as VIG_PROMPT } from './missions/vigilante.js';
@@ -192,6 +199,7 @@ import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers
 import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
 import { createPackages, createPackageMesh } from './collect/packages.js';
 import { createSnatch, SNATCH_PROMPT } from './snatch.js';
+import { createNightMarket, createNightMarketView, boothColliderBoxes, BOOTHS as MINIGAME_BOOTHS } from './minigames/nightmarket.js';
 import { createStory, createStoryHud, createStoryCarDepot, CONTACT as STORY_CONTACT, STORY_BEACON, STORY_SKIP_KEY, VAN_TYPE as STORY_VAN_TYPE, VAN_COLOR as STORY_VAN_COLOR } from './missions/story.js';
 import { createFirefighter, createFireWorld, createFireTruckDepot, createWaterCannonMesh, nozzleOf, isFireTruck, FIRE_STATION, FIRE_TRUCK_SPOT, FIRE_STATION_BEACON, PROMPT_START as FIRE_PROMPT_START, PROMPT_QUIT as FIRE_PROMPT_QUIT, SPRAY_KEY as FIRE_SPRAY_KEY } from './missions/firefighter.js';
 
@@ -721,6 +729,7 @@ async function init() {
   // 必須在 buildQiuhonggu / buildBuildings 之後：木平台等 addWalkable 追加的可行走面才會一併建成碰撞體
   const colliderStats = buildWorldColliders(RAPIER, pw.world, { osm: osmWithBuildings(osm, buildings.colliders), terrain });
   for (const b of [...stallBoxes, ...valetBoxes]) addStaticBox(RAPIER, pw.world, b); // 夜市攤位 / 泊車亭：WORLD 組靜態方塊（各畫質皆有）
+  for (const b of boothColliderBoxes(MINIGAME_BOOTHS, heightAt)) addStaticBox(RAPIER, pw.world, b); // P21 夜市小遊戲攤位：櫃台 / 後牆（擋子彈）/ 側板 / 彈珠台機台
   const router = createContactRouter(RAPIER, pw);
   pw.onAfterStep((dt) => router.drain(dt));
   const physics = { RAPIER, pw, router, groups: GROUPS };
@@ -806,6 +815,7 @@ async function init() {
     return null;
   };
   const rayQuery = { flags: QF_NO_SENSOR, groups: shotGroups, excludeCollider: undefined };
+  let nightMarket = null; // P21 夜市小遊戲（createNightMarket 於故事任務段之後建立；raycast / 犯行 / 互動遮罩先宣告、建立前為 null）
   const raycast = (origin, dir, maxDist, opts) => {
     const self = opts && opts.excludeActor === player.actor;
     rayQuery.excludeCollider = self && character.enabled ? character.collider : undefined;
@@ -825,6 +835,7 @@ async function init() {
     rayHit.normal.y = h.ny;
     rayHit.normal.z = h.nz;
     rayHit.actor = actor && !(opts && opts.excludeActor === actor) ? actor : null;
+    if (rayHit.actor && rayHit.actor !== player.actor && nightMarket && nightMarket.shieldShots(origin, dir)) rayHit.actor = null; // P21 射氣球局中手槍朝氣球牆：子彈不傷行人（攤位後方為牆；其他武器 / 朝外照常）
     rayHit.surface = ent && (ent.kind === 'vehicle' || ent.kind === 'npcCar') ? 'vehicle' : 'world';
     rayHit.vehicle = rayHit.surface === 'vehicle' ? vehicleOfEntity(ent) : null;
     return rayHit;
@@ -1130,6 +1141,7 @@ async function init() {
     pushAll(out, stuntMarkers()); // Phase 16 特技跳台（已完成淡化）
     pushAll(out, fireMarkers()); // P18 消防車任務起火車（kind 'fire'）
     pushAll(out, storyMarkers()); // P20 故事任務起點 S（kind 'story'）/ 目標圖釘（mission-dest）
+    pushAll(out, nightMarket.markers()); // P21 夜市小遊戲攤位（kind 'minigame'）
     if (!withVehicles) packages.markers(out); // Phase 17 隱藏包裹：只有大地圖、只標已收集（淡化）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
@@ -1161,6 +1173,7 @@ async function init() {
     if (state.sideJob) interCands[0] = null; // 計程車 / 救護車副任務中同樣不接委託
     if (state.firefighter) interCands[0] = null; // 消防車任務（P18）出勤中不接委託
     if (state.story) interCands[0] = null; // 故事任務（P20）進行中不接委託
+    if (typeof nightMarket !== 'undefined' && nightMarket.active) interCands[0] = null; // P21 夜市小遊戲進行中不接委託（typeof 守衛讓 integration-p14 抽段沙盒可執行）
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1266,7 +1279,7 @@ async function init() {
     extraStats.pedsKnockedOut++;
     economy.add(LOOT_MIN + Math.floor(Math.random() * (LOOT_MAX - LOOT_MIN + 1)), 'loot');
   });
-  const currentStats = () => ({ ...statsWithExtra(economy.stats, extraStats), hiddenPackages: packages.found, hiddenPackagesTotal: packages.total }); // Phase 17：統計頁「隱藏包裹 N / 20」（packages 於下方建立，呼叫時已存在）
+  const currentStats = () => ({ ...statsWithExtra(economy.stats, extraStats), hiddenPackages: packages.found, hiddenPackagesTotal: packages.total, ...nightMarket.stats() }); // Phase 17：統計頁「隱藏包裹 N / 20」；P21：射氣球 / 彈珠台最佳（packages / nightMarket 於下方建立，呼叫時已存在）
   // 存檔 schema v2（契約 §18）：weapons / missions / collect
   const autosave = createAutosave({
     store,
@@ -1290,6 +1303,7 @@ async function init() {
         packages: packages.serialize(), // Phase 17：隱藏包裹 { found, tier, bonus }（一個都沒收集 = null，存檔省略）
         firefighter: firefighter.serialize(), // P18：消防車任務 { fireproof, best }（未玩過 = null，存檔省略）
         story: story.serialize(), // P20：故事任務 { chapter, done, unlocked }（一關都沒完成 = null，存檔省略）
+        minigames: nightMarket.serialize(), // P21：夜市小遊戲最佳成績 { balloon: { best }, pachinko: { best } }（皆 0 = null，存檔省略）
       };
     },
   });
@@ -1603,6 +1617,7 @@ async function init() {
   bus.on('weapon:fire', (e) => {
     // 警員開槍（adapters：police true / byPlayer false）不算；玩家開槍要 CRIME_GUNFIRE_RANGE 內有行人或警員
     if (!e || !e.byPlayer || e.police) return;
+    if (typeof nightMarket !== 'undefined' && nightMarket.exemptShot(e)) return; // P21 射氣球局中手槍朝氣球牆不算 gunfire（其他武器 / 朝外 / 局外照常；typeof 守衛讓 integration-p7 抽段沙盒可執行）
     if (vigHooks.fugitiveShot(e.ex, e.ez, e.vehicle)) return; // 警車任務：射擊逃犯車（落點在逃犯車附近）、街頭事件：打中罪犯車本身（e.vehicle）不算 gunfire
     if (peopleNear(e.x, e.z, CRIME_GUNFIRE_RANGE, true)) reportCrime(CRIMES.gunfire, e.x, e.z);
   });
@@ -3174,6 +3189,55 @@ async function init() {
     storyHud.set(null);
   };
 
+  // ---------- 夜市攤位小遊戲（P21，src/minigames/nightmarket.js）----------
+  // 射氣球 NT$50（手槍 10 發、氣球牆 InstancedMesh）/ 彈珠台 NT$30（DOM / canvas 面板）；扣款 economy.spend、獎金 economy.add(n, 'minigame')
+  // 通緝 ≥ 1 星 → 「先甩掉警察」；任務 / 副任務 / 其他活動中 → 不可玩；外觀 3 draw calls（攤位合併網格 + 氣球 + 兩根小光柱），無貼圖 / 光源 / 陰影
+  const nightMarketView = createNightMarketView({ THREE, scene, booths: MINIGAME_BOOTHS, heightAt, beaconColor: BEACON_COLORS.minigame });
+  const minigameBusy = () => otherMissionBusy() || vigilante.active || rampage.active || stunts.active || firefighter.active || story.active || !!state.respawn || !!state.spraying;
+  nightMarket = createNightMarket({
+    bus,
+    booths: MINIGAME_BOOTHS,
+    heightAt,
+    getMoney: () => economy.money,
+    spend: (n, reason) => economy.spend(n, reason),
+    earn: (n, reason) => economy.add(n, reason),
+    getStars: () => wanted.stars,
+    isBusy: () => (minigameBusy() ? '任務進行中，不能玩夜市小遊戲' : null),
+    equipPistol: () => weapons.select(WEAPONS.pistol.slot),
+    getWeapon: () => weapons.current, // shieldShots 只在手持攤位武器（手槍）時遮蔽行人
+    toast: (t, sec) => hud.toast(t, sec),
+    view: nightMarketView,
+    doc: document,
+    root: document.body,
+    keyTarget: window,
+  });
+  // 彈珠台面板併入 panelOpen（不改 panelOpen 原文：包裝 gunShop.isOpen；開著時世界與輸入暫停、不開手機 / 不因失去滑鼠鎖定開暫停選單）
+  const gunShopIsOpen = gunShop.isOpen;
+  gunShop.isOpen = () => gunShopIsOpen() || nightMarket.panelOpen();
+  // 互斥旗標：otherMissionBusy / 搶劫守門讀 state.racing → 包裝既有 racing getter 併入（不改 otherMissionBusy 原文）
+  const racingGetMinigame = Object.getOwnPropertyDescriptor(state, 'racing').get;
+  Object.defineProperty(state, 'racing', { get: () => racingGetMinigame() || nightMarket.active, enumerable: true, configurable: true });
+  // 步行互動鏈（nearestInteractable 之後）：攤位候選與既有候選比 priority / 距離（同 pickInteractable 規則）
+  const minigameInteractable = (inter, allowed) => {
+    if (!allowed || state.respawn) return inter;
+    const c = nightMarket.nearest(player.pos);
+    if (!c) return inter;
+    if (inter && (inter.priority || 0) <= c.override) return c; // 站位半徑內攤位提示優先（壓過委託 / 外送 / 打工 / 垃圾車 priority 3；故事對白等更高者不壓）
+    if (!inter || c.priority > (inter.priority || 0) || (c.priority === (inter.priority || 0) && c.dist < (Number.isFinite(inter.dist) ? inter.dist : Infinity))) return c;
+    return inter;
+  };
+  const nightMarketCtx = { x: 0, z: 0, onFoot: false, frozen: false };
+  // 每幀（updateStory 之後）：射氣球走遠 > 8 m / 上車 / 倒地 / 重生 / 通緝 → 結束不退費；10 發打完 → 結算；小光柱脈動
+  const updateNightMarket = (dt, phoneOpen) => {
+    const p = playerPos();
+    nightMarketCtx.x = p.x;
+    nightMarketCtx.z = p.z;
+    nightMarketCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0) && !combat.isDown(player.actor);
+    nightMarketCtx.frozen = !!state.respawn;
+    if (!phoneOpen) nightMarket.update(dt, nightMarketCtx);
+  };
+  const cancelNightMarket = () => nightMarket.cancel();
+
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
     scene.traverse((o) => {
@@ -3414,6 +3478,7 @@ async function init() {
     // 手機開 / 關的轉換（Esc / T / 返回鈕在 keydown / click 內關手機，這裡下一幀才還原輸入）；手機開著世界照跑
     let phoneOpen = syncPhone();
     // 全螢幕面板開啟中：世界與輸入暫停（面板自行處理 E / Esc；大地圖 / 圖鑑的 Esc 見 onPanelKey）
+    nightMarket.updatePanel(dt); // P21 彈珠台面板：蓄力 / 珠子模擬（面板開著 = panelOpen，世界暫停中照跑）
     if (syncPanels()) return;
     const snap = input.snapshot();
     if (snap.pressed.pause) {
@@ -3487,6 +3552,7 @@ async function init() {
     updateFirefighter(dt, phoneOpen, state.mode === 'drive' && (snap.down.attack || input.down(FIRE_SPRAY_KEY)));
     updateSnatch(dt, phoneOpen || !!state.respawn); // P19：接在 updateFirefighter 之後（暫停 / 面板 / 重生中凍結）
     updateStory(dt, phoneOpen, input.wasPressed(STORY_SKIP_KEY)); // P20：故事任務（Enter = 對白整段跳過）
+    updateNightMarket(dt, phoneOpen); // P21：夜市小遊戲（射氣球走遠 / 通緝 / 上車結束、結算）
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3505,6 +3571,7 @@ async function init() {
       pickups.update(dt, player.pos); // 拾取物（目前無放置點，保留串接）
       inter = free ? nearestInteractable(player.pos, true) : null;
       inter = storyInteractable(inter, free); // P20：對白中「下一句」/ 站在 S 上「接受故事任務」優先
+      inter = minigameInteractable(inter, free); // P21：夜市小遊戲攤位（priority 2，同級取近）
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (over) {
@@ -3747,7 +3814,9 @@ async function init() {
     }
     const lost = hadLock;
     hadLock = false;
+    if (typeof nightMarket !== 'undefined' && nightMarket) nightMarket.setAutoPause(true); // P21：切視窗 / 失去鎖定的自動暫停不算放棄射氣球（同步 emit 的 game:pause 讀此旗標）
     if (lost && state.started && !state.paused && !menu.isOpen() && !panelOpen()) menu.openPause();
+    if (typeof nightMarket !== 'undefined' && nightMarket) nightMarket.setAutoPause(false);
   });
 
   // mobile.js 的「開始遊戲」手勢（全螢幕 → 螢幕不變暗、body.playing）掛在 #start-btn 的 click 上：
@@ -3855,6 +3924,7 @@ async function init() {
     cancelRampage();
     cancelStunts();
     cancelStory(); // P20：任務中 → 無聲失敗（貨車 / 叛徒車 / 徵用成員回收）、字幕收起
+    cancelNightMarket(); // P21：小遊戲中 → 無聲收場（不退費）、面板 / 狀態條收起
     cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
@@ -3873,6 +3943,7 @@ async function init() {
     snatch.restore(save.stats); // P19：搶包統計存在 save.stats（缺欄位視 0）
     story.restore(save.story); // P20：舊存檔無 story → 從第一關開始
     storyCars.ensure(true, null, story.unlocked); // P20：章節獎勵座車（未解鎖 → 收回）
+    nightMarket.restore(save.minigames); // P21：舊存檔無 minigames → 兩項最佳成績 0
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3946,6 +4017,7 @@ async function init() {
     cancelRampage();
     cancelStunts();
     cancelStory(); // P20：任務中 → 無聲失敗（貨車 / 叛徒車 / 徵用成員回收）、字幕收起
+    cancelNightMarket(); // P21：小遊戲中 → 無聲收場（不退費）
     cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
@@ -4061,6 +4133,8 @@ async function init() {
       snatch,
       // P20：故事任務（story.accept(ctx) / next() / skip()；story.phase / stage / kills；storyWorld 世界轉接；storyCars.vehicle = 安全屋專屬座車）
       story, storyWorld, storyHud, storyCars, storyBeacons,
+      // P21：夜市小遊戲（nightMarket.start('balloon')、nightMarket.balloon / pachinko 看局況、nightMarketView.drawCalls）
+      nightMarket, nightMarketView,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;
