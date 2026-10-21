@@ -75,6 +75,13 @@
 //   （手機 / 暫停 / 面板 / BUSTED・WASTED / 噴漆中不推進）；互斥：state.rampage（getter）、state.racing getter 包裝併入（otherMissionBusy / 搶劫守門）、
 //   vigHooks.active / end 包裝（委託類 / 噴漆 / BUSTED・WASTED）、進行中不問委託 / 武器店 / 安全屋；通緝照常；存檔 rampage.done、進行中存開始前的武器；
 //   開新局 / 回主選單 → cancelRampage()
+// 特技跳台（Phase 16，§38 Unique Stunt Jumps）：createStunts（src/stunts.js 純邏輯，STUNTS 全城 5 處）+ createRampMesh（全部坡道合成 1 個 Mesh、頂點色黃黑條紋，
+//   無貼圖 / 陰影）+ addRampColliders（每處一個 WORLD 組靜態凸包）+ createStuntHud（.stunt-panel 結算面板 3 s）+ 小地圖 / 大地圖 'stunt' / 'stunt-done'（淡化）；
+//   每幀 updateStunts(realDt) 接在 updateRampage 之後（吃實際幀時間：慢動作時長與幀率 / timeScale 無關）；慢動作 = updateGame 開頭 dt *= stunts.timeScale
+//   （之後的物理 / AI / 動畫 / 任務計時全吃縮放後的 dt；音效 updateAudio 在 updateGame 之外不受影響）；電影鏡頭 applyStuntCam 接在 rig.update / tour.handoff 之後
+//   （以 stunts.cam.weight 內插位置 / slerp 朝向，結束平滑交回跟車鏡頭）；互斥：stuntBusy = otherMissionBusy() || vigilante.active || rampage.active || !!state.respawn → 起飛不觸發、
+//   跳躍中轉 busy（空中被捕 / 死亡）→ 立即無聲中止（不含通緝星數）；
+//   存檔 stunts.done；開新局 / 回主選單 → cancelStunts()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -165,6 +172,7 @@ import { createEms, createAmbulanceDepot, ambulanceSpot, PROMPT_START as EMS_PRO
 import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 import { createStreetEvents, createStreetWorld } from './street-events.js';
 import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers } from './missions/rampage.js';
+import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -1097,6 +1105,7 @@ async function init() {
     pushAll(out, gunShop.markers()); // Phase 14 武器店 / 安全屋
     pushAll(out, safehouses.markers());
     pushAll(out, rampageMarkers()); // Phase 15 暴走點（骷髏）
+    pushAll(out, stuntMarkers()); // Phase 16 特技跳台（已完成淡化）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1249,6 +1258,7 @@ async function init() {
         races: races.serialize(), // Phase 12：街頭競速最佳成績（無紀錄 = null，存檔省略）
         safehouse: safehouses.serialize(), // Phase 14：最後使用的安全屋（沒用過 = null，存檔省略）
         rampage: rampage.serialize(), // Phase 15：已完成的暴走點（沒有 = null，存檔省略）
+        stunts: stunts.serialize(), // Phase 16：已完成的特技跳台（沒有 = null，存檔省略）
       };
     },
   });
@@ -2728,6 +2738,76 @@ async function init() {
   });
   const stepWorld = worldStep.step;
 
+  // ---------- 特技跳台（Phase 16，§38）：src/stunts.js（純邏輯 + 坡道網格 / 碰撞 + 結算面板）----------
+  // 坡道：全部 5 處合成 1 個 Mesh（頂點色，無貼圖 / 陰影）；碰撞 = 每處一個 WORLD 組靜態凸包（同 addStaticBox 直接掛世界）
+  const stunts = createStunts({ bus, groundAt: heightAt });
+  const stuntRamps = createRampMesh({ THREE, scene, groundAt: heightAt });
+  const stuntColliders = addRampColliders(RAPIER, pw.world, { groundAt: heightAt, groups: GROUPS.WORLD });
+  const stuntHud = createStuntHud({ root: document.body });
+  // 互斥：任務 / 競速 / 警車任務 / 副任務 / 暴走 / 搶劫 / 噴漆 / 被捕・死亡重生畫面進行中 → 起飛不觸發（不慢動作、不計成功）；
+  //   起飛後才轉 busy（空中被捕 / 死亡）→ stunts.update 立即無聲中止（不結算、不給錢、timeScale 1、鏡頭歸還）；通緝星數不算（照常觸發）
+  const stuntBusy = () => otherMissionBusy() || vigilante.active || rampage.active || !!state.respawn;
+  const stuntCtx = {
+    busy: false,
+    earn: (n) => economy.add(n, 'stunt'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+  };
+  // 車況取樣（同一物件重用）：駕駛中且車體為動態剛體才 active；位置取插值後的 v.pos，速度 / 姿態 / 接地取剛體與車輪控制器
+  const stuntSample = { active: false, vehicle: null, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, qx: 0, qy: 0, qz: 0, qw: 1, grounded: false };
+  const fillStuntSample = () => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const vb = v ? v.body : null;
+    stuntSample.vehicle = v;
+    stuntSample.active = !!vb && !vb.kinematic && vb.active;
+    if (!stuntSample.active) return stuntSample;
+    const lv = vb.body.linvel();
+    const q = vb.body.rotation();
+    stuntSample.x = v.pos.x;
+    stuntSample.y = v.pos.y;
+    stuntSample.z = v.pos.z;
+    stuntSample.vx = lv.x;
+    stuntSample.vy = lv.y;
+    stuntSample.vz = lv.z;
+    stuntSample.qx = q.x;
+    stuntSample.qy = q.y;
+    stuntSample.qz = q.z;
+    stuntSample.qw = q.w;
+    let grounded = false;
+    for (let i = 0; i < vb.layout.wheels.length && !grounded; i++) grounded = !!vb.controller.wheelIsInContact(i);
+    stuntSample.grounded = grounded;
+    return stuntSample;
+  };
+  // 每幀（updateRampage 之後）：realDt = 未縮放的幀時間（慢動作時長 / 鏡頭 / 面板計時與 timeScale 無關）
+  const updateStunts = (realDt) => {
+    stuntCtx.busy = stuntBusy();
+    stuntHud.set(stunts.update(realDt, fillStuntSample(), stuntCtx));
+  };
+  // 電影鏡頭：rig.update 之後以 stunts.cam.weight 從跟車鏡頭內插到側邊追蹤機位（位置 lerp、朝向 slerp）；weight 0 時不動鏡頭
+  const stuntRigPos = new THREE.Vector3();
+  const stuntRigQuat = new THREE.Quaternion();
+  const stuntCamQuat = new THREE.Quaternion();
+  const applyStuntCam = () => {
+    const c = stunts.cam;
+    if (!(c.weight > 0)) return;
+    stuntRigPos.copy(camera.position);
+    stuntRigQuat.copy(camera.quaternion);
+    camera.position.set(c.px, c.py, c.pz);
+    camera.lookAt(c.tx, c.ty, c.tz);
+    stuntCamQuat.copy(camera.quaternion);
+    camera.position.lerpVectors(stuntRigPos, camera.position, c.weight);
+    camera.quaternion.slerpQuaternions(stuntRigQuat, stuntCamQuat, c.weight);
+  };
+  const stuntMk = [];
+  const stuntMarkers = () => {
+    stuntMk.length = 0;
+    return stunts.markers(stuntMk);
+  };
+  // 開新局 / 回主選單：無聲中止進行中的跳躍、timeScale 回 1、鏡頭交回、面板收起
+  const cancelStunts = () => {
+    stunts.cancel();
+    stuntHud.set(null);
+  };
+
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
     scene.traverse((o) => {
@@ -2992,6 +3072,9 @@ async function init() {
       const fast = dayNight.toggleFast();
       hud.toast(fast ? '時間快轉中（再按一次恢復）' : '時間恢復正常', 2.5);
     }
+    // Phase 16 特技跳台慢動作：之後的世界更新（物理 / AI / 動畫 / 任務計時）一律吃縮放後的 dt；updateStunts 吃 realDt
+    const realDt = dt;
+    dt *= stunts.timeScale;
 
     lastThrottle = 0;
     if (state.mode === 'drive') {
@@ -3033,6 +3116,7 @@ async function init() {
     updateStreetEvents(dt, phoneOpen);
     updateShops(dt);
     updateRampage(dt, phoneOpen);
+    updateStunts(realDt);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3128,6 +3212,7 @@ async function init() {
       onViewChange: onCamViewChange,
     });
     tour.handoff(dt); // 剛進入遊戲：由巡覽最後鏡位平順內插到玩家鏡頭（§25），結束後不動鏡頭
+    applyStuntCam(); // Phase 16：特技跳台電影鏡頭（weight 0 時不動）
 
     const loc = describeLocation(focus.x, focus.z);
     const placeId = loc.building ? loc.building.id : null;
@@ -3392,6 +3477,7 @@ async function init() {
     cancelSpray();
     cancelShops();
     cancelRampage();
+    cancelStunts();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     safehouses.restore(save.safehouse); // Phase 14：最後使用的安全屋（新局 defaultSave 無此欄 → null）；placePlayer 據此決定出生點
@@ -3402,6 +3488,7 @@ async function init() {
     missions.restore(save.missions);
     races.restore(save.races); // 舊存檔無 races → 清空最佳成績
     rampage.restore(save.rampage); // Phase 15：舊存檔無 rampage → 全部未完成
+    stunts.restore(save.stunts); // Phase 16：舊存檔無 stunts → 全部未完成
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3471,6 +3558,7 @@ async function init() {
     cancelSpray();
     cancelShops();
     cancelRampage();
+    cancelStunts();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     state.started = false;
@@ -3575,6 +3663,8 @@ async function init() {
       },
       // Phase 15：暴走（rampage.start('rampage-suits') 除錯開始；rampage.current / kills / remain 看進度；rampageWorld.alive / spawn 看補敵人）
       rampage, rampageWorld, rampageHud,
+      // Phase 16：特技跳台（stunts.phase / timeScale / cam 看狀態；stunts.list[i].x / z / yawDeg 是坡腳與起飛方向）
+      stunts, stuntHud, stuntRamps, stuntColliders,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

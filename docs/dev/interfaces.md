@@ -1239,6 +1239,48 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ### 37.5 回歸
 - `node tools/test/p15-rampage.mjs`（純邏輯 + 替身，不 import three）、`node tools/test/integration-p15.mjs`（main.js 接線靜態檢查）
 
+## 38. Phase 16 特技跳台 Unique Stunt Jumps（P16；接線點在 `src/main.js`，介面以 `src/stunts.js` 檔頭為準）
+
+### 38.1 跳台（`STUNTS`，純資料）
+- 5 處（`x / z` = 坡腳中心、`yawDeg` = 起飛方向，前進 = (sin, cos)）：`stunt-qiuhonggu`（秋紅谷南緣：臺灣大道三段往北助跑，x 170, z −456, 0°）、`stunt-qhg-parking`（秋紅谷東北角平面停車場：x 278, z −366, 315°，落地區圓 r 25 m）、`stunt-shinkong`（新光三越停車場入口 / 市政北七路：x 596, z 12, 150°）、`stunt-taiwan-blvd`（臺灣大道三段寬直路段旁空地：x 968, z 96, 15°）、`stunt-henan`（河南路三段寬直路段旁空地：x −119, z 324, 165°）
+- 欄位：`{ id, name, x, z, yawDeg, src, land, frame, zone }`；`land` = 相對坡頂的落地區（`rect { from, to, halfWidth }` / `circle { at, r }`），`zone` = 世界座標（`inZone(zone, x, z)`）
+- 坡道尺寸：`RAMP_LEN` 10 m × `RAMP_WIDTH` 7 m、坡頂高 `RAMP_HEIGHT` 2.6 m（約 14.6°），底面埋地 `RAMP_SINK` 0.5 m
+- `tools/test/p16-stunts.mjs` 以 osm-city.json + terrain.js 驗證：坡腳前 80 m 助跑可行駛（無建築 / 水面、在地圖內、每 2 m 高差 ≤ 0.3 m、≥ 60% 在道路上）、坡道本體不壓車流道路、坡道 / 飛行走廊 / 落地區無建築與水面、在地圖內
+
+### 38.2 介面
+- `createStunts({ bus, groundAt, list?, config? })` → `{ update(dt, sample, ctx) → out, timeScale, cam, phase, active, current, markers(out), cancel(), serialize() → { done }|null, restore(rec), isDone(id), doneCount, allDone, dispose() }`
+  - `dt` = 未縮放的實際幀時間（clamp ≤ 0.1 s）：慢動作時長 / 鏡頭淡入淡出 / 面板計時吃此值；滯空等模擬量吃 `dt × timeScale`
+  - `sample = { active, vehicle, x, y, z, vx, vy, vz, qx, qy, qz, qw, grounded }`（呼叫端每幀填同一物件）；`ctx = { busy, earn(n, reason), toast?(text, sec) }`
+  - `out = { phase: 'idle'|'air'|'settle', id, timeScale, cam, panel: { title, lines }|null, panelRemain, result }`（重用同一物件）
+- 判定：接地於坡面 → 離地且在坡頂前 `LIP_MARGIN` 1.5 m ～ 後 `LIP_OVER` 4 m、連續離地 `LAUNCH_CONFIRM` 0.05 s → 離地瞬間速度 ≥ `LAUNCH_SPEED` 22 m/s 且沿坡道方向（cos ≥ 0.7）且非 busy → 起飛；連續接地 `LAND_CONFIRM` 0.1 s → 著地（落點 = 起飛後第一個接地幀；之後彈跳離地再接地不覆寫落點 / 滯空時間，翻車 / 落地區判定以此點為準）；`SETTLE_SEC` 0.6 s 內車頂朝上分量 < 0.5 → 翻車失敗 `crash`；落點在 `zone` 內 → 成功，否則 `miss`；滯空中低速卡住 / 超過 `AIR_MAX` → `crash`；下車 / 換車 / cancel / 起飛後 `busy` 轉 true（空中被捕 / 死亡）→ `cancel`（無聲：不結算、不給錢、timeScale 1、鏡頭立即歸還）
+- 慢動作：起飛確認起 `timeScale` = `SLOWMO_SCALE` 0.35，到著地（第一個接地幀）或 `SLOWMO_MAX` 2.5 s（實際時間）為止
+- 電影鏡頭：`cam = { weight, px, py, pz, tx, ty, tz }`；坡道側邊 12 m、後 4 m、高 3 m 追蹤車身（離地 ≥ 1.5 m），weight 0→1（0.25 s）→ 著地後 0.5 s 或起飛後 3.5 s → 1→0（0.8 s，smoothstep）
+- 評分 `scoreJump({ airTime, distance, height, rotation, tumble })` → `{ score, flips, parts }`：滯空 × 100 + 距離 × 10 + 最高高度 × 25 + 旋轉° × 0.5 + 翻滾（≥ 45° 時 翻滾° × 1.5）+ 整圈翻滾 × 500
+- 獎勵：每處首次成功 `REWARD` NT$500（`earn(n, 'stunt')`）；5 處全部完成的那次另給 `ALL_BONUS` NT$5,000；重複成功只顯示分數
+- `buildRampGeometry(list, groundAt)`（純資料）/ `createRampMesh({ THREE, scene, groundAt })`：全部坡道 1 個 Mesh（坡面 8 段黃黑條紋 = 頂點色、`MeshStandardMaterial` vertexColors，無貼圖、不投影不受影）→ 坡道 draw call 合計 1
+- `addRampColliders(RAPIER, world, { groundAt, groups })`：每處 `ColliderDesc.convexHull(rampHull(def))` 靜態凸包（WORLD 組，直接掛世界，同 `addStaticBox`）
+- `createStuntHud({ root })` → `{ set(out|null), dispose() }`：`.stunt-panel` 成功結算面板（標題 + 滯空 / 距離 / 最高 / 旋轉 / 分數 / 賞金），`PANEL_SEC` 3 s；樣式在 `src/style.css`
+- 小地圖 / 大地圖：`markers(out)` 列出全部 5 處——未完成 kind `'stunt'`（#ffc400）、已完成 `'stunt-done'`（#8d8d8d，hud.js / big-map.js `FADED_KINDS` 以 alpha 0.45 淡化）；hud.js `RAMP_KINDS` 畫坡道三角圖示
+
+### 38.3 事件（bus）
+- `stunt:launch { id, name, speed, x, y, z }`
+- `stunt:land { id, success, reason: null|'miss'|'crash'|'cancel', x, z, airTime, distance, height, rotation, tumble, flips, score }`
+- `stunt:complete { id, first, reward, all, bonus, score, airTime, distance, height, rotation, tumble, flips }`（只在成功時）
+- `toast`（ctx.toast 省略時）
+
+### 38.4 接線（main.js）
+- 建立（`stepWorld` 之後、畫質段之前）：`stunts = createStunts({ bus, groundAt: heightAt })`、`stuntRamps = createRampMesh(…)`、`stuntColliders = addRampColliders(RAPIER, pw.world, { groundAt: heightAt, groups: GROUPS.WORLD })`、`stuntHud`
+- timeScale：`updateGame` 在輸入 / 選單 / 快轉處理後 `const realDt = dt; dt *= stunts.timeScale;`——其後的物理 step、角色 / 車輛、AI、任務計時、動畫都吃縮放後的 dt；`updateStunts(realDt)` 接在 `updateRampage` 之後；音效（`updateAudio`）在 updateGame 外不受影響
+- 電影鏡頭：`applyStuntCam()` 接在 `rig.update` / `tour.handoff` 之後（weight 0 時不動鏡頭；位置 lerp、朝向 slerp）
+- 互斥：`stuntBusy = otherMissionBusy() || vigilante.active || rampage.active || !!state.respawn`（委託 / 外送 / 打工 / 競速 / 暴走 / 副任務 / 搶劫 / 噴漆 / 警車任務 / 被捕・死亡重生畫面）→ **完全不觸發**（不慢動作、不計成功、不給錢）；跳躍進行中（起飛到 settle 結算前）轉 busy → 立即無聲中止（`cancel`）；通緝星數不列入（照常觸發）
+- 存檔：getState `stunts: stunts.serialize()`；`startGame` → `stunts.restore(save.stunts)`（`rampage.restore` 之後）；`startGame` / `quitToMenu` → `cancelStunts()`（`cancelRampage` 之後、`cancelRespawn` 之前）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`stunts: { done: [id] }`（清洗規則同 rampage）
+- 除錯：`window.__game.stunts` / `stuntHud` / `stuntRamps` / `stuntColliders`
+- 限制：未新增 shadow map / 貼圖單元 / 光源；坡道 draw call 1；每幀路徑不配置物件（Rapier `linvel()` / `rotation()` 回傳值除外，同既有 forwardSpeed）
+
+### 38.5 回歸
+- `node tools/test/p16-stunts.mjs`（純邏輯 + 地圖資料，不 import three / rapier）、`node tools/test/integration-p16.mjs`（main.js 接線靜態檢查 + 抽段替身執行）
+
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
 ### 共通

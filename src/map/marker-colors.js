@@ -26,6 +26,8 @@ export const MARKER_COLORS = {
   'gun-shop': '#c62828', // 武器店（Phase 14，src/shops/gun-shop.js；小地圖畫紅底「槍」字圖示（hud.js ICON_KINDS），不貼邊；門口光柱 #e53935 與 ems-hospital 同色，標記取深紅以維持全表色碼不重複）
   safehouse: '#1e88e5', // 安全屋（Phase 14，src/shops/safehouse.js；小地圖畫藍底「家」字圖示，不貼邊，同門口光柱藍色）
   rampage: '#d50000', // 暴走點（Phase 15，src/missions/rampage.js markers()；小地圖畫紅色骷髏圖示（hud.js SKULL_KINDS），不貼邊；已完成 / 暴走進行中不顯示）
+  stunt: '#ffc400', // 特技跳台（Phase 16，src/stunts.js markers()；小地圖畫黃色坡道圖示（hud.js RAMP_KINDS），不貼邊）
+  'stunt-done': '#8d8d8d', // 已完成的特技跳台（同圖示、灰色並淡化：hud.js / big-map.js FADED_KINDS）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';

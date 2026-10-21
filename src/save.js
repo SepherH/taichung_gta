@@ -14,6 +14,7 @@
 //   safehouse：{ last: 安全屋 id（[\w-]{1,64} 字串）}——最後使用的安全屋（src/shops/safehouse.js）；格式錯誤整欄丟棄
 // Phase 15（§37，不升版，選填、defaultSave 不含）：rampage：{ done: 已完成的暴走點 id 陣列（[\w-]{1,64}、去重、≤ LIST_MAX）}
 //   （missions/rampage.js serialize）；舊存檔沒有此欄 → 省略（全部未完成）；格式錯誤整欄丟棄、非法 id 個別丟棄，清洗後為空也省略
+// Phase 16（§38，不升版，選填、defaultSave 不含）：stunts：{ done: 已完成的特技跳台 id 陣列 }（src/stunts.js serialize）；清洗規則同 rampage
 
 export const SAVE_VERSION = 2;
 
@@ -216,6 +217,8 @@ export function validateSave(obj) {
   if (sh) out.safehouse = sh;
   const rp = rampageRecord(m.rampage);
   if (rp) out.rampage = rp;
+  const sj = rampageRecord(m.stunts); // 同形 { done: [id] }，清洗規則相同
+  if (sj) out.stunts = sj;
   return out;
 }
 

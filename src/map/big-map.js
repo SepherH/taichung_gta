@@ -43,9 +43,14 @@ export const MARKER_LABELS = {
   'gun-shop': '武器店',
   safehouse: '安全屋',
   rampage: '暴走', // Phase 15：暴走任務（src/missions/rampage.js）
+  stunt: '特技跳台', // Phase 16：特技跳台（src/stunts.js）
+  'stunt-done': '特技跳台（已完成）',
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);
+// 淡化畫的 kind（已完成的特技跳台）
+export const FADED_KINDS = new Set(['stunt-done']);
+const FADED_ALPHA = 0.45;
 const ROUTE_COLOR = '#35f2ff';
 const PLAYER_COLOR = '#ffd23f';
 
@@ -224,6 +229,7 @@ export function drawBigMap(ctx, view, data = {}) {
       const sy = Y(m.z);
       if (sx < -20 || sx > view.w + 20 || sy < -30 || sy > view.h + 20) continue;
       const color = MARKER_COLORS[m.kind] || CAR_MARKER_COLOR;
+      ctx.globalAlpha = FADED_KINDS.has(m.kind) ? FADED_ALPHA : 1;
       ctx.fillStyle = color;
       ctx.strokeStyle = '#000000';
       ctx.lineWidth = 2;
@@ -239,6 +245,7 @@ export function drawBigMap(ctx, view, data = {}) {
       ctx.fill();
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
   }
 
   // 玩家箭頭（與小地圖同轉法）

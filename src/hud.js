@@ -35,6 +35,7 @@
 //   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
 //   markers kind 'race-start'（街頭競速起點）畫橘色旗幟（FLAG_KINDS），不貼邊；'race-cp'（下一個檢查點）超出半徑時貼邊
 //   markers kind 'rampage'（Phase 15 暴走點）畫紅色骷髏（SKULL_KINDS），不貼邊
+//   markers kind 'stunt' / 'stunt-done'（Phase 16 特技跳台）畫坡道三角圖示（RAMP_KINDS），不貼邊；已完成（FADED_KINDS）灰色淡化
 // V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
@@ -74,6 +75,9 @@ export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）
 const ICON_KINDS = { store: '超', 'gun-shop': '槍', safehouse: '家' }; // 畫成「色塊 + 白字」小方塊圖示的 kind（Phase 9 超商、Phase 14 武器店 / 安全屋）
 const SKULL_KINDS = new Set(['rampage']); // 畫成骷髏圖示（頭骨 + 下顎 + 黑眼窩）的 kind（Phase 15 暴走點），不貼邊
+const RAMP_KINDS = new Set(['stunt', 'stunt-done']); // 畫成坡道圖示（黑框直角三角形）的 kind（Phase 16 特技跳台），不貼邊
+const FADED_KINDS = new Set(['stunt-done']); // 淡化畫（已完成的特技跳台）
+const FADED_ALPHA = 0.45;
 const FLAG_KINDS = new Set(['race-start']); // 畫成旗幟圖示（旗桿 + 三角旗）的 kind（Phase 12 街頭競速起點），不貼邊
 const ICON_PX = 6; // 圖示方塊半邊長（螢幕 px）
 export const ROB_LABEL = '搶劫中…'; // 超商搶劫進度條預設文字（src/wanted/robbery.js PROGRESS_LABEL 同字）
@@ -945,6 +949,25 @@ export class HUD {
         ctx.arc(cx - ICON_PX * 0.4, cz - 1, ICON_PX * 0.3, 0, Math.PI * 2);
         ctx.arc(cx + ICON_PX * 0.4, cz - 1, ICON_PX * 0.3, 0, Math.PI * 2);
         ctx.fill();
+        ctx.restore();
+        continue;
+      }
+      if (RAMP_KINDS.has(m.kind)) {
+        // 坡道：黑框色塊直角三角形（左低右高），已完成淡化
+        const cx = R + dx;
+        const cz = R + dz;
+        ctx.save();
+        if (FADED_KINDS.has(m.kind)) ctx.globalAlpha = FADED_ALPHA;
+        ctx.beginPath();
+        ctx.moveTo(cx - ICON_PX - 1, cz + ICON_PX * 0.6);
+        ctx.lineTo(cx + ICON_PX + 1, cz + ICON_PX * 0.6);
+        ctx.lineTo(cx + ICON_PX + 1, cz - ICON_PX * 0.8);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
         ctx.restore();
         continue;
       }

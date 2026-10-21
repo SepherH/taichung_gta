@@ -1752,3 +1752,41 @@ body.touch .rob-bar {
     animation: none;
   }
 }
+
+/* 特技跳台（Phase 16，src/stunts.js createStuntHud）：成功結算面板（畫面中上，3 s；黃框）；文字多行以 pre-line 換行 */
+.stunt-panel {
+  position: fixed;
+  top: calc(18% + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 56;
+  min-width: 220px;
+  padding: 10px 20px 12px;
+  border-radius: 12px;
+  background: rgba(12, 16, 32, 0.78);
+  border: 2px solid rgba(255, 196, 0, 0.95);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--tg-ui-scale, 1));
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.stunt-panel .stunt-title {
+  margin-bottom: 6px;
+  color: #ffc400;
+  font-size: 1.25em;
+  font-weight: bold;
+}
+
+.stunt-panel .stunt-lines {
+  white-space: pre-line;
+  line-height: 1.5;
+}
+
+.stunt-panel[hidden] {
+  display: none !important;
+}
