@@ -447,6 +447,15 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   check('missions.events：只有 garbage-truck 完成次數時存檔往返保留', r.status === 'ok' && r.data.missions.events && r.data.missions.events.completed['garbage-truck'] === 1, JSON.stringify(r.data && r.data.missions && r.data.missions.events));
 }
 
+// Phase 17 packages 清洗：found 非陣列 / 空 → 整欄丟棄（不單獨保留 bonus:true，避免還原後獎金永久不發）
+{
+  const drop = (pk) => !('packages' in validateSave({ ...defaultSave(), packages: pk }));
+  check('packages：found 非陣列（字串 / 缺）+ bonus:true → 整欄丟棄', drop({ found: 'oops', bonus: true }) && drop({ bonus: true, tier: 4 }));
+  check('packages：found 空陣列 / 清洗後為空 + bonus:true → 整欄丟棄', drop({ found: [], tier: 4, bonus: true }) && drop({ found: [1, 'a b', null], bonus: true }));
+  const v = validateSave({ ...defaultSave(), packages: { found: ['pkg-01', 'pkg-01', 'pkg-02'], tier: 9, bonus: true } });
+  check('packages：合法 found 保留（去重）、tier 上限 4、bonus 照存（是否有效由 restore 依數量判定）', v.packages && v.packages.found.join() === 'pkg-01,pkg-02' && v.packages.tier === 4 && v.packages.bonus === true, JSON.stringify(v.packages));
+}
+
 const total = passed + failed;
 console.log(`\nsave.mjs：${passed} 通過 / ${failed} 失敗`);
 console.log(failed ? `FAIL ${failed}/${total}` : `PASS ${passed}/${total}`);

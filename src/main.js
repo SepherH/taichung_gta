@@ -82,6 +82,10 @@
 //   （以 stunts.cam.weight 內插位置 / slerp 朝向，結束平滑交回跟車鏡頭）；互斥：stuntBusy = otherMissionBusy() || vigilante.active || rampage.active || !!state.respawn → 起飛不觸發、
 //   跳躍中轉 busy（空中被捕 / 死亡）→ 立即無聲中止（不含通緝星數）；
 //   存檔 stunts.done；開新局 / 回主選單 → cancelStunts()
+// 隱藏包裹（Phase 17，Hidden Packages）：createPackages（src/collect/packages.js 純邏輯，PACKAGES 全城 20 處）+ createPackageMesh（20 個太陽餅盒 = 1 個 InstancedMesh、
+//   頂點色、無貼圖 / 光源 / 陰影）；每幀 updatePackages(dt) 接在 updateStunts 之後（玩家 / 駕駛車身位置進 2.5 m 自動收集；60 m 內才更新旋轉）；
+//   大地圖只標已收集者（kind 'package' 淡化，collectMarkers 不含車輛時才加）、圖例統計列「隱藏包裹 N / 20」、暫停選單統計頁同列；
+//   bus safehouse:enter → packages.resupply({ save })（依已達里程碑以 weapons.give / addAmmo 補給；有補到才 autosave.flush('safehouse-resupply') 入檔，存檔結果併入補給 toast）；存檔 packages；開新局 / 回主選單 → cancelPackages()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -173,6 +177,7 @@ import { createGangs, createGangCars, GANG_ZONES } from './gangs.js';
 import { createStreetEvents, createStreetWorld } from './street-events.js';
 import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers } from './missions/rampage.js';
 import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
+import { createPackages, createPackageMesh } from './collect/packages.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -1106,6 +1111,7 @@ async function init() {
     pushAll(out, safehouses.markers());
     pushAll(out, rampageMarkers()); // Phase 15 暴走點（骷髏）
     pushAll(out, stuntMarkers()); // Phase 16 特技跳台（已完成淡化）
+    if (!withVehicles) packages.markers(out); // Phase 17 隱藏包裹：只有大地圖、只標已收集（淡化）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
   };
@@ -1122,6 +1128,7 @@ async function init() {
       return mapPlayer;
     },
     getMarkers: () => collectMarkers(mapMarkers, false),
+    getLegendStats: () => [packages.progressText()], // Phase 17：圖例統計列「隱藏包裹 N / 20」（開啟時更新）
     getRoute: () => nav.route(),
     onPick: (x, z) => {
       nav.setDestination(x, z, '地圖標記', 'map', focus);
@@ -1238,7 +1245,7 @@ async function init() {
     extraStats.pedsKnockedOut++;
     economy.add(LOOT_MIN + Math.floor(Math.random() * (LOOT_MAX - LOOT_MIN + 1)), 'loot');
   });
-  const currentStats = () => statsWithExtra(economy.stats, extraStats);
+  const currentStats = () => ({ ...statsWithExtra(economy.stats, extraStats), hiddenPackages: packages.found, hiddenPackagesTotal: packages.total }); // Phase 17：統計頁「隱藏包裹 N / 20」（packages 於下方建立，呼叫時已存在）
   // 存檔 schema v2（契約 §18）：weapons / missions / collect
   const autosave = createAutosave({
     store,
@@ -1259,6 +1266,7 @@ async function init() {
         safehouse: safehouses.serialize(), // Phase 14：最後使用的安全屋（沒用過 = null，存檔省略）
         rampage: rampage.serialize(), // Phase 15：已完成的暴走點（沒有 = null，存檔省略）
         stunts: stunts.serialize(), // Phase 16：已完成的特技跳台（沒有 = null，存檔省略）
+        packages: packages.serialize(), // Phase 17：隱藏包裹 { found, tier, bonus }（一個都沒收集 = null，存檔省略）
       };
     },
   });
@@ -2049,6 +2057,28 @@ async function init() {
     gunShop.cancel();
     safehouses.cancel();
   };
+
+  // ---------- 隱藏包裹（Phase 17）：src/collect/packages.js（純邏輯 + 1 個 InstancedMesh）----------
+  const packageMesh = createPackageMesh({ THREE, scene });
+  const packages = createPackages({
+    bus,
+    groundAt: heightAt,
+    view: packageMesh,
+    earn: (n, reason) => economy.add(n, reason),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    weapons,
+  });
+  // 進安全屋（存檔 / 回血之後）：依已達里程碑補給一次（未達 5 個 → 無動作）；實際有給武器 / 補到彈藥才再 autosave.flush('safehouse-resupply')
+  //   讓本次補給入檔，存檔結果與補給內容併成同一則 toast（存檔失敗字樣不會被補給訊息蓋掉）；沒補到東西 → 不存檔、不 toast
+  bus.on('safehouse:enter', () => {
+    if (state.started) packages.resupply({ save: () => autosave.flush('safehouse-resupply') });
+  });
+  // 每幀（updateStunts 之後）：徒步 = 玩家位置、駕駛 = 車身位置
+  const updatePackages = (dt) => {
+    packages.update(dt, state.mode === 'drive' && state.vehicle ? state.vehicle.pos : player.pos);
+  };
+  // 開新局 / 回主選單：動畫歸位（收集狀態由 restore 決定）
+  const cancelPackages = () => packages.cancel();
 
   // ---------- 車流 / 行人外部狀態 ----------
   // 行人大腦：玩家是否在車內、移動中的玩家車（高速逼近會閃避）、玩家 Actor（被拖出的司機還手對象）
@@ -3117,6 +3147,7 @@ async function init() {
     updateShops(dt);
     updateRampage(dt, phoneOpen);
     updateStunts(realDt);
+    updatePackages(dt);
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3478,6 +3509,7 @@ async function init() {
     cancelShops();
     cancelRampage();
     cancelStunts();
+    cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     safehouses.restore(save.safehouse); // Phase 14：最後使用的安全屋（新局 defaultSave 無此欄 → null）；placePlayer 據此決定出生點
@@ -3489,6 +3521,7 @@ async function init() {
     races.restore(save.races); // 舊存檔無 races → 清空最佳成績
     rampage.restore(save.rampage); // Phase 15：舊存檔無 rampage → 全部未完成
     stunts.restore(save.stunts); // Phase 16：舊存檔無 stunts → 全部未完成
+    packages.restore(save.packages); // Phase 17：舊存檔無 packages → 0 收集
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3559,6 +3592,7 @@ async function init() {
     cancelShops();
     cancelRampage();
     cancelStunts();
+    cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
     state.started = false;
@@ -3665,6 +3699,8 @@ async function init() {
       rampage, rampageWorld, rampageHud,
       // Phase 16：特技跳台（stunts.phase / timeScale / cam 看狀態；stunts.list[i].x / z / yawDeg 是坡腳與起飛方向）
       stunts, stuntHud, stuntRamps, stuntColliders,
+      // Phase 17：隱藏包裹（packages.collect('pkg-01') 除錯收集；packages.list[i].x / y / z 是點位；packages.resupply() 立即補給）
+      packages, packageMesh,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

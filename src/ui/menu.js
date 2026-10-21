@@ -440,6 +440,8 @@ export function createMenu({
     };
     add('目前金錢', formatMoney(readMoney()));
     for (const [key, label, fmt] of STAT_ROWS) add(label, fmt(Number.isFinite(s[key]) ? s[key] : 0));
+    // Phase 17 隱藏包裹進度（getStats 帶 hiddenPackagesTotal 才顯示）
+    if (Number.isFinite(s.hiddenPackagesTotal)) add('隱藏包裹', `${Number.isFinite(s.hiddenPackages) ? s.hiddenPackages : 0} / ${s.hiddenPackagesTotal}`);
     statsPage.appendChild(grid);
   }
 

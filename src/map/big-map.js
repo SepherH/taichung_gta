@@ -45,11 +45,15 @@ export const MARKER_LABELS = {
   rampage: '暴走', // Phase 15：暴走任務（src/missions/rampage.js）
   stunt: '特技跳台', // Phase 16：特技跳台（src/stunts.js）
   'stunt-done': '特技跳台（已完成）',
+  package: '隱藏包裹（已收集）', // Phase 17：隱藏包裹（src/collect/packages.js；未收集者不標示）
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
 export const PIN_KINDS = new Set(['dest', 'mission-dest', 'job-dest', 'event-dest']);
 // 淡化畫的 kind（已完成的特技跳台）
 export const FADED_KINDS = new Set(['stunt-done']);
+FADED_KINDS.add('package'); // Phase 17：已收集的隱藏包裹（淡化 + 小圖示 SMALL_KINDS）
+// 畫成小方塊（包裹圖示）的 kind
+export const SMALL_KINDS = new Set(['package']);
 const FADED_ALPHA = 0.45;
 const ROUTE_COLOR = '#35f2ff';
 const PLAYER_COLOR = '#ffd23f';
@@ -239,6 +243,8 @@ export function drawBigMap(ctx, view, data = {}) {
         ctx.lineTo(sx - 8, sy - 14);
         ctx.arc(sx, sy - 16, 8, Math.PI * 0.8, Math.PI * 0.2, false);
         ctx.closePath();
+      } else if (SMALL_KINDS.has(m.kind)) {
+        ctx.rect(sx - 4, sy - 4, 8, 8);
       } else {
         ctx.arc(sx, sy, 7, 0, Math.PI * 2);
       }
@@ -270,7 +276,8 @@ export function drawBigMap(ctx, view, data = {}) {
 }
 
 // ---------- DOM 元件 ----------
-// createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus, landmarks?, onClear?, onClose?, zones? })
+// createBigMap({ root, getPlayer, getMarkers, getRoute, onPick, bus, landmarks?, onClear?, onClose?, zones?, getLegendStats? })
+//   getLegendStats() → 字串陣列（Phase 17：圖例下方統計列，例「隱藏包裹 N / 20」）；開啟時更新
 //   → { el, open(), close(), toggle(), isOpen(), draw(), destroy(), getView(), setView(v), zoomBy(f), recenter(), stats() }
 export function createBigMap({
   root = null,
@@ -283,6 +290,7 @@ export function createBigMap({
   onClear = null,
   onClose = null,
   zones = null,
+  getLegendStats = null,
 } = {}) {
   const doc = globalThis.document;
   const win = typeof window !== 'undefined' ? window : null;
@@ -344,6 +352,19 @@ export function createBigMap({
   addLegend('mp-sw-dot', '#35643a', '公園');
   addLegend('mp-sw-dot', '#2f6f9e', '水域');
   if (Array.isArray(zones)) for (const zn of zones) addLegend('mp-sw-sq', zn.color, zn.label || zn.name);
+  const legendStats = mk('div', 'mp-legend-stats');
+  legend.appendChild(legendStats);
+  const refreshLegendStats = () => {
+    if (typeof getLegendStats !== 'function') return;
+    let rows = null;
+    try {
+      rows = getLegendStats();
+    } catch (err) {
+      rows = null;
+    }
+    legendStats.textContent = '';
+    if (Array.isArray(rows)) for (const r of rows) legendStats.appendChild(mk('div', 'mp-legend-stat', String(r)));
+  };
   el.appendChild(legend);
 
   const attr = mk('div', 'mp-attr', ATTRIBUTION);
@@ -544,6 +565,7 @@ export function createBigMap({
       win.addEventListener('orientationchange', onResize);
     }
     applyLegend();
+    refreshLegendStats();
     measure();
     // 開啟時以玩家為中心、比例至少能看清街區
     const p = getPlayer();

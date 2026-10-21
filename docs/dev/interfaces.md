@@ -1214,8 +1214,9 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 - 擊殺：`ped:dead`（byPlayer 且 `gangOf(ped) === def.gang`；路人 / 其他幫派 / 非玩家擊殺不算）；炸車：`vehicle:explode`（byPlayer 且 `isTargetVehicle(v)`）；達標只記 pending，下一次 `update` 才結算（不在開火呼叫堆疊內換武器）
 - 計時：`dt` clamp ≤ `MAX_DT` 0.1 s 累加（≥ 10 fps 與幀率無關）；`frozen` 時不前進、不觸發、不補敵人
 - 補敵人（gang 點）：每 `SPAWN_SEC` 2 s，玩家 `ENEMY_RADIUS` 60 m 內目標幫派存活成員 < `MIN_ENEMIES` 6 → `world.spawn(gang, x, z, ≤ SPAWN_BATCH 4)`
-- `createRampageWorld({ traffic, gangs, combat, repaint })` → `{ alive(gangId, x, z, r), spawn(gangId, x, z, n) }`：徵用半徑內、離玩家 ≥ `SPAWN_MIN_DIST` 12 m 的漫步骨架行人（同 street-events idle 條件）→ `gangs.enlist(peds, gangId)` → `repaint(p)`
-- `gangs.js` 增補：`enlist(peds, id, { weapon?, gain? })` → actor[]（換成該幫成員，武器省略 = 依 gunShare / batShare 抽；該幫敵意 + gain（預設 hostileAt）→ 圍攻玩家）、`gangOf(actor)` → 幫派 id | null
+- `createRampageWorld({ traffic, gangs, combat, repaint })` → `{ alive(gangId, x, z, r), spawn(gangId, x, z, n), release() → 釋放人數, enlisted }`：徵用半徑內、離玩家 ≥ `SPAWN_MIN_DIST` 12 m 的漫步骨架行人（同 street-events idle 條件）→ `gangs.enlist(peds, gangId)` → `repaint(p)`；`release()` = 本次徵用者 `gangs.release` → 存活者 `repaint(p)`（回原色、卸武器），清空紀錄（重複呼叫 = 0）
+  - 結束（完成 / timeout / wasted / busted / cancel / restore）一律經 `reset()` 呼叫徵用時的 `world.release?.()`；已達標待結算時 `cancel()`（含 `restore()` 轉呼叫）同 `end()` 照算完成（賞金 + 完成紀錄）
+- `gangs.js` 增補：`enlist(peds, id, { weapon?, gain? })` → actor[]（換成該幫成員，武器省略 = 依 gunShare / batShare 抽；該幫敵意 + gain（預設 hostileAt）→ 圍攻玩家）、`gangOf(actor)` → 幫派 id | null、`release(actors)` → 釋放的骨架行人[]（收手、取消登記並交還大腦、`citizen.gang` 清除、外觀還原為徵用前；非成員略過、可重複呼叫；不改敵意值）
 - `createRampageHud({ root })` → `{ set(out|null), dispose() }`：`.rampage-bar` 任務條（上方中央，與其他任務條共用位置）+ `.rampage-edge` 畫面邊緣紅色脈動（CSS keyframes 只動 opacity；剩 ≤ `URGENT_SEC` 10 s 加快；`prefers-reduced-motion: reduce` 時關閉）；樣式在 `src/style.css`
 - `createSkullMarkers({ THREE, scene, heightAt, list? })` → `{ update(dt, rampage), groups, dispose() }`：程式產生的低模骷髏（Icosahedron 頭骨 + Box 下顎 + 眼窩 / 鼻），幾何 / 材質共用（`MeshStandardMaterial` 紅色 emissive 2.0、眼窩 `MeshBasicMaterial`），不新增 glb / 貼圖 / 光源 / 陰影；旋轉 + 浮動只改既有物件；已完成或暴走進行中隱藏
 - 小地圖 / 大地圖：kind `'rampage'`（`MARKER_COLORS` #d50000、hud.js `SKULL_KINDS` 畫骷髏、圖例「暴走」）；`markers(out)` 只列未完成點，進行中不列
@@ -1280,6 +1281,40 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 38.5 回歸
 - `node tools/test/p16-stunts.mjs`（純邏輯 + 地圖資料，不 import three / rapier）、`node tools/test/integration-p16.mjs`（main.js 接線靜態檢查 + 抽段替身執行）
+
+## 39. Phase 17 隱藏包裹 Hidden Packages（P17；接線點在 `src/main.js`，介面以 `src/collect/packages.js` 檔頭為準）
+
+### 39.1 點位（`PACKAGES`，純資料）
+- 20 處 `{ id: 'pkg-01'…'pkg-20', x, z, spot, hint }`（遊戲世界 x / z；y 由 `groundAt` = `heightAt` 決定，秋紅谷 / 老虎城下沉廣場為谷底 / 廣場面）；分類：巷弄 5、後巷停車角落 4、橋下 2、河岸 2、秋紅谷步道 1、秋紅谷湖岸 1、下沉廣場角落 1、公園角落 4
+- 一律放地面（無可由坡道 / 樓梯到達的樓頂資料）；`tools/test/p17-packages.mjs` 以 osm-city.json + terrain.js 驗證：地圖內 20 m、不在建築體內（離輪廓 ≥ 1.5 m）、不在車流道路路面（primary / secondary / tertiary / trunk 半寬 + 1 m 內）與巷道中央（半寬 − 1 m 內）、不在水面 / 湖底、彼此 ≥ `MIN_GAP` 120 m
+
+### 39.2 介面
+- `createPackages({ bus?, groundAt?, list = PACKAGES, earn?(n, reason), toast?(text, sec), weapons?, view?, radius = 2.5 })` → `{ list, total, found, tier, bonusPaid, update(dt, playerPos), collect(id), isFound(id), resupply({ save? }) → { tier, items, changed, saved }|null, markers(out?), progress() → { found, total, done }, progressText(), cancel(), serialize() → { found, tier, bonus }|null, restore(rec), dispose() }`
+  - `playerPos = { x, y?, z }`（駕駛中 = 車身位置）：水平 `PACKAGE_RADIUS` 2.5 m 內且高差 ≤ `PICKUP_DY` 4 m → 自動收集（不需按 E）；每個 `REWARD` NT$100（`earn(n, 'package')`），toast「隱藏包裹 N / 20（+NT$100）」；重複收集不計
+  - 里程碑 `MILESTONES`：5 → 手槍 + 彈藥、10 → 衝鋒槍 + 彈藥、15 → 散彈槍 + 彈藥、20 → 全武器彈藥補滿 + `COMPLETE_BONUS` NT$10,000（找齊當下一次性發放，`bonusPaid` 存檔，不重複）
+  - `resupply()`（安全屋）：依已達最高 tier 累計補給（`resupplyItems(tier)` / `applyResupply(weapons, tier)` 純函式）——缺武器 → `weapons.give(id)`（附贈 startReserve）、已有 → `weapons.addAmmo(reserveMax, id)` 補到上限；tier 4 新給的也補滿；手槍備彈無限（addAmmo 回 0）；未達 5 個 → null
+  - 補給 toast / 入檔：`changed` = 任一 `given` 或 `ammo > 0`；只有 `changed` 時才呼叫 `save()`（補給後再存一次，讓本次補給入檔）並以 `resupplyNotice(tier, items, saved)` toast 一則「存檔結果前綴（`RESUPPLY_SAVED_TEXT` 已在安全屋存檔，體力回滿。／`RESUPPLY_SAVE_FAILED_TEXT` 體力回滿（存檔失敗，請稍後再試）。）+ 補給內容」；未 `changed` → 不存檔、不 toast（安全屋自己的存檔 toast 保留）；`resupply()` 不帶 `save`（除錯）→ `saved` null、只有補給文字
+  - `view = { set(i, x, y, z, rotY, visible), commit() }`：`createPackageMesh({ THREE, scene })` 回傳（另有 `mesh` / `dispose()`）；20 個太陽餅盒 = 1 個 `InstancedMesh`（`buildPackageGeometry`：BoxGeometry 3 段高 + 頂點色，`MeshBasicMaterial` vertexColors，無貼圖 / 光源 / 陰影）→ draw call +1；已收集者矩陣縮成 0
+  - 動畫：距玩家 ≤ `ANIM_RANGE` 60 m 的未收集包裹每幀浮動（±0.12 m）+ 自轉（1.2 rad/s）；範圍外維持靜止姿態、矩陣不重寫；每幀路徑不配置物件
+  - 存檔 / 讀檔：`restore(rec)` 只收 list 內 id；tier 依數量推得（不重發事件）；`rec` 缺 / 格式錯 → 0 收集；`bonusPaid` = `rec.bonus === true` 且已找齊 20 個（未找齊時 bonus 旗標無效，收齊時照常發 NT$10,000 一次）
+- 大地圖：`markers(out)` 只列已收集者 kind `'package'`（#d4a017，big-map.js `FADED_KINDS` 淡化），未收集不標示；`createBigMap({ getLegendStats })` 圖例下方統計列（開啟時更新）；暫停選單統計頁 `getStats()` 帶 `hiddenPackages` / `hiddenPackagesTotal` → 「隱藏包裹 N / 20」
+
+### 39.3 事件（bus）
+- `package:collect { id, found, total, reward }`（另發 `ui:sound { kind: 'reward' }` → 音效 ui_reward）
+- `package:milestone { tier, found, unlock: 'pistol'|'smg'|'shotgun'|'all' }`
+- `package:resupply { tier, items: [{ weapon, given, ammo }] }`
+
+### 39.4 接線（main.js）
+- 建立（武器店 / 安全屋段之後、特技跳台段之前）：`packageMesh = createPackageMesh({ THREE, scene })`、`packages = createPackages({ bus, groundAt: heightAt, view: packageMesh, earn: economy.add, toast: hud.toast, weapons })`
+- 每幀：`updatePackages(dt)` 接在 `updateStunts(realDt)` 之後（徒步 = `player.pos`、駕駛 = `state.vehicle.pos`）
+- `bus.on('safehouse:enter')` → `packages.resupply({ save: () => autosave.flush('safehouse-resupply') })`（遊戲中才補給；安全屋已先回血 / 存檔）。順序方案：維持 safehouse.js 契約（先 `save()` 再 emit `safehouse:enter`），補給完成後**只在實際有補給時**再 `autosave.flush('safehouse-resupply')` 一次，安全屋存檔即含本次補給；補給 toast 帶第二次存檔結果，存檔失敗字樣不會被蓋掉
+- 標記：`collectMarkers(out, withVehicles)` 在 `withVehicles === false`（大地圖）時 `packages.markers(out)`；小地圖不顯示
+- 存檔：getState `packages: packages.serialize()`；`startGame` → `packages.restore(save.packages)`（`stunts.restore` 之後）；`startGame` / `quitToMenu` → `cancelPackages()`（`cancelStunts` 之後）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`packages: { found: [id], tier: 0..4, bonus: boolean }`；非物件 / found 非陣列 / 清洗後 found 空 → 整欄省略（不單獨保留 `bonus: true`）
+- 除錯：`window.__game.packages` / `packageMesh`
+
+### 39.5 回歸
+- `node tools/test/p17-packages.mjs`（純邏輯 + 地圖資料，不 import three）、`node tools/test/integration-p17.mjs`（main.js 接線靜態檢查 + interfaces.md 本節）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

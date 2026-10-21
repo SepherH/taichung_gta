@@ -15,6 +15,8 @@
 // Phase 15（§37，不升版，選填、defaultSave 不含）：rampage：{ done: 已完成的暴走點 id 陣列（[\w-]{1,64}、去重、≤ LIST_MAX）}
 //   （missions/rampage.js serialize）；舊存檔沒有此欄 → 省略（全部未完成）；格式錯誤整欄丟棄、非法 id 個別丟棄，清洗後為空也省略
 // Phase 16（§38，不升版，選填、defaultSave 不含）：stunts：{ done: 已完成的特技跳台 id 陣列 }（src/stunts.js serialize）；清洗規則同 rampage
+// Phase 17（不升版，選填、defaultSave 不含）：packages：{ found: 已收集的隱藏包裹 id 陣列（同 rampage 清洗）, tier: 0..4 整數, bonus: boolean }
+//   （src/collect/packages.js serialize）；舊存檔沒有此欄 → 省略（0 收集）；格式錯誤（含 found 非陣列）整欄丟棄；清洗後 found 為空 → 省略（即使 bonus:true）
 
 export const SAVE_VERSION = 2;
 
@@ -140,6 +142,17 @@ function rampageRecord(src) {
   return done.length ? { done } : null;
 }
 
+// 隱藏包裹：{ found: [id], tier, bonus } → 同形；非物件 / found 非陣列 / 清洗後 found 空 → null（整欄丟棄，不單獨保留 bonus:true）
+function packagesRecord(src) {
+  if (!isObj(src) || !Array.isArray(src.found)) return null;
+  const list = rampageRecord({ done: src.found });
+  const found = list ? list.done : [];
+  if (!found.length) return null; // 一個都沒找到時 bonus 不可能合法為 true
+  const bonus = src.bonus === true;
+  const tier = Number.isInteger(src.tier) && src.tier >= 0 ? Math.min(4, src.tier) : 0;
+  return { found, tier, bonus };
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -219,6 +232,8 @@ export function validateSave(obj) {
   if (rp) out.rampage = rp;
   const sj = rampageRecord(m.stunts); // 同形 { done: [id] }，清洗規則相同
   if (sj) out.stunts = sj;
+  const pk = packagesRecord(m.packages);
+  if (pk) out.packages = pk;
   return out;
 }
 

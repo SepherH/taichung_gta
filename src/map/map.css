@@ -112,6 +112,15 @@
   font-weight: bold;
   margin-bottom: 6px;
 }
+.mp-legend-stats:not(:empty) {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+}
+.mp-legend-stat {
+  line-height: 22px;
+  color: #ffd75e;
+}
 .mp-legend-row {
   display: flex;
   align-items: center;
