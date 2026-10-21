@@ -26,6 +26,7 @@
 //   衰減：地盤內最後一次挑釁 decayDelay 秒後每秒 −decayIn；離開該幫地盤每秒 −decayOut；< calmBelow 收手、幫派車離開
 // V3 街頭事件：skirmish(sideA, sideB, { a, b, sec, weapon }) → 成員 actor[]（指定骨架行人換成兩幫持槍成員互射 sec 秒，同互毆流程）；warring(actors?) → 互毆中人數
 // P15 暴走：enlist(peds, id, { weapon?, gain? }) → 成員 actor[]（指定骨架行人換成 id 幫成員、該幫敵意 + gain → 圍攻玩家）；gangOf(actor) → 幫派 id | null
+//   release(actors) → 釋放的骨架行人[]（交還 enlist 徵用者：收手、取消登記、citizen.gang 清除、外觀還原；非成員略過、可重複呼叫）
 // 幫派互毆：每 warCheck 秒以 warChance 機率，找一組「入侵的敵對幫派成員（rival crew）」與在地成員（warRadius 內）互毆 warSec 秒
 // 開槍：命中率依距離 hitNear → hitFar；命中走 combat.applyHit（weapon 'pistol'）；玩家在車內時以 throughVehicle 扣血並 ctx.damageVehicle 扣車耐久；
 //   每發 emit weapon:fire（byPlayer false、gang: id）讓行人聽到槍聲 / 音效（通緝不計：整合層只認 byPlayer）
@@ -674,7 +675,9 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     for (const p of peds) {
       const c = p && p.citizen;
       if (!c || !p.actor || c.gang || byId.has(p.actor.id) || (p.brain && p.brain.override)) continue;
+      const look = c.look;
       makeMember(c, def, crew, false);
+      c.gang.prevLook = look; // release 還原換色前的外觀
       if (weapon) c.gang.weapon = weapon; // 省略 = makeMember 依 gunShare / batShare 抽的武器（P15 暴走 enlist）
       pedHooks.onAttach(p);
       const m = byId.get(p.actor.id);
@@ -707,6 +710,30 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     const ms = recruit(peds || [], def, ++st.crewSeq, weapon, []);
     if (ms.length && gain > 0) provoke(stateOf.get(id), 'rampage', gain);
     return ms.map((m) => m.actor);
+  }
+  // 暴走結束：交還 enlist 徵用的成員——收手、取消登記（大腦交還 traffic AI）、citizen.gang 清除、外觀還原；
+  //   已不是成員（死亡回池 / 骨架換人 / 已釋放）略過 → 重複呼叫無副作用；回傳實際釋放的骨架行人陣列（呼叫端據此 repaint 回原色、卸武器）
+  function release(actors) {
+    const out = [];
+    if (!actors) return out;
+    for (const a of actors) {
+      const m = a ? byId.get(a.id) : null;
+      if (!m || m.actor !== a) continue;
+      disengage(m);
+      removeMember(m);
+      const c = m.ped && m.ped.citizen;
+      if (c && c.gang === m.gang) {
+        if (m.gang.prevLook !== undefined) c.look = m.gang.prevLook;
+        c.gang = null;
+      }
+      out.push(m.ped);
+    }
+    for (const g of states) {
+      let n = 0;
+      for (let i = 0; i < list.length; i++) if (list[i].state === g && list[i].engaged && list[i].target === playerActor()) n++;
+      g.engaged = n;
+    }
+    return out;
   }
   // actor 目前是哪一幫的成員（以登記當時的 actor.id 比對；骨架回池換人 → null）
   function gangOf(actor) {
@@ -874,6 +901,7 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     skirmish,
     warring,
     enlist,
+    release,
     gangOf,
     isHostile: (id) => !!(stateOf.get(id) && stateOf.get(id).hostile),
     car: (id) => (stateOf.get(id) ? stateOf.get(id).car : null),

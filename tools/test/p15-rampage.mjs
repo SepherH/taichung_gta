@@ -363,6 +363,20 @@ const gangActor = (id, gang) => ({ id, kind: 'ped', pos: { x: 0, y: 0, z: 0 }, h
   check('未進行時 cancel 無副作用', rig.events.filter(([n]) => n === 'rampage:fail').length === 1);
   const o = rig.r.update(1 / 60, rig.ctx);
   check('cancel 後 HUD 輸出 inactive / text null', o.active === false && o.text === null);
+  // 達標當幀（下一次 update 前）cancel：同 end() 照算完成，不判失敗
+  const rp = makeRig();
+  walkIn(rp, OP);
+  for (let i = 0; i < OP.goal; i++) rp.bus.emit('vehicle:explode', { vehicle: { id: i }, byPlayer: true });
+  rp.r.cancel();
+  check('已達標待結算時 cancel → 照算完成（賞金、完成紀錄、rampage:complete、無 rampage:fail）',
+    !rp.r.active && rp.r.isDone(OP.id) && rp.earned.length === 1 && rp.earned[0][0] === OP.reward && rp.events.some(([n]) => n === 'rampage:complete') && !rp.events.some(([n]) => n === 'rampage:fail'));
+  check('已達標 cancel → serialize 寫入完成、武器恢復', JSON.stringify(rp.r.serialize()) === JSON.stringify({ done: [OP.id] }) && !rp.weapons.owns('shotgun'));
+  const rs = makeRig();
+  walkIn(rs, OP);
+  for (let i = 0; i < OP.goal; i++) rs.bus.emit('vehicle:explode', { vehicle: { id: i }, byPlayer: true });
+  rs.r.update(1 / 60, { ...rs.ctx, frozen: true }); // 手機開著：不結算
+  rs.r.restore(null);
+  check('已達標待結算時讀檔（restore → cancel）→ 照算完成一次（賞金已入帳、不判失敗）', !rs.r.active && rs.earned.length === 1 && !rs.events.some(([n]) => n === 'rampage:fail'));
 }
 
 // ---------- 11. 補敵人（world 替身）----------
@@ -422,6 +436,96 @@ const gangActor = (id, gang) => ({ id, kind: 'ped', pos: { x: 0, y: 0, z: 0 }, h
   check('真 gangs：擊殺徵用的西裝幫成員計入、路人不計', r.kills === 1);
   r.dispose();
   gangs.dispose();
+}
+
+// ---------- 12b. 結束後交還徵用的成員（gangs.release / rampageWorld.release）----------
+{
+  let seq = 0;
+  const mkPed = (x, z) => {
+    const actor = { id: `q${++seq}`, kind: 'ped', pos: { x, y: 0, z }, hp: 100 };
+    return { x, z, alive: true, state: 'walk', actor, brain: { state: 'wander', override: null }, citizen: { look: { shirt: 'orig' } } };
+  };
+  const combat = { stateOf: () => 'normal' };
+  const pl = { x: 0, z: 0, actor: playerActor, inVehicle: false };
+  const SU3 = { ...SU, goal: 3 }; // 完成路徑：目標降到 3 人（徵用 ≤ SPAWN_BATCH 人即可達標）
+  const setup = () => {
+    const bus = createBus();
+    const gangs = createGangs({ bus, rng: () => 0.5 });
+    gangs.update(0.016, { player: pl });
+    const peds = [mkPed(15, 0), mkPed(20, 0), mkPed(25, 0), mkPed(30, 0), mkPed(35, 0)];
+    const repainted = [];
+    const world = createRampageWorld({ traffic: { peds }, gangs, combat, repaint: (p) => repainted.push([p, p.citizen.gang ? p.citizen.gang.weapon : null]) });
+    const weapons = createWeapons({ bus, player: { actor: playerActor } });
+    const earned = [];
+    const r = createRampage({ bus, weapons, gangOf: (a) => gangs.gangOf(a), list: [SU3], config: { allBonus: 0 } });
+    const ctx = { player: { x: 0, z: 0 }, onFoot: false, busy: false, frozen: false, world, earn: (n) => earned.push(n), toast() {} };
+    r.start(SU.id, ctx);
+    r.update(1 / 60, ctx); // 第一次 update 補敵人
+    return { bus, gangs, peds, repainted, world, r, ctx, earned };
+  };
+  const enlistedOf = (peds) => peds.filter((p) => p.citizen.gang);
+  const engagedN = (g) => g.members.filter((m) => m.engaged).length;
+  const kinds = [
+    ['timeout', (t) => { for (let i = 0; i < SU.timeSec * 12 && t.r.active; i++) t.r.update(0.1, t.ctx); }],
+    ['complete', (t) => {
+      for (const p of enlistedOf(t.peds).slice(0, SU3.goal)) {
+        p.alive = false;
+        t.bus.emit('ped:dead', byPlayerDead(p.actor));
+      }
+      t.r.update(1 / 60, t.ctx);
+    }],
+    ['wasted', (t) => t.r.end('wasted')],
+    ['busted', (t) => t.r.end('busted')],
+    ['cancel', (t) => t.r.cancel()],
+    ['restore', (t) => t.r.restore(null)],
+  ];
+  for (const [kind, finish] of kinds) {
+    const t = setup();
+    const n0 = enlistedOf(t.peds).length;
+    const during = t.gangs.members.length === n0 && engagedN(t.gangs) > 0 && t.world.enlisted.length === n0;
+    const alivePeds = enlistedOf(t.peds);
+    finish(t);
+    if (kind === 'complete') check('完成路徑：確實以完成結算', t.r.isDone(SU3.id) && t.earned.length === 1);
+    const back = t.gangs.members.length === 0 && engagedN(t.gangs) === 0 && t.peds.every((p) => !p.citizen.gang && p.citizen.look.shirt === 'orig' && !p.brain.override);
+    check(`結束（${kind}）後徵用成員交還：gangs.members / engaged 歸零、citizen.gang 清除、外觀還原、大腦交還`, n0 > 0 && during && !t.r.active && back,
+      `n0 ${n0} members ${t.gangs.members.length} engaged ${engagedN(t.gangs)}`);
+    const unarmed = t.repainted.filter(([, w]) => w === null).map(([p]) => p);
+    check(`結束（${kind}）後存活者 repaint 回原色（卸武器）、enlisted 清空`, alivePeds.every((p) => !p.alive || unarmed.includes(p)) && t.world.enlisted.length === 0);
+    t.r.dispose();
+    t.gangs.dispose();
+  }
+  // 不重複釋放 / 不洩漏 / 釋放後可再徵用
+  const t = setup();
+  const n0 = enlistedOf(t.peds).length;
+  const ped0 = enlistedOf(t.peds)[0];
+  t.bus.emit('ped:dead', byPlayerDead(ped0.actor));
+  ped0.alive = false;
+  t.r.end('timeout');
+  const rep1 = t.repainted.length;
+  check('死亡的徵用者一併取消登記、不 repaint', t.gangs.members.length === 0 && !t.repainted.slice(n0).some(([p]) => p === ped0));
+  check('重複 release：rampageWorld.release() = 0、gangs.release 非成員 → []、無額外 repaint', t.world.release() === 0 && t.gangs.release(t.peds.map((p) => p.actor)).length === 0 && t.gangs.release(null).length === 0 && t.repainted.length === rep1);
+  t.r.cancel();
+  check('未進行時 cancel / end 不呼叫 release 副作用', t.repainted.length === rep1 && t.gangs.members.length === 0);
+  for (const p of t.peds) p.alive = true;
+  t.ctx.player.x = SU.x;
+  t.ctx.player.z = SU.z;
+  t.r.start(SU.id, t.ctx);
+  t.ctx.player.x = 0;
+  t.ctx.player.z = 0;
+  t.r.update(1 / 60, t.ctx);
+  const n1 = t.gangs.members.length;
+  t.r.cancel();
+  check('再挑戰：重新徵用 → 結束後再次歸零（不累積）', n1 > 0 && t.gangs.members.length === 0 && t.world.enlisted.length === 0);
+  // gangs.release 只交還指定 actor：原生成員（非 enlist）保留
+  const bus = createBus();
+  const g = createGangs({ bus, rng: () => 0.5 });
+  g.update(0.016, { player: pl });
+  const a = mkPed(15, 0);
+  const b = mkPed(20, 0);
+  g.enlist([a, b], 'suits');
+  const rel = g.release([a.actor]);
+  check('gangs.release(actors)：只釋放指定者、回傳骨架行人、gangOf → null、其他成員保留', rel.length === 1 && rel[0] === a && g.gangOf(a.actor) === null && g.gangOf(b.actor) === 'suits' && g.members.length === 1 && g.stats().engaged === g.members.filter((m) => m.engaged).length);
+  g.dispose();
 }
 
 // ---------- 13. 每幀不配置 ----------

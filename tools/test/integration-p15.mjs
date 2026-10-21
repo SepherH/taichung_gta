@@ -4,13 +4,15 @@
 // 項目：import、建立 rampage / rampageWorld / rampageHud / 骷髏標記、互斥（state.rampage getter、state.racing 包裝、vigHooks.active / end 包裝、
 //   委託 / 武器店 / 安全屋遮罩）、collectMarkers、每幀 updateRampage 接在 updateShops 之後、存檔（rampage / 暫發武器不入檔）、
 //   startGame / quitToMenu → cancelRampage（cancelRespawn 之前）、rampage.restore、window.__game、既有字串未動、全檔唯一 weapons.restore；
-//   行為（抽段 + 替身）：步行走進開始 / 駕車不觸發 / 凍結、busy 不開始、state.racing / vigHooks.active 併入、BUSTED 結束恢復武器、cancel
+//   行為（抽段 + 替身）：步行走進開始 / 駕車不觸發 / 凍結、busy 不開始、state.racing / vigHooks.active 併入、BUSTED 結束恢復武器、cancel；
+//   抽段 + 真 gangs：結束（BUSTED / cancelRampage）後徵用成員交還（rampageWorld.release → gangs.release → repaint 回原色、卸武器）
 // 注意：staging 無 node_modules；main.js 依賴 three / css / JSON import，一律原始碼字串比對
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createBus } from '../../src/core/events.js';
 import { createWeapons } from '../../src/weapons/weapons.js';
 import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers, rampageById } from '../../src/missions/rampage.js';
+import { createGangs } from '../../src/gangs.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const read = (p) => readFileSync(`${ROOT}${p}`, 'utf8');
@@ -180,6 +182,84 @@ check('暴走段不新增光源 / 貼圖 / 陰影', !/Light\(|Texture|castShadow
     check('cancelRampage：無聲結束、武器恢復', !w.rampage.active && weapons.current === 'pistol' && !weapons.owns('smg'));
     check('小地圖列出 4 個暴走點（kind rampage）', w.rampageMarkers().length === 4 && w.rampageMarkers().every((m) => m.kind === 'rampage'));
   }
+}
+
+// ---------- 行為（抽段 + 真 gangs）：結束後徵用成員交還 ----------
+check('repaint 依 citizen.gang 掛 / 卸武器（release 後回原色、卸武器）', /repaintCharacter\(p\.character, p\.citizen\.look\);\s*\n\s*p\.look = p\.citizen\.look;\s*\n\s*traffic\._gangWeapon\(p, p\.citizen\.gang \? p\.citizen\.gang\.weapon : null\);/.test(section));
+check('rampageCtx.world = rampageWorld（rampage.js 結束時呼叫 world.release）', /world: rampageWorld,/.test(section));
+{
+  const body = `${section}\nreturn { rampage, rampageWorld, updateRampage, cancelRampage };`;
+  const bus = createBus();
+  const playerActor = { id: 'player', kind: 'player', pos: { x: 0, y: 0, z: 0 } };
+  const weapons = createWeapons({ bus, player: { actor: playerActor } });
+  const def = rampageById('rampage-suits');
+  playerActor.pos.x = def.x;
+  playerActor.pos.z = def.z;
+  const gangs = createGangs({ bus, rng: () => 0.5 });
+  gangs.update(0.016, { player: { x: def.x, z: def.z, actor: playerActor, inVehicle: false } });
+  let seq = 0;
+  const peds = [15, 20, 25, 30, 35].map((d) => ({
+    x: def.x + d, z: def.z, alive: true, state: 'walk', character: {},
+    actor: { id: `i${++seq}`, kind: 'ped', pos: { x: def.x + d, y: 0, z: def.z }, hp: 100 },
+    brain: { state: 'wander', override: null }, citizen: { look: { shirt: 'orig' } },
+  }));
+  const painted = [];
+  const armed = new Map();
+  const state = { mode: 'walk', vehicle: null, koTimer: 0, respawn: null, spraying: null };
+  Object.defineProperty(state, 'racing', { get: () => false, enumerable: true, configurable: true });
+  const fakeGeo = class { dispose() {} };
+  const fakeObj = class {
+    constructor() {
+      this.position = { set() {}, y: 0 };
+      this.rotation = { x: 0, y: 0 };
+      this.userData = {};
+    }
+    add() {}
+  };
+  const ppos = { x: def.x + 40, z: def.z };
+  const deps = {
+    bus, weapons, state, vigHooks: { active: () => false, end() {} }, otherMissionBusy: () => false,
+    THREE: { Group: fakeObj, Mesh: fakeObj, MeshStandardMaterial: class { dispose() {} }, MeshBasicMaterial: class { dispose() {} }, IcosahedronGeometry: fakeGeo, BoxGeometry: fakeGeo, ConeGeometry: fakeGeo },
+    gangs,
+    traffic: { peds, _gangWeapon: (p, k) => armed.set(p, k) },
+    combat: { isDown: () => false, stateOf: () => 'normal' },
+    repaintCharacter: (ch, look) => painted.push(look && look.shirt),
+    document: { body: null }, scene: { add() {} }, heightAt: () => 0, vigilante: { active: false },
+    economy: { add() {} }, hud: { toast() {} }, playerPos: () => ppos, player: { actor: playerActor },
+    createRampage, createRampageWorld, createRampageHud, createSkullMarkers,
+  };
+  let w = null;
+  try {
+    w = new Function(...Object.keys(deps), body)(...Object.values(deps));
+  } catch (e) {
+    check('抽段可執行（真 gangs）', false, e.message);
+  }
+  if (w) {
+    const begin = () => {
+      ppos.x = def.x + 40;
+      w.updateRampage(1 / 60, false);
+      ppos.x = def.x;
+      w.updateRampage(1 / 60, false); // 開始
+      w.updateRampage(1 / 60, false); // 第一次補敵人
+    };
+    const released = () => gangs.members.length === 0 && gangs.stats().engaged === 0 && peds.every((p) => !p.citizen.gang && p.citizen.look.shirt === 'orig' && !p.brain.override);
+    begin();
+    const n0 = gangs.members.length;
+    const took = peds.filter((p) => p.citizen.gang);
+    const armedDuring = took.filter((p) => armed.has(p)).length;
+    check('真 gangs：開始後徵用附近行人成西裝幫並圍攻', w.rampage.active && n0 > 0 && gangs.stats().engaged > 0 && armedDuring === n0 && w.rampageWorld.enlisted.length === n0, `n0 ${n0}`);
+    w.rampage.end('busted');
+    check('BUSTED 結束：徵用成員交還 gangs（members / engaged 歸零、外觀還原、大腦交還）', !w.rampage.active && released());
+    check('BUSTED 結束：存活者 repaint 回原色、卸武器', took.every((p) => armed.get(p) === null) && painted.slice(-n0).every((s) => s === 'orig'));
+    begin();
+    const n1 = gangs.members.length;
+    w.cancelRampage();
+    check('cancelRampage（回主選單 / 開新局）：徵用成員交還、不累積', n1 > 0 && !w.rampage.active && released() && w.rampageWorld.enlisted.length === 0);
+    const np = painted.length;
+    w.cancelRampage();
+    check('重複 cancel：不重複釋放（無額外 repaint）', painted.length === np && gangs.members.length === 0);
+  }
+  gangs.dispose();
 }
 
 console.log(failed ? `FAIL ${failed}/${passed + failed}` : `PASS ${passed}/${passed + failed}`);

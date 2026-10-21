@@ -13,7 +13,7 @@
 // 呼叫端（main.js）每幀建 ctx = { player: { x, z }, onFoot, busy, frozen, world, earn(n, reason), toast?(text, sec) }：
 //   onFoot = 步行且可行動（非倒地 / KO / 送醫）；busy = 其他任務進行中（委託 / 外送 / 打工 / 警車任務 / 競速 / 副任務 / 搶劫 / 噴漆 / BUSTED・WASTED）
 //   frozen = 手機 / BUSTED・WASTED / 噴漆中（計時不前進、不觸發、不補敵人）；earn(n, 'rampage') = economy.add
-//   world（敵人補充介面，見 createRampageWorld；測試以替身注入）：alive(gangId, x, z, r) → 該幫存活成員數；spawn(gangId, x, z, n) → 實際補充人數
+//   world（敵人補充介面，見 createRampageWorld；測試以替身注入）：alive(gangId, x, z, r) → 該幫存活成員數；spawn(gangId, x, z, n) → 實際補充人數；release?() → 結束時交還徵用的成員（reset 前呼叫）
 // 觸發：步行（不含駕車：GTA 原作是走進骷髏；駕車經過不觸發，下車站在標記內即開始）進入未完成點的 START_RADIUS → 開始；
 //   以「步行且在範圍內」的上升緣判定（結束後站在原地不會立刻重開，離開再走進來才重新挑戰）；busy → toast TOAST_BUSY 不開始
 // 進行中：計時吃呼叫端 dt（clamp ≤ MAX_DT，≥ 10 fps 時與幀率無關）；每 SPAWN_SEC 秒檢查一次，玩家 ENEMY_RADIUS 內目標幫派存活成員 < MIN_ENEMIES
@@ -149,7 +149,7 @@ export function createRampage({ bus = null, weapons = null, gangOf = null, isTar
   const inside = list.map(() => true); // 上一幀「步行且在範圍內」：初值 true = 開局 / 讀檔站在標記上不會立刻觸發
   const mk = list.map((r) => ({ x: r.x, z: r.z, kind: MARKER_KIND, id: r.id }));
   const out = { active: false, id: null, def: null, kills: 0, goal: 0, remain: 0, text: null, urgent: false };
-  const st = { def: null, kills: 0, elapsed: 0, pending: false, spawnT: 0, snap: null, textKills: -1, textSec: -1, text: null };
+  const st = { def: null, kills: 0, elapsed: 0, pending: false, spawnT: 0, snap: null, textKills: -1, textSec: -1, text: null, world: null };
   let lastCtx = null;
   const offs = [];
 
@@ -166,7 +166,15 @@ export function createRampage({ bus = null, weapons = null, gangOf = null, isTar
     st.snap = null;
   }
 
+  // 補充 / 徵用的敵人交還 gangs（所有結束路徑經 reset：完成 / 時間到 / 送醫 / 被捕 / cancel / 讀檔）
+  function releaseEnemies() {
+    const w = st.world;
+    st.world = null;
+    if (w && typeof w.release === 'function') w.release();
+  }
+
   function reset() {
+    releaseEnemies();
     st.def = null;
     st.kills = 0;
     st.elapsed = 0;
@@ -283,7 +291,10 @@ export function createRampage({ bus = null, weapons = null, gangOf = null, isTar
     const pz = ctx.player.z;
     const alive = ctx.world.alive(def.gang, px, pz, C.enemyRadius) || 0;
     const need = Math.min(C.spawnBatch, C.minEnemies - alive);
-    if (need > 0) ctx.world.spawn(def.gang, px, pz, need);
+    if (need > 0) {
+      st.world = ctx.world; // 結束時 release 用（徵用時的 world）
+      ctx.world.spawn(def.gang, px, pz, need);
+    }
   }
 
   function update(dt, ctx = {}) {
@@ -323,9 +334,10 @@ export function createRampage({ bus = null, weapons = null, gangOf = null, isTar
     return true;
   }
 
-  // 回主選單 / 開新局：無聲失敗（恢復武器、emit rampage:fail reason 'cancel'）
+  // 回主選單 / 開新局 / 讀檔：無聲失敗（恢復武器、emit rampage:fail reason 'cancel'）；已達標待結算 → 同 end() 照算完成（賞金 + 完成紀錄）
   function cancel() {
-    if (st.def) fail('cancel', null);
+    if (st.def && st.pending) complete(lastCtx);
+    else if (st.def) fail('cancel', null);
     else reset();
     fillOut();
   }
@@ -393,15 +405,17 @@ export function createRampage({ bus = null, weapons = null, gangOf = null, isTar
 }
 
 // ---------- 敵人補充（世界轉接：沿用 gangs 成員生成，不 import three） ----------
-// createRampageWorld({ traffic, gangs, combat, repaint, minDist }) → { alive(gangId, x, z, r), spawn(gangId, x, z, n) → 實際人數 }
+// createRampageWorld({ traffic, gangs, combat, repaint, minDist }) → { alive(gangId, x, z, r), spawn(gangId, x, z, n) → 實際人數, release() → 釋放人數, enlisted }
 //   alive：gangs.members 中該幫、combat 狀態非 dead 的成員在 (x, z) 半徑 r 內的人數
 //   spawn：徵用 (x, z) 半徑 ENEMY_RADIUS 內、離玩家 ≥ minDist 的漫步中骨架行人（同 street-events idle 條件），由近到遠取 n 人
 //     → gangs.enlist(peds, gangId)（換成該幫成員、挑起敵意圍攻玩家）→ repaint(p)（骨架重新上色 + 掛武器，整合層提供）
+//   release：本次暴走 spawn 徵用的成員 → gangs.release（收手、取消登記、citizen.gang / look 還原）→ 仍存活者 repaint(p)（回原色、卸武器）；清空紀錄（重複呼叫 = 0）
 //   暫存陣列建構時配置、每次呼叫重用
 export const SPAWN_MIN_DIST = 12; // m，徵用行人離玩家至少此距離（不在身邊憑空變成敵人）
 export function createRampageWorld({ traffic = null, gangs = null, combat = null, repaint = null, minDist = SPAWN_MIN_DIST, radius = ENEMY_RADIUS } = {}) {
   const pool = [];
   const picked = [];
+  const enlisted = []; // 本次暴走徵用的成員 actor（release 交還）
   const stateOf = (a) => (combat && typeof combat.stateOf === 'function' ? combat.stateOf(a) : 'normal');
   function idle(p) {
     if (!p || !p.alive || !p.actor || !p.brain || !p.citizen) return false;
@@ -436,10 +450,18 @@ export function createRampageWorld({ traffic = null, gangs = null, combat = null
     picked.length = 0;
     for (let i = 0; i < pool.length && picked.length < n; i++) picked.push(pool[i]);
     const actors = gangs.enlist(picked, gangId);
+    for (const a of actors) enlisted.push(a);
     if (typeof repaint === 'function') for (const p of picked) if (p.citizen && p.citizen.gang) repaint(p);
     return actors.length;
   }
-  return { alive, spawn };
+  function release() {
+    if (!enlisted.length) return 0;
+    const peds = gangs && typeof gangs.release === 'function' ? gangs.release(enlisted) : [];
+    enlisted.length = 0;
+    if (typeof repaint === 'function') for (const p of peds) if (p && p.alive && p.citizen && !p.citizen.gang) repaint(p);
+    return peds.length;
+  }
+  return { alive, spawn, release, enlisted };
 }
 
 // ---------- HUD（任務條 + 畫面邊緣紅色脈動；.rampage- 前綴樣式在 src/style.css，prefers-reduced-motion 時關閉脈動） ----------
