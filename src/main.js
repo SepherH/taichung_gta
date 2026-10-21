@@ -186,9 +186,11 @@ import { createStreetEvents, createStreetWorld } from './street-events.js';
 import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers } from './missions/rampage.js';
 import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
 import { createPackages, createPackageMesh } from './collect/packages.js';
+import { createSnatch, SNATCH_PROMPT } from './snatch.js';
 import { createFirefighter, createFireWorld, createFireTruckDepot, createWaterCannonMesh, nozzleOf, isFireTruck, FIRE_STATION, FIRE_TRUCK_SPOT, FIRE_STATION_BEACON, PROMPT_START as FIRE_PROMPT_START, PROMPT_QUIT as FIRE_PROMPT_QUIT, SPRAY_KEY as FIRE_SPRAY_KEY } from './missions/firefighter.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
+const SNATCH_PRIORITY = 5; // P19 飛車搶包互動優先序（高於委託 3 / 打卡 2 / 副任務 4：騎機車搶包時蓋過其他提示）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
 const WASTED_DELAY_SEC = 2; // 玩家 hp 歸零倒地後多久進入送醫（WASTED）流程（Phase 7 取代原地起身）
 const BUSTED_FINE = 150; // 被捕罰鍰（NT$，餘額不足扣到 0）
@@ -1365,6 +1367,8 @@ async function init() {
     const v = state.pendingFall;
     state.pendingFall = null;
     if (!v || state.vehicle !== v || state.mode !== 'drive') return;
+    // P19：倒地當幀即下車，updateSnatch 看不到翻覆 → 下車前先通知摔車（掉一半並重置連擊）
+    if (v.type === 'scooter') snatch.crash();
     exitVehicle(true);
     knockDownPlayer();
     hud.toast('機車倒地，你摔下車了', 2.5);
@@ -2968,6 +2972,40 @@ async function init() {
     setFireSprayButton(false);
   };
 
+  // ---------- P19 飛車搶包：src/snatch.js（純邏輯；行人掃描每 0.2 s 一次，不新增網格 / 光源）----------
+  // 後果一律走既有 API：通緝 wanted.report（snatch / snatchCombo，路人報案 witnessed false）、幫派 gangs.provokeActor、
+  //   逃跑 brain.onThreatened（既有 flee 行為）；金錢與統計由 economy 訂閱 snatch:success / snatch:drop 自行處理
+  const snatch = createSnatch({
+    bus,
+    adapters: {
+      flee: (ped) => {
+        if (ped && ped.brain && ped.brain.onThreatened) ped.brain.onThreatened({ pos: player.pos });
+      },
+      reportCrime: (crime, opts) => wanted.report(crime, opts),
+      provokeGang: (ped) => gangs.provokeActor(ped && ped.actor, 'snatch'),
+    },
+  });
+  const snatchCtx = { riding: false, type: null, speed: 0, overturned: false, x: 0, z: 0, peds: null, frozen: false };
+  const updateSnatch = (dt, frozen) => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    snatchCtx.riding = !!v;
+    snatchCtx.type = v ? v.type : null;
+    snatchCtx.speed = v ? v.speed : 0;
+    snatchCtx.overturned = !!v && v.isOverturned();
+    snatchCtx.x = v ? v.pos.x : player.pos.x;
+    snatchCtx.z = v ? v.pos.z : player.pos.z;
+    snatchCtx.peds = traffic.peds;
+    snatchCtx.frozen = !!frozen;
+    snatch.update(dt, snatchCtx);
+    hud.setSnatchCombo(snatch.combo, snatch.mult);
+  };
+  // 騎機車且附近有可搶行人時，搶包提示優先於其他 interactable（priority 最高）
+  const snatchInteractable = () => (snatch.target ? { text: SNATCH_PROMPT, priority: SNATCH_PRIORITY, dist: 0, act: () => snatch.act() } : null);
+  const cancelSnatch = () => {
+    snatch.cancel();
+    hud.setSnatchCombo(0, 1);
+  };
+
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
     scene.traverse((o) => {
@@ -3279,6 +3317,7 @@ async function init() {
     updateStunts(realDt);
     updatePackages(dt);
     updateFirefighter(dt, phoneOpen, state.mode === 'drive' && (snap.down.attack || input.down(FIRE_SPRAY_KEY)));
+    updateSnatch(dt, phoneOpen || !!state.respawn); // P19：接在 updateFirefighter 之後（暫停 / 面板 / 重生中凍結）
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3321,7 +3360,8 @@ async function init() {
       if (flipped) vehiclePrompt = '翻車了！按 F 扶起';
       else if (dmg.healthOf(v) === 0) vehiclePrompt = '車子熄火了，按 F 下車';
       // 駕駛中也可接委託 / 打卡（E）；小吃與彈藥只在步行
-      inter = raceInteractable(v); // 街頭競速起點優先（比賽中 / 其他任務中回 null）
+      inter = snatchInteractable(); // P19：騎機車且附近有可搶行人 → 「按 E 搶包」最優先
+      if (!inter) inter = raceInteractable(v); // 街頭競速起點優先（比賽中 / 其他任務中回 null）
       if (!inter) inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
       // 駕駛計程車 / 救護車：開始 / 收工降為後備（只在附近沒有委託 / 打卡等既有互動時出現；其他車回 null）
       if (!inter) inter = sideJobInteractable(v);
@@ -3634,6 +3674,7 @@ async function init() {
     cancelRace();
     cancelSideJobs();
     gangs.cancel();
+    cancelSnatch(); // P19：連擊 / 已被搶名單歸零
     cancelFirefighter(); // P18：先於 clearExplosions（fireWorld.remove 要看得到起火狀態才熄火修復；之後 clear 不會留下低耐久起火車）
     clearExplosions();
     cancelStreetEvents();
@@ -3657,6 +3698,7 @@ async function init() {
     stunts.restore(save.stunts); // Phase 16：舊存檔無 stunts → 全部未完成
     packages.restore(save.packages); // Phase 17：舊存檔無 packages → 0 收集
     firefighter.restore(save.firefighter); // P18：舊存檔無 firefighter → 未解鎖防火
+    snatch.restore(save.stats); // P19：搶包統計存在 save.stats（缺欄位視 0）
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3720,6 +3762,7 @@ async function init() {
     cancelRace();
     cancelSideJobs();
     gangs.cancel();
+    cancelSnatch(); // P19：連擊 / 已被搶名單歸零
     cancelFirefighter(); // P18：先於 clearExplosions（fireWorld.remove 要看得到起火狀態才熄火修復；之後 clear 不會留下低耐久起火車）
     clearExplosions();
     cancelStreetEvents();
@@ -3839,6 +3882,8 @@ async function init() {
       packages, packageMesh,
       // P18：消防車任務（firefighter.start() 除錯開始；firefighter.slots 看起火車火勢；fireTrucks.vehicle = 消防隊停放的消防車）
       firefighter, fireWorld, fireTrucks, waterCannon, fireStationBeacons,
+      // P19：飛車搶包（snatch.target 看目前鎖定行人；snatch.combo / mult 看連擊）
+      snatch,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

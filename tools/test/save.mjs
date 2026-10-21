@@ -78,7 +78,7 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
 {
   const d = defaultSave();
   check('defaultSave 版本 / 起始金錢 / 時間 / 位置 null', d.version === 2 && SAVE_VERSION === 2 && d.money === 500 && d.world.hour === 16.5 && d.player.x === null && d.player.z === null);
-  check('defaultSave 統計 13 欄皆 0（v1 十欄 + missionsDone / missionsFailed / shotsFired）', Object.keys(d.stats).length === 13 && Object.values(d.stats).every((v) => v === 0) && ['missionsDone', 'missionsFailed', 'shotsFired'].every((k) => k in d.stats));
+  check('defaultSave 統計 15 欄皆 0（v1 十欄 + missionsDone / missionsFailed / shotsFired + P19 snatches / snatchMoney）', Object.keys(d.stats).length === 15 && ['snatches', 'snatchMoney'].every((k) => k in d.stats) && Object.values(d.stats).every((v) => v === 0) && ['missionsDone', 'missionsFailed', 'shotsFired'].every((k) => k in d.stats));
   check(
     'defaultSave v2 欄位',
     JSON.stringify(d.weapons) === JSON.stringify({ slot: 0, ammo: { pistol: { mag: 12, reserve: 36 } } }) &&
@@ -100,7 +100,7 @@ const good = () => ({ ...defaultSave(), money: 1234, player: { x: -120.5, z: 88,
   check('validate：NaN 金錢 → 預設 500、負 savedAt → 0', v && v.money === 500 && v.savedAt === 0);
   check('validate：未知鍵丟棄（頂層 / stats / player / world）', v && !('hacker' in v) && !('extra' in v.stats) && !('god' in v.player) && !('weather' in v.world));
   check('validate：負數 / Infinity 統計 → 0、計數取整數、距離保留小數', v && v.stats.playTimeSec === 0 && v.stats.carjacks === 0 && v.stats.pedsHit === 3 && v.stats.distWalkM === 12.5);
-  check('validate：缺鍵補預設（stats 其餘欄位）', v && Object.keys(v.stats).length === 13 && v.stats.kos === 0 && v.stats.shotsFired === 0);
+  check('validate：缺鍵補預設（stats 其餘欄位）', v && Object.keys(v.stats).length === 15 && v.stats.snatches === 0 && v.stats.kos === 0 && v.stats.shotsFired === 0);
   check('validate：x / z 不成對有效 → 皆 null、非數 yaw → 0', v && v.player.x === null && v.player.z === null && v.player.yaw === 0);
   check('validate：hour 30 → 6（mod 24）', v && v.world.hour === 6);
   const empty = validateSave({ version: 1 });

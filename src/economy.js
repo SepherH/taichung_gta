@@ -1,4 +1,5 @@
 // 經濟與統計：金錢（整數、不為負）與各項統計計數；訂閱 bus 事件自動累計，金錢變動一律 emit 'player:money'
+// P19：snatch:success → add(amount, 'snatch') + stats.snatches / snatchMoney；snatch:drop → charge(amount, 'snatchDrop')
 // bus 由呼叫端注入（on(name, fn) → off、emit(name, payload)）；rng 可注入以便測試掉錢金額
 import { validateSave, defaultSave } from './save.js';
 
@@ -68,6 +69,14 @@ export function createEconomy({ bus, initial, rng = Math.random } = {}) {
       }
     }));
     offs.push(bus.on('vehicle:carjacked', () => { stats.carjacks++; }));
+    // P19 飛車搶包（src/snatch.js）：成功入帳並累計統計；摔車掉錢走 charge（餘額不足就扣到 0）
+    offs.push(bus.on('snatch:success', (e) => {
+      const amt = add(e && e.amount, 'snatch');
+      if (!amt) return;
+      stats.snatches++;
+      stats.snatchMoney += amt;
+    }));
+    offs.push(bus.on('snatch:drop', (e) => { charge(e && e.amount, 'snatchDrop'); }));
     offs.push(bus.on('vehicle:crash', () => { stats.crashes++; }));
     offs.push(bus.on('player:ko', () => {
       stats.kos++;

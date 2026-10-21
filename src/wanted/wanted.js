@@ -14,6 +14,8 @@ export const CRIMES = Object.freeze({
   vehicleKill: 'vehicleKill',
   policeVehicle: 'policeVehicle',
   robbery: 'robbery', // 超商搶劫（Phase 9，src/wanted/robbery.js；開始搶劫時由店員報警，witnessed=false）
+  snatch: 'snatch', // P19 飛車搶包（src/snatch.js；路人報案 witnessed=false → 保底 1 星）
+  snatchCombo: 'snatchCombo', // P19 連擊 ≥ 3 的搶包：保底 2 星
 });
 
 // 各犯行增加的 heat（被警力看見時全額）
@@ -28,10 +30,12 @@ export const HEAT = Object.freeze({
   vehicleKill: 1.5,
   policeVehicle: 0.8,
   robbery: 2.5,
+  snatch: 0.6,
+  snatchCombo: 1.5,
 });
 
-// 犯行保底星數：report 後星數至少為此值（不論 witnessed）；超商搶劫保證至少 2 星
-export const CRIME_MIN_STARS = Object.freeze({ robbery: 2 });
+// 犯行保底星數：report 後星數至少為此值（不論 witnessed）；超商搶劫保證至少 2 星；飛車搶包 1 星、連擊 ≥ 3 升 2 星
+export const CRIME_MIN_STARS = Object.freeze({ robbery: 2, snatch: 1, snatchCombo: 2 });
 
 export const STAR_HEAT = Object.freeze([0, 0.5, 3, 6, 10, 15]); // stars = 最大 n 使 heat ≥ STAR_HEAT[n]
 export const EVADE_SEC = Object.freeze([0, 10, 15, 22, 30, 40]); // 依星數：脫離視線多久進入 / 完成搜尋

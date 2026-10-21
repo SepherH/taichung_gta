@@ -31,6 +31,7 @@
 // Phase 6（I6a）：hud.showCamView(index) → 畫面上方短暫顯示「鏡頭：近 / 中 / 遠」1.2 s（src/ui/cam-view-hint.js，倒數吃 update 的渲染 dt）
 // Phase 7（通緝）：state.searchCircle（wanted.searchCircle：{ x, z, r } | null）→ 小地圖以 wanted/ui.js drawSearchCircle 畫搜索圈（藍紅交替）；
 //   state.policeCars（[{ x, z }]，police.cars 的 pos）→ 小地圖紅藍交替閃爍點（每 POLICE_BLINK_SEC 秒換色，超出半徑不畫）
+// P19（飛車搶包）：hud.setSnatchCombo(combo, mult) → 畫面中下（搶劫進度條上方）膠囊「搶包連擊 N（×M）」；combo < 1 = 隱藏（.snatch-combo，樣式在 style.css 末段）
 // Phase 9（超商搶劫）：hud.setRobberyProgress(frac | null, label?) → 畫面中下（互動提示膠囊上方）進度條「搶劫中…」（.rob- 前綴，樣式在 style.css 末段）；
 //   markers kind 'store'（超商）在小地圖畫綠底「超」字小方塊圖示（ICON_KINDS），不貼邊
 //   markers kind 'race-start'（街頭競速起點）畫橘色旗幟（FLAG_KINDS），不貼邊；'race-cp'（下一個檢查點）超出半徑時貼邊
@@ -185,6 +186,7 @@ export class HUD {
     this._buildPhase5();
     this._buildSprayFade();
     this._buildRobBar();
+    this._buildSnatchCombo();
     this._camViewHint = createCamViewHint({ parent: this.root });
     this.mapCanvas = this._buildMap();
     if (typeof window !== 'undefined' && window.addEventListener) {
@@ -241,6 +243,35 @@ export class HUD {
     this.robBarEl = bar;
     this.robLabelEl = label;
     this.robFillEl = fill;
+  }
+
+  // P19 飛車搶包連擊（src/snatch.js）：搶劫進度條上方的小膠囊「搶包連擊 N（×M）」
+  _buildSnatchCombo() {
+    this._snatchShown = false;
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+      this.snatchComboEl = null;
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'snatch-combo';
+    el.hidden = true;
+    (document.body || this.root).appendChild(el);
+    this.snatchComboEl = el;
+  }
+
+  // combo < 1 / null → 隱藏；否則顯示連擊數與倍率（倍率整數不帶小數點）
+  setSnatchCombo(combo, mult = 1) {
+    if (!this.snatchComboEl) return;
+    const n = Math.floor(Number(combo) || 0);
+    const show = n >= 1;
+    if (show !== this._snatchShown) {
+      this.snatchComboEl.hidden = !show;
+      this._snatchShown = show;
+    }
+    if (!show) return;
+    const m = Number(mult) || 1;
+    const text = `搶包連擊 ${n}（×${Number.isInteger(m) ? m : m.toFixed(1)}）`;
+    if (this.snatchComboEl.textContent !== text) this.snatchComboEl.textContent = text;
   }
 
   // frac：0–1 顯示進度（搶劫中）；null / undefined = 隱藏；label 省略 = ROB_LABEL

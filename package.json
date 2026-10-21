@@ -28,6 +28,8 @@
     "test:feel": "node tools/test/player-feel.mjs",
     "test:flow": "node tools/test/traffic-flow.mjs",
     "test:p3": "node tools/test/integration-p3.mjs",
+    "test:snatch": "node tools/test/p19-snatch.mjs",
+    "test:p19": "node tools/test/integration-p19.mjs",
     "test:all": "node tools/test/run-all.mjs"
   },
   "dependencies": {

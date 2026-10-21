@@ -54,8 +54,8 @@ function run(w, sec, dt, ctx) {
 // ======================= 常數 =======================
 {
   const keys = Object.keys(CRIMES);
-  check('CRIMES：10 種（含 robbery）且值 = 同名字串', keys.length === 10 && keys.includes('robbery') && keys.every((k) => CRIMES[k] === k));
-  check('HEAT：與 CRIMES 同鍵、robbery = 2.5', keys.every((k) => typeof HEAT[k] === 'number') && Object.keys(HEAT).length === 10 && HEAT.robbery === 2.5);
+  check('CRIMES：12 種（含 robbery、P19 snatch / snatchCombo）且值 = 同名字串', keys.length === 12 && keys.includes('robbery') && keys.includes('snatch') && keys.includes('snatchCombo') && keys.every((k) => CRIMES[k] === k));
+  check('HEAT：與 CRIMES 同鍵、robbery = 2.5', keys.every((k) => typeof HEAT[k] === 'number') && Object.keys(HEAT).length === 12 && HEAT.robbery === 2.5 && HEAT.snatch === 0.6 && HEAT.snatchCombo === 1.5);
   check('CRIME_MIN_STARS：robbery 保底 2 星', CRIME_MIN_STARS.robbery === 2 && Object.isFrozen(CRIME_MIN_STARS));
   check('STAR_HEAT / EVADE_SEC 契約值', STAR_HEAT.join() === '0,0.5,3,6,10,15' && EVADE_SEC.join() === '0,10,15,22,30,40');
   check('starsForHeat 邊界', starsForHeat(0.49) === 0 && starsForHeat(0.5) === 1 && starsForHeat(2.99) === 1 && starsForHeat(3) === 2 && starsForHeat(15) === 5 && starsForHeat(999) === 5);
@@ -64,7 +64,7 @@ function run(w, sec, dt, ctx) {
 // ======================= 1. 犯行 heat 與星數 =======================
 {
   // 各犯行單次（被看見）
-  const expect = { assault: 1, assaultPolice: 1, kill: 1, killPolice: 2, gunfire: 0, carjack: 1, vehicleHit: 1, vehicleKill: 1, policeVehicle: 1, robbery: 2 };
+  const expect = { assault: 1, assaultPolice: 1, kill: 1, killPolice: 2, gunfire: 0, carjack: 1, vehicleHit: 1, vehicleKill: 1, policeVehicle: 1, robbery: 2, snatch: 1, snatchCombo: 2 }; // P19：snatch heat 0.6 保底 1 星、snatchCombo 1.5 保底 2 星（CRIME_MIN_STARS）
   const bad = [];
   for (const c of Object.keys(CRIMES)) {
     const { w } = make();

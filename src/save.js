@@ -23,7 +23,7 @@
 export const SAVE_VERSION = 2;
 
 // 統計欄位：計數類取整數，距離 / 時間類保留小數
-const STAT_INT_KEYS = ['pedsHit', 'pedsKnockedOut', 'carjacks', 'crashes', 'kos', 'moneyEarned', 'moneySpent', 'missionsDone', 'missionsFailed', 'shotsFired'];
+const STAT_INT_KEYS = ['pedsHit', 'pedsKnockedOut', 'carjacks', 'crashes', 'kos', 'moneyEarned', 'moneySpent', 'missionsDone', 'missionsFailed', 'shotsFired', 'snatches', 'snatchMoney'];
 const STAT_FLOAT_KEYS = ['playTimeSec', 'distWalkM', 'distDriveM'];
 // v2 清洗上限
 const PISTOL_MAG_MAX = 12;
@@ -57,6 +57,8 @@ export function defaultSave() {
       missionsDone: 0,
       missionsFailed: 0,
       shotsFired: 0,
+      snatches: 0, // P19 飛車搶包次數（舊存檔缺欄位 → 0）
+      snatchMoney: 0, // P19 搶包累計金額（NT$）
     },
     player: { x: null, z: null, yaw: 0 },
     world: { hour: 16.5 },

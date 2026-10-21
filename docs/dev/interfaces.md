@@ -1361,6 +1361,43 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 ### 40.5 回歸
 - `node tools/test/p18-firefighter.mjs`（純邏輯，不 import three / rapier）、`node tools/test/integration-p18.mjs`（main.js 接線靜態檢查 + VEHICLE_TYPES + 本節）
 
+## 41. P19 機車飛車搶包 Scooter Snatch（P19；接線點在 `src/main.js`，介面以 `src/snatch.js` 檔頭為準）
+
+### 41.1 規則
+- 玩家騎 `scooter`（`SNATCH_VEHICLE`；汽車 / 步行 / 機車倒地中一律不行）、車速絕對值 ≥ `SNATCH_SPEED_MIN` 6 m/s、行人在 `SNATCH_RADIUS` 1.8 m 內 → 互動鍵（E / 手把同鍵）搶包
+- 包包：`hasBag(id)` 以行人 id 的 FNV-1a 雜湊決定，機率 `SNATCH_BAG_CHANCE` 60%，同一人每次結果相同（純邏輯、不耗 rng、與存檔無關）
+- 金額：`bagAmount(id)` = `SNATCH_MIN` 50 – `SNATCH_MAX` 300（含兩端，同樣以 id 雜湊穩定），入帳額 = 基礎金額 × 連擊倍率（四捨五入）
+- 成功 / 沒包都算「搶過」：行人永久標記（`citizen.snatched` + 模組內 id 集合），同一人不能再被搶（本局內；`cancel()` 依名單一併清掉 `citizen.snatched`，因 Traffic 全程只建一次、行人不隨新局重建）；兩種結果都會讓該行人尖叫逃跑（既有 `brain.onThreatened` → flee）
+- 連擊：`COMBO_WINDOW` 30 s 內連續成功，倍率 `COMBO_MULTS` = 1 / 1.5 / 2 / 3（第 4 次起維持上限 3）；逾時或摔車重置。連擊計時走模擬秒數，凍結中照樣推進
+- 摔車 = 車輛翻覆（false → true 的那一幀）或單幀車速瞬降 > `CRASH_SPEED_DROP` 8 m/s → 掉落最近一次搶得金額的一半（`Math.floor`）並重置連擊；掉過即歸零，同一筆不重複掉；連擊逾時重置時最近一筆一併失效（之後摔車不掉錢）
+- 機車倒地（`vehicles.onFall` → `handleFall`）當幀即強制下車，`update` 的翻覆判定看不到 → `handleFall` 在 `exitVehicle(true)` 之前呼叫 `snatch.crash()`
+
+### 41.2 介面
+- `createSnatch({ bus?, adapters?, config? })` → `{ update(dt, ctx), act() → 'success'|'fail'|null, crash(), target, prompt, combo, mult, comboLeft, total, totalMoney, restore(stats), cancel() }`
+- `ctx`（每幀重用同一物件）：`{ riding, type, speed, overturned, x, z, peds, frozen }`；`peds` = `traffic.peds`（骨架行人），既有查詢為 O(n) 全量，故每 `SCAN_INTERVAL` 0.2 s 才掃一次（有無目標皆同；剛符合條件的第一幀立即掃），其餘幀只驗證已鎖定目標（不配置物件、不新增貼圖單元 / 光源 / shadow map）
+- `adapters`（皆選用，省略則該後果退化而不報錯）：`flee(ped)` / `reportCrime(crime, { x, z, witnessed })` / `provokeGang(ped)` / `idOf(ped)`（省略 = `citizen.id ?? actor.id`）
+- 金錢不在本檔入帳：`src/economy.js` 訂閱 `snatch:success` → `add(amount, 'snatch')` + `stats.snatches` / `stats.snatchMoney`，訂閱 `snatch:drop` → `charge(amount, 'snatchDrop')`（同 `ped:knockdown` 慣例）
+- 通緝（`src/wanted/wanted.js` 新增犯行，`witnessed: false` 路人報案）：`snatch` heat 0.6 / 保底 1 星；連擊 ≥ `COMBO_WANTED_AT` 3 改報 `snatchCombo` heat 1.5 / 保底 2 星；加星後附近警力循既有 `police.js` 追捕
+- 幫派：被搶者 `citizen.gang` 非 null → `gangs.provokeActor(actor, 'snatch')`（`src/gangs.js` 新增的公開入口，走與 `onPlayerAttack` 相同的 provoke + 反擊路徑；非成員回 false）
+- HUD：`hud.setSnatchCombo(combo, mult)` → 畫面中下膠囊「搶包連擊 N（×M）」，`combo < 1` 隱藏（`.snatch-combo`，樣式在 `style.css` 末段；倍率整數不帶小數點）；桌機位置 `bottom: 208px × --hud-scale`（`.rob-bar` 頂 200 再上 8 px，不與搶劫進度條重疊），觸控 `.rob-bar` 移到上方故膠囊留在下方
+
+### 41.3 事件（bus）
+- `snatch:success { pedId, amount, combo, mult }`（amount 已乘倍率）
+- `snatch:fail { pedId }`（身上沒包）
+- `snatch:drop { amount }`（摔車掉錢，amount > 0 才發）
+
+### 41.4 接線（main.js）
+- 建立（消防車任務段之後、畫質 / 設定段之前）：`const snatch = createSnatch({ bus, adapters: { flee, reportCrime: wanted.report, provokeGang: gangs.provokeActor } })`
+- 每幀：`updateSnatch(dt, phoneOpen || !!state.respawn)` 接在 `updateFirefighter(...)` 之後；填 `snatchCtx`（駕駛中取 `state.vehicle` 的 `type` / `speed` / `isOverturned()` / `pos`，否則取 `player.pos`）後 `snatch.update` 並 `hud.setSnatchCombo(snatch.combo, snatch.mult)`
+- 互動優先序：駕駛分支 `inter = snatchInteractable()` 排在 `raceInteractable` / `vigilanteInteractable` / `nearestInteractable` / 副任務 / 消防之前（`SNATCH_PRIORITY` 5 高於委託 3 / 打卡 2 / 副任務 4）；提示文字 `SNATCH_PROMPT`「按 E 搶包」，按 E → `snatch.act()`
+- 存檔：統計走 `economy`（`save.stats.snatches` / `snatchMoney`，`src/save.js` `STAT_INT_KEYS` 與 `defaultSave` 已含，舊存檔缺欄位視 0）；`startGame` → `snatch.restore(save.stats)`（`firefighter.restore` 之後）
+- `startGame` / `quitToMenu` → `cancelSnatch()`（連擊、鎖定目標、已被搶名單歸零並收起 HUD 膠囊；排在 `cancelFirefighter()` 之前）
+- 暫停選單統計頁（`src/ui/menu.js`）：隱藏包裹列之前加一列「搶包 N 次 / NT$X」
+- 除錯：`window.__game.snatch`（`snatch.target` 看鎖定行人、`snatch.combo` / `mult` 看連擊）
+
+### 41.5 回歸
+- `node tools/test/p19-snatch.mjs`（純邏輯 + 真 economy / save / wanted / gangs，不 import three）、`node tools/test/integration-p19.mjs`（main.js 接線靜態檢查 + interfaces.md 本節 + 統計頁字樣）
+
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 
 ### 共通

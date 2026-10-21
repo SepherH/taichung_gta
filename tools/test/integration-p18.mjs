@@ -121,7 +121,7 @@ for (const fn of ['startGame', 'quitToMenu']) {
 const SEC_START = '// ---------- 消防車任務（P18，Firefighter）';
 const section = (() => {
   const i = mainSrc.indexOf(SEC_START);
-  const j = mainSrc.indexOf('\n  // ---------- 畫質 / 設定', i);
+  const j = mainSrc.indexOf('\n  // ---------- ', i + 1); // 下一個區段標頭（P19 起為飛車搶包段，再後為畫質段）
   return i > 0 && j > i ? mainSrc.slice(i, j) : '';
 })();
 check('抽出消防車段（特技跳台段之後、畫質段之前）', section.length > 1000 && mainSrc.indexOf('const cancelStunts = () => {') < mainSrc.indexOf(SEC_START));

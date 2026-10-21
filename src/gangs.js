@@ -25,6 +25,7 @@
 //   ≥ drivebyAt：派一台幫派車追玩家，靠近 drivebyRange 內乘客開槍（emit gang:driveby）；結束後冷卻 drivebyCooldown 秒
 //   衰減：地盤內最後一次挑釁 decayDelay 秒後每秒 −decayIn；離開該幫地盤每秒 −decayOut；< calmBelow 收手、幫派車離開
 // V3 街頭事件：skirmish(sideA, sideB, { a, b, sec, weapon }) → 成員 actor[]（指定骨架行人換成兩幫持槍成員互射 sec 秒，同互毆流程）；warring(actors?) → 互毆中人數
+// P19 飛車搶包：provokeActor(actor, cause?) → 該成員所屬幫派敵意 + attackGain 並立刻反擊（同 onPlayerAttack 路徑）；非成員回 false
 // P15 暴走：enlist(peds, id, { weapon?, gain? }) → 成員 actor[]（指定骨架行人換成 id 幫成員、該幫敵意 + gain → 圍攻玩家）；gangOf(actor) → 幫派 id | null
 //   release(actors) → 釋放的骨架行人[]（交還 enlist 徵用者：收手、取消登記、citizen.gang 清除、外觀還原；非成員略過、可重複呼叫）
 // 幫派互毆：每 warCheck 秒以 warChance 機率，找一組「入侵的敵對幫派成員（rival crew）」與在地成員（warRadius 內）互毆 warSec 秒
@@ -903,6 +904,15 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
     enlist,
     release,
     gangOf,
+    // P19 飛車搶包：對成員 actor 施加「被玩家攻擊」的同一條敵意路徑（provoke + 該成員反擊）；非成員 → false
+    provokeActor(actor, cause = 'snatch') {
+      const m = actor ? byId.get(actor.id) : null;
+      if (!m || m.actor !== actor) return false;
+      provoke(m.state, cause, C.attackGain);
+      const pa = playerActor();
+      if (pa && !(m.engaged && m.target === pa)) engage(m, pa);
+      return true;
+    },
     isHostile: (id) => !!(stateOf.get(id) && stateOf.get(id).hostile),
     car: (id) => (stateOf.get(id) ? stateOf.get(id).car : null),
     get territory() {

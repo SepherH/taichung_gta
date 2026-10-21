@@ -391,7 +391,7 @@ const sliceHandler = (evt, must) => {
   const p3 = W.addActor('p3', 200, 0);
   W.ex.explode(200, 0.7, 0, { source: null });
   ok(reports.length === before && p3.hp === 0, '非玩家爆炸：有傷亡但不算犯行');
-  ok(Object.keys(HEAT).length === 10, '沿用既有犯行種類（HEAT 未新增）');
+  ok(Object.keys(HEAT).length === 12 && !('explosion' in HEAT) && !('vehicleExplode' in HEAT), '沿用既有犯行種類（V4 未新增爆炸類犯行；P19 另加 snatch / snatchCombo 共 12 種）');
   void heat1;
 }
 
