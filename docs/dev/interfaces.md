@@ -70,6 +70,11 @@
 | `firefighter:level` | `{ level, reward, fires, timeLeft, earned }`（本關全部熄滅；賞金 300 + 關數 × 150 已 `ctx.earn`） | missions/firefighter.js |
 | `firefighter:complete` | `{ levels, earned, fireproof, first }`（第 12 關完成；first = 本次首次解鎖永久防火，已 `ctx.save()`） | missions/firefighter.js |
 | `firefighter:fail` | `{ reason: 'timeout'\|'exploded'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'quit'\|'cancel', level, cleared, earned }` | missions/firefighter.js |
+| `story:start` | `{ id: 's1-delivery'\|'s2-debt'\|'s3-sweep', title, chapter: 1, index }`（在 S 圖示按互動鍵接任務；之後先播開場對白） | missions/story.js（§42） |
+| `story:stage` | `{ id, chapter, stage: 'board'\|'deliver'\|'seek'\|'chase'\|'ko'\|'go'\|'fight'\|'reinforce', text, x, z }`（對白結束開始計時 / 階段切換；x, z 可為 NaN） | missions/story.js |
+| `story:complete` | `{ id, title, chapter, reward, timeSec }`（賞金已 `ctx.earn(reward, 'story')`；同一關只發一次） | missions/story.js |
+| `story:fail` | `{ id, title, chapter, reason: 'timeout'\|'seized'\|'cargo'\|'escaped'\|'left'\|'nospawn'\|'busted'\|'wasted'\|'cancel', stage }`（可回 S 無限重試） | missions/story.js |
+| `story:chapter` | `{ chapter: 1, title: '七期夜雨', bonus: 5000, car }`（三關全完成；額外獎勵已入帳、專屬座車解鎖、已 `ctx.save()`；只發一次） | missions/story.js |
 | `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
 | `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
@@ -1397,6 +1402,45 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 41.5 回歸
 - `node tools/test/p19-snatch.mjs`（純邏輯 + 真 economy / save / wanted / gangs，不 import three）、`node tools/test/integration-p19.mjs`（main.js 接線靜態檢查 + interfaces.md 本節 + 統計頁字樣）
+
+## 42. P20 故事任務線第一章「七期夜雨」Story（P20；接線點在 `src/main.js`，介面以 `src/missions/story.js` 檔頭為準）
+
+### 42.1 劇情與點位（純資料，人物 / 店名 / 幫派皆虛構）
+- 聯絡人 `CONTACT`「阿海」：夜浪KTV 後巷（osm-city.json B 層七期 KTV 建築西南外牆與朝富一街之間人行道，x 15.9, z −517.3）；地圖金色「S」（kind `'story'`，marker-colors `#e6b422`、hud.js `ICON_KINDS.story = 'S'`、big-map 圖例「故事任務（阿海）」）+ 門口小光柱（`STORY_BEACON` 7 m / r 0.7，`BEACON_COLORS.story` #ffb300，可接任務時 1 根）
+- 三關固定順序（`buildChapter(rival)`；完成過的關不再開）：
+  - S1 `s1-delivery`「送貨」：`VAN_SPOT`（朝富一街路邊）生成 `VAN_TYPE` suv（`VAN_COLOR`），車身耐久 = 貨物；送到 `DROP` 秋紅谷東北角停車場（service 車道 x 235.3, z −341.0）`DROP_RADIUS` 8 m 內；限時 150 s；通緝 ≥ 2 星 → `seized`（帶 ≥ 2 星不可接 S1，提示 `PROMPT_WANTED`「先甩掉警察再來找阿海」）；耐久 < 40% / 車消失 → `cargo`
+  - S2 `s2-debt`「追債」：叛徒車在 `TRAITOR_SPOT` 秋紅谷展示館附近車道點生成（10–80 m），玩家接近 70 m 內才逃；沿路網背離玩家（極速 = 玩家車極速 × 0.65，clamp 14–26 m/s）；120 s 內撞停（耐久歸零，或 < 2 m/s 持續 3 s 且玩家 15 m 內）→ `world.eject` 下車逃跑（brain.onThreatened）→ 玩家以既有近戰 / 槍械 KO（`ped:knockdown` / `ped:dead` 且 byPlayer，或 `isDown`：下車摔倒不算、起身後再倒地才算）即完成，撞停本身不完成；車甩開 450 m / 徒步拉開 120 m / 下車後 `KO_LIMIT` 60 s 內沒 KO（任務條顯示倒數）→ `escaped`；15 s 找不到生成點 → `nospawn`
+  - S3 `s3-sweep`「清場」：對手 = `rivalGang(contactGang())`（阿海 = 聯絡點地盤或地盤中心最近的幫派 → 秋紅谷飆車族；對手 = 地盤中心離它最近的另一幫 → 夜市角頭）；據點 = 該幫暴走點（`RAMPAGES`，p15 已驗證在地盤內人行道）；抵達 30 m → 徵用 5 名成員（gangs.enlist），擊倒 4 名後增援 4 名，每 2 s 補到 3 名（場上人數 = min(已徵用 − 已計入擊倒, `aliveGang`)；起身的已計入成員不算）；補不足持續 `SHORT_SEC` 20 s → 保底：未增援 → 提前增援，已增援 → 要求補到剩餘目標數；擊倒 8 名（byPlayer、`gangOf` = 對手、`world.isEnlisted`（本任務徵用，地盤原生不算）、同一人只算一次）完成 → 釋放徵用成員 + `gangs.provokeGang(對手, 'story', 100)`（敵意上升，之後照 gangs 衰減）；抵達後離據點 > 220 m → `left`
+- 對白：每關開場 / 收尾各 3–4 句（`L(who, text)`，每句 ≤ `LINE_MAX` 30 字）；字幕框 `.story-dialog`；互動鍵下一句、`STORY_SKIP_KEY` `'Enter'` 整段跳過、每句 `LINE_SEC` 4.5 s 自動下一句；開場對白結束才開始計時；不做過場動畫
+- 賞金：S1 NT$1500 / S2 NT$2500 / S3 NT$4000（`REWARDS`，reason `'story'`）；三關全完成 → 額外 `CHAPTER_BONUS` NT$5000 + 永久獎勵 `unlocked`：河南路安全屋門口路邊停一輛 `REWARD_CAR`（sedan 換金色 `#c9a227`，`v.storyCar = true`）——兩者都只發一次
+
+### 42.2 介面
+- `createStory({ bus, rng, gangOf, config })` → `{ update(dt, ctx) → snapshot, prompt(ctx, touch?) → text|null, interact(ctx), accept(ctx), canAccept(ctx), next(), skip(), end(kind), cancel(), markers(out), serialize() → { chapter, done, unlocked }|null, restore(rec), dispose(), active, running, phase, dialogActive, dialogLine, current, stage, spotted, kills, goal, done, doneCount, unlocked, chapterDone, startVisible, contact, rival, stronghold, chapter }`
+  - `ctx = { player: { x, z }, onFoot, vehicle, topSpeed, wantedStars, busy, frozen, world, earn(n, reason), toast?, save? }`（main 每幀重用同一物件）；phase `idle → intro → run → outro → idle`；`active` = phase ≠ idle（互斥旗標）
+  - `world`：`spawnVan(spot)` / `vanState(car) → { exists, health（0–1）}` / `releaseVan(car)`；`spawnPoint(x, z, rMin, rMax)` / `spawn(pt)` / `state(h) → { x, z, speed, health, exists }` / `drive(h, { x, z, maxSpeed })` / `eject(h) → actor` / `remove(h)` / `isDown(actor)`（下車摔倒不算）/ `actorPos(actor)`；`aliveGang(id, x, z, r)` / `spawnGang(id, x, z, n) → 實際人數` / `releaseGang()` / `provokeGang(id, gain)` / `isEnlisted(actor)`（main：`storyGangs.enlisted.includes(a)`；省略 = 不過濾）
+  - 失敗 / 取消：貨車 `releaseVan`（交還一般車輛回收名單）、叛徒車 `remove`、徵用成員 `releaseGang`；BUSTED / WASTED（`end(kind)`）任務中 → 失敗、收尾對白中 → 直接收起
+  - 標記：idle 且未全破 → 起點 `'story'`；任務中目標沿用 `'mission-dest'` 圖釘（貨車 / 停車場 / 叛徒車 / 叛徒 / 據點）
+- `createStoryHud({ root, isTouch })` → `{ set(snapshot|null), bar, box, dispose }`：上方中央 `.story-bar`（章節｜任務名 + 目標｜mm:ss 或 N / 8，≤ 20 s `.story-urgent`）、下方 `.story-dialog`；只在文字變化時寫 DOM
+- `createStoryCarDepot({ vehicles, dmg, spot, isBusy })` → `{ update(dt, player, unlocked), ensure(force, player, unlocked), vehicle, spot, dispose }`（同消防隊停放規則；未解鎖 → 收回；殘骸交一般回收，但殘骸在停放點 `WRECK_CLEAR` 8 m 內 → 補車前先移除，不與新車重疊）
+- 純函式：`contactGang` / `rivalGang` / `strongholdOf` / `traitorSpeed` / `storyRecord` / `formatClock`
+- `src/gangs.js` 新增 `provokeGang(id, cause?, gain?)`（同 provoke 路徑；未知 id → false）
+
+### 42.3 事件（bus）
+- `story:start` / `story:stage` / `story:complete` / `story:fail` / `story:chapter`（欄位見 §1 事件表）；`toast`（ctx.toast 省略時）；訂閱 `ped:knockdown` / `ped:dead`
+
+### 42.4 接線（main.js）
+- 建立（飛車搶包段之後、畫質段之前）：`story = createStory({ bus, gangOf: gangs.gangOf })`、`storyTraitors = createFugitiveWorld(…)`（第二個實例）、`storyGangs = createRampageWorld(…)`（第二個實例）、`storyWorld`（轉接，`vanState` / `state` 回傳重用物件；`eject` 重設 `storyTraitorUp`、`isDown` 需起身後再倒地；`isEnlisted` = `storyGangs.enlisted`）、`storyHud`、`storyBeacons`、`storyCars`
+- 每幀：`updateStory(dt, phoneOpen, input.wasPressed(STORY_SKIP_KEY))` 接在 `updateSnatch(...)` 之後（手機 / BUSTED・WASTED / 噴漆 → frozen；叛徒車 `brakeAll`）
+- 互動：步行 `inter = storyInteractable(inter, free);`（接在 `nearestInteractable` 之後）、駕駛 `inter = storyInteractable(inter, true);`（接在消防後備之後）——對白中「下一句」/ 站在 S 上「接受故事任務」覆蓋其他提示（接任務限步行，`story.canAccept`）
+- 互斥：`state.story`（getter）；包裝 `state.racing` getter 併入（otherMissionBusy → 委託類以外的副任務 / 警車 / 競速 / 暴走 / 特技跳台慢動作 / 消防 / 街頭事件 / 搶劫守門皆擋）；`vigHooks.active` / `vigHooks.end` 包裝（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口；BUSTED / WASTED → 失敗）；`nearestInteractable` `if (state.story) interCands[0] = null;`；接任務 `storyBusy = otherMissionBusy() || vigilante.active || rampage.active || stunts.active || firefighter.active || 重生 / 噴漆中`；通緝照常
+- 標記：`collectMarkers` 加 `pushAll(out, storyMarkers())`
+- 存檔：getState `story: story.serialize()`；`startGame` → `story.restore(save.story)`（`snatch.restore` 之後）+ `storyCars.ensure(true, null, story.unlocked)`；章節完成 `ctx.save` = `autosave.flush('story')`；`startGame` / `quitToMenu` → `cancelStory()`（`cancelStunts()` 之後）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`story: { chapter: 1, done: [id], unlocked }`；非物件整欄丟棄、未知 id 丟棄、unlocked 只在三關全完成時成立、皆無 → 省略（舊存檔相容）
+- 除錯：`window.__game.story` / `storyWorld` / `storyHud` / `storyCars` / `storyBeacons`
+- 限制：未新增 shadow map / 貼圖單元 / 光源；draw call 增量 = S 小光柱 2（shell + core，只在可接任務時）；每幀路徑不配置物件
+
+### 42.5 回歸
+- `node tools/test/p20-story.mjs`（純邏輯 + 替身世界 + save.js，不 import three / rapier）、`node tools/test/integration-p20.mjs`（main.js 接線靜態檢查 + interfaces.md 本節 + marker-colors / hud / big-map / light-pillar / style.css）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

@@ -26,6 +26,7 @@
 //   衰減：地盤內最後一次挑釁 decayDelay 秒後每秒 −decayIn；離開該幫地盤每秒 −decayOut；< calmBelow 收手、幫派車離開
 // V3 街頭事件：skirmish(sideA, sideB, { a, b, sec, weapon }) → 成員 actor[]（指定骨架行人換成兩幫持槍成員互射 sec 秒，同互毆流程）；warring(actors?) → 互毆中人數
 // P19 飛車搶包：provokeActor(actor, cause?) → 該成員所屬幫派敵意 + attackGain 並立刻反擊（同 onPlayerAttack 路徑）；非成員回 false
+// P20 故事任務：provokeGang(id, cause?, gain?) → 該幫敵意 + gain（預設 attackGain，同 provoke 路徑）；未知 id 回 false
 // P15 暴走：enlist(peds, id, { weapon?, gain? }) → 成員 actor[]（指定骨架行人換成 id 幫成員、該幫敵意 + gain → 圍攻玩家）；gangOf(actor) → 幫派 id | null
 //   release(actors) → 釋放的骨架行人[]（交還 enlist 徵用者：收手、取消登記、citizen.gang 清除、外觀還原；非成員略過、可重複呼叫）
 // 幫派互毆：每 warCheck 秒以 warChance 機率，找一組「入侵的敵對幫派成員（rival crew）」與在地成員（warRadius 內）互毆 warSec 秒
@@ -911,6 +912,13 @@ export function createGangs({ bus = null, rng = Math.random, config = {} } = {})
       provoke(m.state, cause, C.attackGain);
       const pa = playerActor();
       if (pa && !(m.engaged && m.target === pa)) engage(m, pa);
+      return true;
+    },
+    // P20 故事任務 S3 清場完成：指定幫派敵意 + gain（同 provoke 路徑：達門檻圍攻 / 派車，之後照常衰減）；未知 id → false
+    provokeGang(id, cause = 'story', gain = C.attackGain) {
+      const g = stateOf.get(id);
+      if (!g || !(gain > 0)) return false;
+      provoke(g, cause, gain);
       return true;
     },
     isHostile: (id) => !!(stateOf.get(id) && stateOf.get(id).hostile),

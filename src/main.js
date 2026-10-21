@@ -94,6 +94,11 @@
 //   互斥：state.firefighter（getter）、state.racing getter 包裝併入（otherMissionBusy / 搶劫守門 / 暴走 / 特技跳台）、vigHooks.active / end 包裝；
 //   出勤條件 fireBusy = otherMissionBusy() || vigilante.active || rampage.active || stunts.active || 重生 / 噴漆中；
 //   第 12 關完成 → 永久防火（explosions.setFireproof：玩家正駕駛的車）+ autosave.flush('firefighter')；存檔 firefighter；開新局 / 回主選單 → cancelFirefighter()（先於 clearExplosions）
+// 故事任務線第一章「七期夜雨」（P20，Story）：createStory（src/missions/story.js 純邏輯，S1 送貨 / S2 追債 / S3 清場，聯絡人阿海在 KTV 後巷「S」）+ storyWorld 轉接
+//   （S1 貨車 = vehicles.adopt + dmg.attach；S2 叛徒車 = 第二個 createFugitiveWorld；S3 對手幫派 = 第二個 createRampageWorld + gangs.provokeGang）+ createStoryHud（任務條 / 字幕框）+ S 小光柱；
+//   每幀 updateStory 接在 updateSnatch 之後（手機 / BUSTED・WASTED / 噴漆中凍結）；對白：互動鍵下一句、STORY_SKIP_KEY（Enter）整段跳過（storyInteractable 於步行 / 駕駛提示鏈最後覆蓋）；
+//   互斥：state.story（getter）、包裝 state.racing getter（otherMissionBusy / 搶劫 / 暴走 / 特技 / 消防 / 副任務 / 競速皆擋）、vigHooks.active / end（委託類 / 噴漆 / BUSTED・WASTED → 任務失敗）；
+//   nearestInteractable 故事任務中不接委託；存檔 story（{ chapter, done, unlocked }）；章節獎勵 → 安全屋專屬座車 storyCars + autosave.flush('story')；開新局 / 回主選單 → cancelStory()
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -187,6 +192,7 @@ import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers
 import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
 import { createPackages, createPackageMesh } from './collect/packages.js';
 import { createSnatch, SNATCH_PROMPT } from './snatch.js';
+import { createStory, createStoryHud, createStoryCarDepot, CONTACT as STORY_CONTACT, STORY_BEACON, STORY_SKIP_KEY, VAN_TYPE as STORY_VAN_TYPE, VAN_COLOR as STORY_VAN_COLOR } from './missions/story.js';
 import { createFirefighter, createFireWorld, createFireTruckDepot, createWaterCannonMesh, nozzleOf, isFireTruck, FIRE_STATION, FIRE_TRUCK_SPOT, FIRE_STATION_BEACON, PROMPT_START as FIRE_PROMPT_START, PROMPT_QUIT as FIRE_PROMPT_QUIT, SPRAY_KEY as FIRE_SPRAY_KEY } from './missions/firefighter.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
@@ -1123,6 +1129,7 @@ async function init() {
     pushAll(out, rampageMarkers()); // Phase 15 暴走點（骷髏）
     pushAll(out, stuntMarkers()); // Phase 16 特技跳台（已完成淡化）
     pushAll(out, fireMarkers()); // P18 消防車任務起火車（kind 'fire'）
+    pushAll(out, storyMarkers()); // P20 故事任務起點 S（kind 'story'）/ 目標圖釘（mission-dest）
     if (!withVehicles) packages.markers(out); // Phase 17 隱藏包裹：只有大地圖、只標已收集（淡化）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
@@ -1153,6 +1160,7 @@ async function init() {
     interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos); // 警車任務 / 街頭競速進行中不接委託（互斥）
     if (state.sideJob) interCands[0] = null; // 計程車 / 救護車副任務中同樣不接委託
     if (state.firefighter) interCands[0] = null; // 消防車任務（P18）出勤中不接委託
+    if (state.story) interCands[0] = null; // 故事任務（P20）進行中不接委託
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1281,6 +1289,7 @@ async function init() {
         stunts: stunts.serialize(), // Phase 16：已完成的特技跳台（沒有 = null，存檔省略）
         packages: packages.serialize(), // Phase 17：隱藏包裹 { found, tier, bonus }（一個都沒收集 = null，存檔省略）
         firefighter: firefighter.serialize(), // P18：消防車任務 { fireproof, best }（未玩過 = null，存檔省略）
+        story: story.serialize(), // P20：故事任務 { chapter, done, unlocked }（一關都沒完成 = null，存檔省略）
       };
     },
   });
@@ -3006,6 +3015,165 @@ async function init() {
     hud.setSnatchCombo(0, 1);
   };
 
+  // ---------- P20 故事任務線第一章「七期夜雨」：src/missions/story.js（純邏輯 + 世界轉接 + 任務條 / 字幕框）+ 起點 S 小光柱 + 小地圖 'story' ----------
+  // 聯絡人阿海（虛構，KTV 後巷）：步行到 S 按 E 接任務 → 對白（E 下一句 / Enter 跳過）→ 任務；世界操作全走 storyWorld（測試以替身注入同介面）
+  const story = createStory({ bus, rng: Math.random, gangOf: (a) => gangs.gangOf(a) });
+  // S2 叛徒車：第二個逃犯車世界實例（沿路網逃竄 / 撞停後下車沿用警車任務 createFugitiveWorld；名單與警車任務分開）
+  const storyTraitors = createFugitiveWorld({
+    vehicles, dmg, traffic, findRoute: (a, b) => findRoute(graph, a, b), rng: Math.random, attacker: () => player.actor,
+    isKept: (v) => v === state.vehicle || v === cj.vehicle,
+    onKeep: (v) => adopted.add(v),
+  });
+  // S3 對手幫派成員：沿用暴走的徵用介面（gangs.enlist / release + 骨架重新上色、掛武器）
+  const storyGangs = createRampageWorld({
+    traffic, gangs, combat,
+    repaint: (p) => {
+      repaintCharacter(p.character, p.citizen.look);
+      p.look = p.citizen.look;
+      traffic._gangWeapon(p, p.citizen.gang ? p.citizen.gang.weapon : null);
+    },
+  });
+  const storyVanState = { exists: false, health: null };
+  const storyTraitorState = { x: 0, z: 0, speed: 0, health: null, exists: false };
+  let storyTraitorUp = false; // 叛徒下車後是否已起身：下車摔倒（spawnEjectedDriver 設 knockdown）不算 KO，起身後再倒地才算
+  const storyWorld = {
+    spawnVan: (spot) => {
+      // 上次失敗留在原地、沒人開的貨車先收走（避免重接時疊在同一點）
+      for (const old of vehicles.vehicles.slice()) {
+        if (!old.storyVan || old.driven || old === state.vehicle || Math.hypot(old.pos.x - spot.x, old.pos.z - spot.z) > 8) continue;
+        dmg.detach(old);
+        adopted.delete(old);
+        vehicles.remove(old);
+      }
+      const v = vehicles.adopt({ type: STORY_VAN_TYPE, color: STORY_VAN_COLOR, x: spot.x, z: spot.z, yaw: spot.yaw });
+      if (!v) return null;
+      v.storyVan = true;
+      dmg.attach(v);
+      return v;
+    },
+    vanState: (v) => {
+      storyVanState.exists = !!v && vehicles.vehicles.includes(v);
+      const h = storyVanState.exists ? dmg.healthOf(v) : null;
+      const m = storyVanState.exists ? dmg.maxHealthOf(v) : null;
+      storyVanState.health = h !== null && m > 0 ? h / m : null;
+      return storyVanState;
+    },
+    releaseVan: (v) => {
+      if (v && vehicles.vehicles.includes(v)) adopted.add(v); // 交還一般車輛（遠了照搶來車回收）
+    },
+    spawnPoint: (x, z, rMin, rMax) => storyTraitors.spawnPoint(x, z, rMin, rMax),
+    spawn: (pt) => storyTraitors.spawn(pt),
+    state: (h) => {
+      const v = h ? h.v : null;
+      const ok = !!v && vehicles.vehicles.includes(v);
+      storyTraitorState.exists = ok;
+      storyTraitorState.x = ok ? v.pos.x : NaN;
+      storyTraitorState.z = ok ? v.pos.z : NaN;
+      storyTraitorState.speed = ok ? v.speed || 0 : 0;
+      storyTraitorState.health = ok ? dmg.healthOf(v) : null;
+      return storyTraitorState;
+    },
+    drive: (h, c) => storyTraitors.drive(h, c),
+    eject: (h) => {
+      const a = storyTraitors.eject(h);
+      storyTraitorUp = false;
+      // 叛徒下車一律逃跑（既有 brain.onThreatened → flee）
+      if (a) for (const p of traffic.peds) if (p.actor === a && p.brain && p.brain.onThreatened) p.brain.onThreatened({ pos: player.pos });
+      return a;
+    },
+    remove: (h) => storyTraitors.remove(h),
+    isDown: (a) => {
+      if (!a) return false;
+      const down = combat.isDown(a) || !(a.hp > 0);
+      if (!down) storyTraitorUp = true;
+      return down && storyTraitorUp; // 撞停下車摔倒中 → 不算；必須起身後再被 KO（玩家擊倒另走 ped:knockdown / ped:dead byPlayer）
+    },
+    actorPos: (a) => (a && a.pos ? a.pos : null),
+    aliveGang: (id, x, z, r) => storyGangs.alive(id, x, z, r),
+    isEnlisted: (a) => storyGangs.enlisted.includes(a), // S3 擊倒只算本任務徵用的成員（地盤原生不算）
+    spawnGang: (id, x, z, n) => storyGangs.spawn(id, x, z, n),
+    releaseGang: () => storyGangs.release(),
+    provokeGang: (id, gain) => gangs.provokeGang(id, 'story', gain),
+  };
+  const storyHud = createStoryHud({ root: document.body, isTouch: touch });
+  const storyBeacons = createBeaconPool({ scene, heightAt, ...STORY_BEACON }); // S 起點小光柱（可接任務時 1 根）
+  let storyBeacon = null;
+  // 章節獎勵：安全屋門口專屬座車（金色轎車；解鎖後常駐，毀損 / 棄置遠處時玩家不在旁才補回）
+  const storyCars = createStoryCarDepot({ vehicles, dmg, isBusy: (v) => v === state.vehicle || v === cj.vehicle });
+  // 互斥旗標：state.story（getter）；otherMissionBusy / 搶劫守門讀 state.racing → 包裝既有 racing getter 併入（不改 otherMissionBusy 原文）
+  Object.defineProperty(state, 'story', { get: () => story.active, enumerable: true, configurable: true });
+  const racingGetStory = Object.getOwnPropertyDescriptor(state, 'racing').get;
+  Object.defineProperty(state, 'racing', { get: () => racingGetStory() || story.active, enumerable: true, configurable: true });
+  // vigHooks.active（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口）/ vigHooks.end（BUSTED / WASTED → 任務失敗）
+  const vigActiveStory = vigHooks.active;
+  vigHooks.active = () => vigActiveStory() || story.active;
+  const vigEndStory = vigHooks.end;
+  vigHooks.end = (kind) => {
+    vigEndStory(kind);
+    story.end(kind);
+    storyHud.set(null);
+  };
+  const storyMk = [];
+  const storyMarkers = () => {
+    storyMk.length = 0;
+    return story.markers(storyMk);
+  };
+  const storyBusy = () => otherMissionBusy() || vigilante.active || rampage.active || stunts.active || firefighter.active || !!state.respawn || !!state.spraying;
+  const storyCtx = {
+    player: { x: 0, z: 0 },
+    onFoot: false,
+    vehicle: null,
+    topSpeed: 0,
+    wantedStars: 0,
+    busy: false,
+    frozen: false,
+    world: storyWorld,
+    earn: (n) => economy.add(n, 'story'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    save: () => autosave.flush('story'), // 章節獎勵入檔
+  };
+  const storyInter = { text: '', priority: SNATCH_PRIORITY + 1, dist: 0, act: () => story.interact(storyCtx) };
+  // 互動提示鏈最後一環：對白中 / 可接任務 → 覆蓋為故事提示；其他情況原樣回傳
+  const storyInteractable = (inter, allowed) => {
+    if (!allowed || state.respawn) return inter;
+    const text = story.prompt(storyCtx, touch);
+    if (!text) return inter;
+    storyInter.text = text;
+    return storyInter;
+  };
+  // 每幀（updateSnatch 之後）：手機 / BUSTED・WASTED / 噴漆 → frozen（計時停、不推進；HUD 維持）；skipPressed = 對白整段跳過
+  const updateStory = (dt, skip, skipPressed) => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const p = playerPos();
+    storyCtx.player.x = p.x;
+    storyCtx.player.z = p.z;
+    storyCtx.vehicle = v;
+    storyCtx.topSpeed = v ? v.spec.maxSpeed : 0;
+    storyCtx.onFoot = state.mode === 'walk' && !(state.koTimer > 0) && !combat.isDown(player.actor);
+    storyCtx.wantedStars = wanted.stars;
+    storyCtx.frozen = skip || !!state.respawn || !!state.spraying;
+    storyCtx.busy = !story.active && storyBusy();
+    if (skipPressed && !storyCtx.frozen) story.skip();
+    if (!storyCtx.frozen) storyTraitors.update(dt);
+    else storyTraitors.brakeAll();
+    storyHud.set(story.update(dt, storyCtx));
+    const showS = story.startVisible;
+    if (showS && !storyBeacon) storyBeacon = storyBeacons.acquire('story', STORY_CONTACT.x, STORY_CONTACT.z, STORY_CONTACT);
+    else if (!showS && storyBeacon) {
+      storyBeacons.release(storyBeacon);
+      storyBeacon = null;
+    }
+    if (storyBeacon) storyBeacons.update(dt);
+    storyCars.update(dt, p, story.unlocked);
+  };
+  // 開新局 / 回主選單：無聲失敗（貨車交還、叛徒車回收、徵用成員釋放）、任務條 / 字幕收起
+  const cancelStory = () => {
+    story.cancel();
+    storyTraitors.dispose();
+    storyGangs.release();
+    storyHud.set(null);
+  };
+
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
     scene.traverse((o) => {
@@ -3318,6 +3486,7 @@ async function init() {
     updatePackages(dt);
     updateFirefighter(dt, phoneOpen, state.mode === 'drive' && (snap.down.attack || input.down(FIRE_SPRAY_KEY)));
     updateSnatch(dt, phoneOpen || !!state.respawn); // P19：接在 updateFirefighter 之後（暫停 / 面板 / 重生中凍結）
+    updateStory(dt, phoneOpen, input.wasPressed(STORY_SKIP_KEY)); // P20：故事任務（Enter = 對白整段跳過）
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3335,6 +3504,7 @@ async function init() {
       if (jack || near) showHint('enter');
       pickups.update(dt, player.pos); // 拾取物（目前無放置點，保留串接）
       inter = free ? nearestInteractable(player.pos, true) : null;
+      inter = storyInteractable(inter, free); // P20：對白中「下一句」/ 站在 S 上「接受故事任務」優先
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (over) {
@@ -3366,6 +3536,7 @@ async function init() {
       // 駕駛計程車 / 救護車：開始 / 收工降為後備（只在附近沒有委託 / 打卡等既有互動時出現；其他車回 null）
       if (!inter) inter = sideJobInteractable(v);
       if (!inter) inter = firefighterInteractable(v); // P18：駕駛消防車開始 / 收工（同副任務後備）
+      inter = storyInteractable(inter, true); // P20：駕駛中只有對白「下一句」（接任務限步行）
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
@@ -3683,6 +3854,7 @@ async function init() {
     cancelShops();
     cancelRampage();
     cancelStunts();
+    cancelStory(); // P20：任務中 → 無聲失敗（貨車 / 叛徒車 / 徵用成員回收）、字幕收起
     cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
@@ -3699,6 +3871,8 @@ async function init() {
     packages.restore(save.packages); // Phase 17：舊存檔無 packages → 0 收集
     firefighter.restore(save.firefighter); // P18：舊存檔無 firefighter → 未解鎖防火
     snatch.restore(save.stats); // P19：搶包統計存在 save.stats（缺欄位視 0）
+    story.restore(save.story); // P20：舊存檔無 story → 從第一關開始
+    storyCars.ensure(true, null, story.unlocked); // P20：章節獎勵座車（未解鎖 → 收回）
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3771,6 +3945,7 @@ async function init() {
     cancelShops();
     cancelRampage();
     cancelStunts();
+    cancelStory(); // P20：任務中 → 無聲失敗（貨車 / 叛徒車 / 徵用成員回收）、字幕收起
     cancelPackages();
     cancelRespawn();
     policeV5.cancel(); // V5：直升機 / 路障 / 特警立即回收
@@ -3884,6 +4059,8 @@ async function init() {
       firefighter, fireWorld, fireTrucks, waterCannon, fireStationBeacons,
       // P19：飛車搶包（snatch.target 看目前鎖定行人；snatch.combo / mult 看連擊）
       snatch,
+      // P20：故事任務（story.accept(ctx) / next() / skip()；story.phase / stage / kills；storyWorld 世界轉接；storyCars.vehicle = 安全屋專屬座車）
+      story, storyWorld, storyHud, storyCars, storyBeacons,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

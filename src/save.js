@@ -19,6 +19,9 @@
 //   （src/collect/packages.js serialize）；舊存檔沒有此欄 → 省略（0 收集）；格式錯誤（含 found 非陣列）整欄丟棄；清洗後 found 為空 → 省略（即使 bonus:true）
 // P18（不升版，選填、defaultSave 不含）：firefighter：{ fireproof: boolean, best: 1..12 整數 }（src/missions/firefighter.js serialize：
 //   第 12 關完成的永久防火獎勵 + 最高完成關數）；舊存檔沒有此欄 → 省略（未解鎖）；非物件整欄丟棄；best 非法 → 0；兩者皆無 → 省略
+// P20（不升版，選填、defaultSave 不含）：story：{ chapter: 1, done: 已完成的故事任務 id 陣列（只收 STORY_IDS、依章節順序去重）, unlocked: boolean }
+//   （src/missions/story.js serialize；unlocked = 第一章全破的永久獎勵）；舊存檔沒有此欄 → 省略（從第一關開始）；非物件整欄丟棄；
+//   unlocked 只在三關皆完成時成立；done 為空且未解鎖 → 省略
 
 export const SAVE_VERSION = 2;
 
@@ -169,6 +172,16 @@ function firefighterRecord(src) {
   return { fireproof, best };
 }
 
+// 故事任務：{ chapter, done, unlocked } → { chapter: 1, done, unlocked }；規則同 src/missions/story.js storyRecord（測試交叉比對）
+const STORY_IDS = ['s1-delivery', 's2-debt', 's3-sweep']; // 與 src/missions/story.js STORY_IDS 一致
+function storyRecord(src) {
+  if (!isObj(src)) return null;
+  const done = STORY_IDS.filter((id) => Array.isArray(src.done) && src.done.includes(id));
+  const unlocked = src.unlocked === true && done.length === STORY_IDS.length;
+  if (!done.length && !unlocked) return null;
+  return { chapter: 1, done, unlocked };
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -252,6 +265,8 @@ export function validateSave(obj) {
   if (pk) out.packages = pk;
   const ff = firefighterRecord(m.firefighter);
   if (ff) out.firefighter = ff;
+  const sy = storyRecord(m.story);
+  if (sy) out.story = sy;
   return out;
 }
 

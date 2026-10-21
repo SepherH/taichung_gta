@@ -30,6 +30,8 @@
     "test:p3": "node tools/test/integration-p3.mjs",
     "test:snatch": "node tools/test/p19-snatch.mjs",
     "test:p19": "node tools/test/integration-p19.mjs",
+    "test:story": "node tools/test/p20-story.mjs",
+    "test:p20": "node tools/test/integration-p20.mjs",
     "test:all": "node tools/test/run-all.mjs"
   },
   "dependencies": {

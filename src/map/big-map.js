@@ -46,6 +46,7 @@ export const MARKER_LABELS = {
   stunt: '特技跳台', // Phase 16：特技跳台（src/stunts.js）
   'stunt-done': '特技跳台（已完成）',
   package: '隱藏包裹（已收集）',
+  story: '故事任務（阿海）', // P20：故事任務線第一章起點（src/missions/story.js）
   fire: '起火車', // P18：消防車任務（src/missions/firefighter.js） // Phase 17：隱藏包裹（src/collect/packages.js；未收集者不標示）
 };
 // 畫成圖釘的 kind（目的地類）；其餘 kind 畫圓點
