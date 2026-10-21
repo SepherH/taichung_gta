@@ -43,6 +43,9 @@ export const VEHICLE_TYPES = {
   //   手感沿用轎車
   police: { label: '警車', length: 4.66, width: 1.99, height: 1.555, maxSpeed: 42, maxReverse: 8, accel: 8, brake: 18, turnRate: 1.7, camScale: 1.35, mass: 1450, maxLatAccel: 10.5 },
   garbage_truck: { label: '垃圾車', length: 7.4, width: 2.5, height: 3.05, maxSpeed: 19.5, maxReverse: 4, accel: 3.8, brake: 8, turnRate: 1.0, camScale: 1.9, mass: 9000, maxLatAccel: 5.5, tiltScale: 1.4 },
+  // 消防車（P18 消防車任務 src/missions/firefighter.js：消防隊停放 + 車流極低比例出現；玩家可上車 / 搶）：紅色大型車，
+  //   manifest 無 fire_truck → 程式幾何後備（車身 / 駕駛艙 / 車頂水砲 / 側邊銀色裝備箱，無貼圖）；手感推測：比垃圾車快（極速 86 km/h）、比公車靈活
+  fire_truck: { label: '消防車', length: 7.6, width: 2.5, height: 3.0, maxSpeed: 24, maxReverse: 5, accel: 4.4, brake: 10, turnRate: 1.05, camScale: 1.9, mass: 9500, maxLatAccel: 6, tiltScale: 1.35 },
 };
 
 // 程序化車（無 glb）的座位點（本地座標，角色 drive 動作 Hips 位置；推測值，依方塊車外形目測）
@@ -53,6 +56,7 @@ const FALLBACK_SEAT = {
   suv: { x: 0.38, y: 0.75, z: -0.25 },
   bus: { x: 0.72, y: 1.35, z: 4.8 },
   garbage_truck: { x: 0.55, y: 1.55, z: 2.98 },
+  fire_truck: { x: 0.55, y: 1.45, z: 2.933 },
   scooter: { x: 0, y: 0.84, z: -0.25 },
 };
 const FALLBACK_PAINT = '#f2f2ee'; // 呼叫端未給車色（例：公車用 manifest 預設塗裝）而又沒有 glb 時的程序化車色
@@ -115,6 +119,9 @@ registerNight(tailMat, 1.5);
 let taxiSignMat = null;
 
 const carWheelGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.26, 14).rotateZ(Math.PI / 2);
+// 消防車後備幾何的車頂水砲（底座 + 朝前的砲管，共用）
+const fireCannonBaseGeo = new THREE.CylinderGeometry(0.32, 0.36, 0.3, 12);
+const fireCannonBarrelGeo = new THREE.CylinderGeometry(0.07, 0.1, 1.3, 8).rotateX(Math.PI / 2);
 const scooterWheelGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.12, 12).rotateZ(Math.PI / 2);
 
 function part(geo, mat, x, y, z) {
@@ -153,15 +160,30 @@ export function createVehicleMesh(type, color) {
   } else {
     const L = spec.length;
     const W = spec.width;
-    const tall = type === 'suv' || type === 'bus' || type === 'garbage_truck';
+    const tall = type === 'suv' || type === 'bus' || type === 'garbage_truck' || type === 'fire_truck';
     const bodyH = tall ? 0.85 : 0.65;
     const bodyY = tall ? 0.78 : 0.62;
     const cabH = tall ? 0.72 : 0.55;
     const cabLen = tall ? L * 0.62 : L * 0.5;
-    g.add(part(new THREE.BoxGeometry(W, bodyH, L), paint, 0, bodyY, 0));
     const cabY = bodyY + bodyH / 2 + cabH / 2;
-    g.add(part(new THREE.BoxGeometry(W * 0.86, cabH, cabLen), glassMat, 0, cabY, tall ? -0.25 : -0.2));
-    g.add(part(new THREE.BoxGeometry(W * 0.84, 0.08, cabLen * 0.94), paint, 0, cabY + cabH / 2 + 0.04, tall ? -0.25 : -0.2));
+    if (type === 'fire_truck') {
+      // 消防車：前段駕駛艙（紅色 + 擋風玻璃）、後段高車身（裝備廂）、兩側銀色裝備箱、車頂水砲（無貼圖，材質皆共用快取）
+      const H = spec.height;
+      const cabL = L * 0.27;
+      const rearL = L - cabL - 0.1;
+      const silver = cachedStandardMaterial('#c8ccd0', { roughness: 0.3, metalness: 0.8 });
+      g.add(part(new THREE.BoxGeometry(W, H - 0.95, cabL), paint, 0, 0.5 + (H - 0.95) / 2, L / 2 - cabL / 2));
+      g.add(part(new THREE.BoxGeometry(W * 0.9, 0.62, 0.06), glassMat, 0, H - 0.95, L / 2 + 0.01));
+      g.add(part(new THREE.BoxGeometry(W, H - 0.7, rearL), paint, 0, 0.5 + (H - 0.7) / 2, -L / 2 + rearL / 2));
+      for (const s of [-1, 1]) g.add(part(new THREE.BoxGeometry(0.1, 0.9, rearL * 0.86), silver, s * (W / 2 + 0.05), 1.05, -L / 2 + rearL / 2));
+      g.add(part(fireCannonBaseGeo, silver, 0, H - 0.2 + 0.15, -L * 0.04));
+      g.add(part(fireCannonBarrelGeo, silver, 0, H - 0.2 + 0.3, -L * 0.04 + 0.6));
+      g.add(part(new THREE.BoxGeometry(W * 0.6, 0.14, 0.3), tailMat, 0, H - 0.95 + 0.07 + 0.45, L / 2 - cabL / 2));
+    } else {
+      g.add(part(new THREE.BoxGeometry(W, bodyH, L), paint, 0, bodyY, 0));
+      g.add(part(new THREE.BoxGeometry(W * 0.86, cabH, cabLen), glassMat, 0, cabY, tall ? -0.25 : -0.2));
+      g.add(part(new THREE.BoxGeometry(W * 0.84, 0.08, cabLen * 0.94), paint, 0, cabY + cabH / 2 + 0.04, tall ? -0.25 : -0.2));
+    }
     // 車燈
     for (const s of [-1, 1]) {
       g.add(part(new THREE.BoxGeometry(0.42, 0.16, 0.05), headMat, s * W * 0.32, bodyY + 0.1, L / 2 + 0.01));

@@ -17,6 +17,8 @@
 // Phase 16（§38，不升版，選填、defaultSave 不含）：stunts：{ done: 已完成的特技跳台 id 陣列 }（src/stunts.js serialize）；清洗規則同 rampage
 // Phase 17（不升版，選填、defaultSave 不含）：packages：{ found: 已收集的隱藏包裹 id 陣列（同 rampage 清洗）, tier: 0..4 整數, bonus: boolean }
 //   （src/collect/packages.js serialize）；舊存檔沒有此欄 → 省略（0 收集）；格式錯誤（含 found 非陣列）整欄丟棄；清洗後 found 為空 → 省略（即使 bonus:true）
+// P18（不升版，選填、defaultSave 不含）：firefighter：{ fireproof: boolean, best: 1..12 整數 }（src/missions/firefighter.js serialize：
+//   第 12 關完成的永久防火獎勵 + 最高完成關數）；舊存檔沒有此欄 → 省略（未解鎖）；非物件整欄丟棄；best 非法 → 0；兩者皆無 → 省略
 
 export const SAVE_VERSION = 2;
 
@@ -153,6 +155,18 @@ function packagesRecord(src) {
   return { found, tier, bonus };
 }
 
+// 消防車任務：{ fireproof, best } → 同形；非物件 / 清洗後未解鎖且 best 0 → null（省略）
+const FIREFIGHTER_MAX_LEVEL = 12; // 與 src/missions/firefighter.js MAX_LEVEL 一致（測試交叉比對）
+function firefighterRecord(src) {
+  if (!isObj(src)) return null;
+  const fireproof = src.fireproof === true;
+  const b = src.best;
+  let best = Number.isInteger(b) && b > 0 ? Math.min(FIREFIGHTER_MAX_LEVEL, b) : 0;
+  if (fireproof) best = FIREFIGHTER_MAX_LEVEL; // 防火只在全破時取得
+  if (!fireproof && best === 0) return null;
+  return { fireproof, best };
+}
+
 // 版本遷移：version < SAVE_VERSION 逐版升級；version > SAVE_VERSION 視為無法讀取（回 null，不覆寫）
 export function migrate(obj) {
   if (!isObj(obj)) return null;
@@ -234,6 +248,8 @@ export function validateSave(obj) {
   if (sj) out.stunts = sj;
   const pk = packagesRecord(m.packages);
   if (pk) out.packages = pk;
+  const ff = firefighterRecord(m.firefighter);
+  if (ff) out.firefighter = ff;
   return out;
 }
 

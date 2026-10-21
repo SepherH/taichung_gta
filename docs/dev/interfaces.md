@@ -64,6 +64,12 @@
 | `ems:pickup` | `{ level, picked, patients }`（一名傷患停車 3 s 抬上車） | missions/ems.js |
 | `ems:level` | `{ level, reward, patients, timeLeft, earned }`（送達醫院；賞金已 `ctx.earn`、`ctx.heal()` 已回血） | missions/ems.js |
 | `ems:end` | `{ reason: 'timeout'\|'lost'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'quit'\|'complete'\|'cancel', level, cleared, earned }` | missions/ems.js |
+| `firefighter:start` | `{ level }`（駕駛消防車按互動鍵出勤；level = 1） | missions/firefighter.js（§40） |
+| `firefighter:fires` | `{ level, fires, limit }`（本關起火車生成完畢、開始計時；附加事件） | missions/firefighter.js |
+| `firefighter:extinguish` | `{ level, index, remaining, x, z }`（一輛起火車火勢歸零熄滅） | missions/firefighter.js |
+| `firefighter:level` | `{ level, reward, fires, timeLeft, earned }`（本關全部熄滅；賞金 300 + 關數 × 150 已 `ctx.earn`） | missions/firefighter.js |
+| `firefighter:complete` | `{ levels, earned, fireproof, first }`（第 12 關完成；first = 本次首次解鎖永久防火，已 `ctx.save()`） | missions/firefighter.js |
+| `firefighter:fail` | `{ reason: 'timeout'\|'exploded'\|'left'\|'wrecked'\|'busted'\|'wasted'\|'quit'\|'cancel', level, cleared, earned }` | missions/firefighter.js |
 | `street:start` | `{ id, kind: 'robbery'\|'chase'\|'gang'\|'drunk', x, z }`（街頭事件開始；x, z = 事發點） | street-events.js（§32） |
 | `street:resolve` | `{ id, kind, outcome: 'subdued'\|'escaped'\|'arrested'\|'crashed'\|'over'\|'timeout'\|'cancel', reward, x, z }`（reward > 0 時已 `ctx.earn` 入帳） | street-events.js |
 | `toast` | `{ text, seconds }` | 任何模組（整合轉給 `hud.toast`） |
@@ -1315,6 +1321,45 @@ setData({ hour, weatherIcon, money?, jobs })   // 每幀或節流呼叫皆可；
 
 ### 39.5 回歸
 - `node tools/test/p17-packages.mjs`（純邏輯 + 地圖資料，不 import three）、`node tools/test/integration-p17.mjs`（main.js 接線靜態檢查 + interfaces.md 本節）
+
+## 40. P18 消防車任務 Firefighter（P18；接線點在 `src/main.js`，介面以 `src/missions/firefighter.js` 檔頭為準）
+
+### 40.1 消防車 / 消防隊（純資料）
+- 車種 `VEHICLE_TYPES.fire_truck`（`src/vehicle.js`，label 消防車，7.6 × 2.5 × 3.0 m、9500 kg、極速 24 m/s）：manifest 無 glb → 程式幾何後備（紅色車身 + 駕駛艙 + 擋風玻璃 + 兩側銀色裝備箱 + 車頂水砲 + 頂燈，共用快取材質、不新增貼圖單元）；`carjack.js` FALLBACK_SIZE 同步
+- 消防隊 `FIRE_STATION`（osm-city.json B 層「消防局黎明分隊」fire_station，id 324898390，門口 x 1159.2, z −353.5）；停放點 `FIRE_TRUCK_SPOT`（前庭 x 1150.8, z −352.0, yaw −0.518，車頭朝青海路二段）；門口小光柱 `FIRE_STATION_BEACON`（7 m / r 0.7，`BEACON_COLORS.fire` #ff6d00，常駐 1 根）
+- 車流：`traffic.js` 一般車生成時以獨立種子 `fireRng`（不動既有 rng 序列）`FIRE_TRUCK_CHANCE` 1.2% 換成消防車（`FIRE_TRUCK_COLOR`），同時最多 `FIRE_TRUCK_MAX` 1 台；可搶，搶來的消防車同樣可出勤（`isFireTruck(v)` = `v.type === 'fire_truck'`）
+
+### 40.2 介面
+- `createFirefighter({ bus, rng, config })` → `{ update(dt, ctx) → snapshot, hold(dt), start(ctx?), cancel(), end(reason, ctx?), canStart(ctx), markers(out), beacons(), serialize() → { fireproof, best }|null, restore(rec), dispose(), active, phase, level, fires, remaining, timeLeft, limit, earned, cleared, fireproof, best, slots }`
+  - `ctx = { player: { x, z }, inTruck, wrecked, spraying, nozzle: { x, z, dx, dz }, world, earn(n), toast?, routeLength?(a, b), onFireproof?(), save?() }`；`canStart({ inTruck, busy, stalled, overturned })`
+  - 關卡 1–`MAX_LEVEL` 12；起火車數 `firesFor(level)` = min(4, 1 + floor(level / 3))；生成於玩家 `SPAWN_MIN` 150 – `SPAWN_MAX` 400 m（traffic.spawnSpots 車道點），彼此 ≥ `FIRE_GAP` 30 m；每輛 0–2 名驚慌乘客（車門外倒地、起身逃離）；spawn 階段 `SPAWN_TIMEOUT_SEC` 15 s 仍 0 輛 → 失敗 `nofire`（toast「附近沒有火警，消防車收工」、不扣錢、已得賞金保留）
+  - 限時 `levelLimit(n, path)` = 估計路網路程 ÷ `TRUCK_SPEED` 10 m/s + n × `PER_FIRE_SEC` 25 s（`chainLength`：玩家 → 最近未訪起火車貪婪鏈，每段 `routeLength`（findRoute），失敗退直線 × 1.4）；開始計時時各車引信 `setFuse(限時 + FUSE_GRACE 20 s)`；呼叫端凍結任務（手機 / 噴漆 / 重生中不呼叫 update）時每幀改呼叫 `hold(dt)` → 未熄滅車引信 `world.setFuse(h, world.fuseOf(h) + dt)`（explosions 照 simDt 燒引信，任務計時與引信同一時鐘）
+  - 水砲：`waterHit(nozzle, x, z)`——沿車頭方向射程 `WATER_RANGE` 15 m（目標半徑 2.4 m、水柱半寬 0.5 + 0.12/m）；命中時火勢 `FIRE_HP` 100 每秒減 `DOUSE_RATE` 34；歸零 → `world.douse`（explosions.extinguish：取消引信、火焰 / 黑煙停、`v.doused` 只在 `v.fireTarget` 期間擋重燃；dmg.repair 後扣到損壞比 `DOUSED_DAMAGE` 0.5（< SMOKE_AT，白煙）；不 detach，之後照常受損 / 報廢）
+  - 過關：全部熄滅 → 賞金 `levelReward(level)` = 300 + level × 150；第 12 關完成 → 永久防火（只發一次，`ctx.onFireproof()` + `ctx.save()`）
+  - 失敗：`timeout` / `exploded`（起火車爆炸或消失）/ `left`（離開消防車 > `LEFT_SEC` 20 s）/ `wrecked` / `busted` / `wasted` / `quit` / `nofire`（spawn 逾時）；`cancel` 無聲
+  - 標記：未熄滅起火車 kind `'fire'`（marker-colors #ff3d00；hud.js `EDGE_KINDS` 貼邊；big-map 圖例「起火車」）
+- `createFireWorld({ vehicles, dmg, explosions, traffic, rng, onKeep })` → `{ spawnPoint, spawn, state, setFuse, fuseOf, douse, remove, dispose, cars, spotQueries }`（spawnPoint：traffic.spawnSpots 結果快取，玩家移動 > `SPOT_CACHE_MOVE` 25 m 或距離帶改變才重取；remove：清 `v.fireTarget` / `v.doused`，未熄滅者（仍在燒或 explosions.clear 後的低耐久車）走 douse 同路徑熄火 + 修到安全耐久，再 onKeep 交還一般回收——交還後回到一般車規則，可受損 / 起火 / 爆炸 / 報廢）
+- `createFireTruckDepot({ vehicles, dmg, spot, isBusy })` → `{ update(dt, player), ensure(force, player?), isFireTruck, vehicle, spot, dispose }`（規則同 ems.js createAmbulanceDepot）
+- `createWaterCannonMesh({ THREE, scene })` → `{ update(dt, on, nozzle), mesh, dispose }`：16 段白色錐體 1 個 `InstancedMesh`（MeshBasicMaterial、無貼圖 / 光源 / 陰影），沿拋物線 `waterArc` 循環前進；off 時 `visible = false`
+- `src/explosions.js` 新增：`setFuse(v, sec)`、`extinguish(v)`（設 `v.doused`；onDamage 只在 `v.doused && v.fireTarget` 時不再起火）、`setFireproof(fn|null)`（`FIREPROOF_FIRE_AT` 0.97、`FIREPROOF_FUSE_MULT` 2）、`fireStage(ratio, fireAt = FIRE_AT)`
+
+### 40.3 事件（bus）
+- `firefighter:start` / `firefighter:fires` / `firefighter:extinguish` / `firefighter:level` / `firefighter:complete` / `firefighter:fail`（欄位見 §1 事件表）；`toast`（ctx.toast 省略時）
+
+### 40.4 接線（main.js）
+- 建立（特技跳台段之後、畫質段之前）：`firefighter = createFirefighter({ bus })`、`fireWorld = createFireWorld({ …, onKeep: adopted.add })`、`fireTrucks = createFireTruckDepot(…)`、`fireBar = createSideJobBar({ prefix: 'fire' })`（`.fire-bar` 樣式在 style.css）、`fireStationBeacons`、`waterCannon`；`explosions.setFireproof(v => firefighter.fireproof && 駕駛中 && v === state.vehicle)`
+- 每幀：`updateFirefighter(dt, phoneOpen, 駕駛中 && (snap.down.attack || input.down(FIRE_SPRAY_KEY)))` 接在 `updatePackages(dt)` 之後（水柱 = 駕駛消防車按住水砲鍵；手機 / BUSTED・WASTED / 噴漆中不推進任務、改呼叫 `firefighter.hold(dt)`）
+- 水砲輸入（`SPRAY_KEY` = `'KeyX'`，firefighter.js 匯出、main.js 以 `FIRE_SPRAY_KEY` 匯入）：鍵盤 = 射擊鍵 Mouse0 或備援 X；觸控 = `tb-spray`（「噴水」，hold、虛擬 KeyX、slot top1：出勤中駕駛消防車才顯示，顯示時隱藏喇叭 `tb-horn`，`setFireSprayButton` 只在變化時呼叫；樣式 style.css `#tb-spray`）；手把 = X（`createGamepad` 的 `getSprayMode()`：駕駛消防車時 X 由喇叭 KeyH 改送 KeyX，RT 仍為油門）
+- 互動：駕駛中後備鏈 `if (!inter) inter = sideJobInteractable(v);` 之後 `if (!inter) inter = firefighterInteractable(v);`；`nearestInteractable` 在 `state.sideJob || state.firefighter` 時不接委託（出勤中不顯示「按 E 接委託」蓋掉收工提示）
+- 互斥：`state.firefighter`（getter）；包裝 `state.racing` getter 併入（otherMissionBusy / 搶劫守門 / 暴走 / 特技跳台 / 警車任務 / 副任務 / 競速皆擋）；`vigHooks.active` / `vigHooks.end` 包裝；出勤 `fireBusy = otherMissionBusy() || vigilante.active || rampage.active || stunts.active || 重生 / 噴漆中`
+- 標記：`collectMarkers` 加 `pushAll(out, fireMarkers())`
+- 存檔：getState `firefighter: firefighter.serialize()`；`startGame` → `firefighter.restore(save.firefighter)`（`packages.restore` 之後）、`fireTrucks.ensure(true)`（`ambulances.ensure` 之後）；`startGame` / `quitToMenu` → `cancelFirefighter()`（**先於 `clearExplosions()`**：fireWorld.remove 須在起火狀態仍在時熄火修復，否則起火車以低耐久交還、輕撞即重燃爆炸）
+- `src/save.js`（不升版，選填、defaultSave 不含）：`firefighter: { fireproof: boolean, best: 1..12 }`；非物件整欄丟棄、best 非法 → 0、fireproof → best 12、皆無 → 省略（舊存檔相容）
+- 除錯：`window.__game.firefighter` / `fireWorld` / `fireTrucks` / `waterCannon` / `fireStationBeacons`
+- 限制：未新增 shadow map / 貼圖單元 / 光源；常駐 draw call 增量 = 門口光柱 2（shell + core）+ 水柱 1（噴水時）= 3；每幀路徑不配置物件
+
+### 40.5 回歸
+- `node tools/test/p18-firefighter.mjs`（純邏輯，不 import three / rapier）、`node tools/test/integration-p18.mjs`（main.js 接線靜態檢查 + VEHICLE_TYPES + 本節）
 
 ## 附錄 B：Phase 4 接線說明（各單元 result 彙整，整合單元 I4a / I4b 照做）
 

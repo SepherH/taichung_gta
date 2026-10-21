@@ -121,6 +121,10 @@ const MAX_BUSES = 2; // 公車數量上限（計入 budget.cars）
 const BUS_ROAD_TYPES = new Set(['primary', 'secondary']);
 const BUS_MIN_LENGTH = 60; // 出生路段最短長度（m）：12.5 m 車身要有空間
 const CAR_TYPES = ['sedan', 'sedan', 'taxi', 'suv']; // 一般車（機車 / 公車另計）
+// P18 消防車：一般車生成時以獨立種子（不動既有 rng 序列）極低比例換成消防車，同時最多 FIRE_TRUCK_MAX 台
+export const FIRE_TRUCK_CHANCE = 0.012;
+export const FIRE_TRUCK_MAX = 1;
+export const FIRE_TRUCK_COLOR = '#c8102e';
 const MOTORBIKE = 'scooter';
 // 前車距離判斷（m）：以 4.5 m 車長為基準的前方 14 m，長車（公車）依車長差加長
 const FOLLOW_REACH = 14;
@@ -278,6 +282,7 @@ export class Traffic {
     this.rng = mulberry32(CITY_SEED + 1); // 車流抽樣 / 換路
     this.busRng = mulberry32(CITY_SEED + 3); // 公車生成（另開種子）
     this.sigRng = mulberry32(CITY_SEED + 5); // 起步反應時間 / 喇叭反應
+    this.fireRng = mulberry32(CITY_SEED + 7); // P18 車流消防車抽樣（另開種子）
     this.cars = [];
     this.citizens = []; // 全部市民（骨架 + 替身）
     this.peds = []; // 目前掛著骨架的行人（Phase 2 相容：每人有 mesh / body / actor / anim / brain）
@@ -1037,11 +1042,18 @@ export class Traffic {
       if (this.cars.some((c) => (c.v.pos.x - sp.x) ** 2 + (c.v.pos.z - sp.z) ** 2 < gap * gap)) continue;
       if (!initial && !this._hidden(sp.x, sp.z)) continue;
       const dir = randPick(rng, allowedDirs(sp.road));
-      const type = kind === 'car' ? randPick(rng, CAR_TYPES) : kind;
-      const color = type === 'bus' ? null : type === 'taxi' ? '#f5c518' : randPick(rng, CAR_COLORS);
+      let type = kind === 'car' ? randPick(rng, CAR_TYPES) : kind;
+      if (kind === 'car' && this.fireRng() < FIRE_TRUCK_CHANCE && this._countType('fire_truck') < FIRE_TRUCK_MAX) type = 'fire_truck';
+      const color = type === 'bus' ? null : type === 'taxi' ? '#f5c518' : type === 'fire_truck' ? FIRE_TRUCK_COLOR : randPick(rng, CAR_COLORS);
       return this._spawnCar(this.scene, this.physics, type, color, sp.road, dir, sp.s, 0.9 + rng() * 0.2);
     }
     return null;
+  }
+
+  _countType(type) {
+    let n = 0;
+    for (const c of this.cars) if (c.type === type) n++;
+    return n;
   }
 
   // 車流密度管理：遠離且視野外者回收 → 超量時回收超額車種中最遠、視野外者 → 不足時補缺的車種

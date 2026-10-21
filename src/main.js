@@ -86,6 +86,14 @@
 //   頂點色、無貼圖 / 光源 / 陰影）；每幀 updatePackages(dt) 接在 updateStunts 之後（玩家 / 駕駛車身位置進 2.5 m 自動收集；60 m 內才更新旋轉）；
 //   大地圖只標已收集者（kind 'package' 淡化，collectMarkers 不含車輛時才加）、圖例統計列「隱藏包裹 N / 20」、暫停選單統計頁同列；
 //   bus safehouse:enter → packages.resupply({ save })（依已達里程碑以 weapons.give / addAmmo 補給；有補到才 autosave.flush('safehouse-resupply') 入檔，存檔結果併入補給 toast）；存檔 packages；開新局 / 回主選單 → cancelPackages()
+// 消防車任務（P18，Firefighter）：createFirefighter（src/missions/firefighter.js 純邏輯，關卡 1–12）+ createFireWorld（起火車 = vehicles.adopt + dmg.attach
+//   + explosions.damageVehicle 點燃 / setFuse 延長引信 / extinguish 熄滅；驚慌乘客 = traffic.spawnEjectedDriver 逃跑）+ createFireTruckDepot（消防局黎明分隊前庭停放、
+//   門口小光柱 BEACON_COLORS.fire）+ createWaterCannonMesh（水柱 1 個 InstancedMesh）+ 任務條 .fire-bar + 小地圖 'fire'；駕駛消防車按住射擊鍵噴水（車頭方向、射程 15 m）；
+//   水砲輸入：Mouse0 / 備援 KeyX（FIRE_SPRAY_KEY）、觸控 tb-spray（出勤中駕駛消防車才顯示）、手把 X（getSprayMode：駕駛消防車時喇叭改水砲）；
+//   每幀 updateFirefighter 接在 updatePackages 之後（手機 / BUSTED・WASTED / 噴漆中不推進，改呼叫 firefighter.hold(dt) 延後起火車引信）；駕駛中互動鍵後備鏈 sideJobInteractable → firefighterInteractable；
+//   互斥：state.firefighter（getter）、state.racing getter 包裝併入（otherMissionBusy / 搶劫守門 / 暴走 / 特技跳台）、vigHooks.active / end 包裝；
+//   出勤條件 fireBusy = otherMissionBusy() || vigilante.active || rampage.active || stunts.active || 重生 / 噴漆中；
+//   第 12 關完成 → 永久防火（explosions.setFireproof：玩家正駕駛的車）+ autosave.flush('firefighter')；存檔 firefighter；開新局 / 回主選單 → cancelFirefighter()（先於 clearExplosions）
 import * as THREE from 'three';
 import './style.css';
 import osm from './data/osm-city.json';
@@ -93,7 +101,7 @@ import { SURFACE_OFFSET, TRIVIA } from './data/city.js';
 import { LoadingScreen } from './loading.js';
 import { Input } from './input.js';
 import { createGamepad } from './gamepad.js';
-import { registerTouchButton } from './touch.js';
+import { registerTouchButton, setTouchButtonVisible } from './touch.js';
 import { PhysicsOccluder } from './collision.js';
 import { buildWorld, describeLocation } from './world.js';
 import { buildQiuhonggu } from './qiuhonggu.js';
@@ -178,6 +186,7 @@ import { createStreetEvents, createStreetWorld } from './street-events.js';
 import { createRampage, createRampageWorld, createRampageHud, createSkullMarkers } from './missions/rampage.js';
 import { createStunts, createRampMesh, addRampColliders, createStuntHud } from './stunts.js';
 import { createPackages, createPackageMesh } from './collect/packages.js';
+import { createFirefighter, createFireWorld, createFireTruckDepot, createWaterCannonMesh, nozzleOf, isFireTruck, FIRE_STATION, FIRE_TRUCK_SPOT, FIRE_STATION_BEACON, PROMPT_START as FIRE_PROMPT_START, PROMPT_QUIT as FIRE_PROMPT_QUIT, SPRAY_KEY as FIRE_SPRAY_KEY } from './missions/firefighter.js';
 
 const ENTER_DIST = 2.6; // 上車 / 扶起距離（m，距車身圓）
 const CARJACK_SCAN = 6; // 搶車候選的搜尋半徑（m，traffic.carjackCandidates；實際門檻由 carjack.canStart 判斷車門距離）
@@ -1111,6 +1120,7 @@ async function init() {
     pushAll(out, safehouses.markers());
     pushAll(out, rampageMarkers()); // Phase 15 暴走點（骷髏）
     pushAll(out, stuntMarkers()); // Phase 16 特技跳台（已完成淡化）
+    pushAll(out, fireMarkers()); // P18 消防車任務起火車（kind 'fire'）
     if (!withVehicles) packages.markers(out); // Phase 17 隱藏包裹：只有大地圖、只標已收集（淡化）
     if (withVehicles) for (const c of vehicles.vehicles) if (!c.driven && !c.fugitive) out.push(c.pos); // 逃犯車改畫紅點（fugitiveMarkers）
     return out;
@@ -1140,6 +1150,7 @@ async function init() {
   const nearestInteractable = (pos, walking) => {
     interCands[0] = vigilante.active || races.active ? null : missions.nearest(pos); // 警車任務 / 街頭競速進行中不接委託（互斥）
     if (state.sideJob) interCands[0] = null; // 計程車 / 救護車副任務中同樣不接委託
+    if (state.firefighter) interCands[0] = null; // 消防車任務（P18）出勤中不接委託
     interCands[1] = checkins.nearest(pos);
     interCands[2] = walking ? food.nearest(pos) : null;
     interCands[3] = walking ? pickups.nearest(pos) : null;
@@ -1267,6 +1278,7 @@ async function init() {
         rampage: rampage.serialize(), // Phase 15：已完成的暴走點（沒有 = null，存檔省略）
         stunts: stunts.serialize(), // Phase 16：已完成的特技跳台（沒有 = null，存檔省略）
         packages: packages.serialize(), // Phase 17：隱藏包裹 { found, tier, bonus }（一個都沒收集 = null，存檔省略）
+        firefighter: firefighter.serialize(), // P18：消防車任務 { fireproof, best }（未玩過 = null，存檔省略）
       };
     },
   });
@@ -1763,7 +1775,7 @@ async function init() {
   bus.on('vehicle:crash', ({ relSpeed }) => rig.shake(Math.min(1, relSpeed / CRASH_SHAKE_SPEED)));
   // 遊戲手把（gamepad.js）：輪詢掛在 input 每幀 hook；步行 / 駕駛沿用 state.mode，十字鍵 ← 上一把武器讀 weapons.pending（排隊中優先）/ weapons.slot
   // 震動只接既有事件：玩家開槍（weapon:fire byPlayer）一次短震、玩家駕駛碰撞（vehicle:crash，≥ 8 m/s）依撞擊速度；手把不支援震動時略過
-  const gamepad = createGamepad(input, { getMode: () => state.mode, getSlot: () => (weapons.pending >= 0 ? weapons.pending : weapons.slot), getPrevSlot: () => weapons.prevSlot() });
+  const gamepad = createGamepad(input, { getMode: () => state.mode, getSlot: () => (weapons.pending >= 0 ? weapons.pending : weapons.slot), getPrevSlot: () => weapons.prevSlot(), getSprayMode: () => state.mode === 'drive' && isFireTruck(state.vehicle) });
   bus.on('weapon:fire', (e) => {
     if (e && e.byPlayer) gamepad.rumble(0.2, 0.6, 70);
   });
@@ -2838,6 +2850,124 @@ async function init() {
     stuntHud.set(null);
   };
 
+  // ---------- 消防車任務（P18，Firefighter）：src/missions/firefighter.js（純邏輯 + 起火車世界 + 消防隊停放 + 水柱）+ 任務條 + 小地圖 'fire' ----------
+  const firefighter = createFirefighter({ bus, rng: Math.random });
+  // 起火車：一般 adopt 車（dmg.attach → explosions 點燃 / 延長引信）；任務結束交還一般車輛回收名單（adopted：遠了才消失）
+  const fireWorld = createFireWorld({ vehicles, dmg, explosions, traffic, rng: Math.random, onKeep: (v) => adopted.add(v) });
+  let fireCar = null; // 出勤那台消防車（耐久歸零 = 車毀失敗）
+  const fireTrucks = createFireTruckDepot({
+    vehicles, dmg, spot: FIRE_TRUCK_SPOT,
+    isBusy: (v) => v === state.vehicle || v === cj.vehicle || v === fireCar,
+  });
+  const fireBar = createSideJobBar({ root: document.body, prefix: 'fire' });
+  const fireStationBeacons = createBeaconPool({ scene, heightAt, ...FIRE_STATION_BEACON }); // 消防隊門口小光柱（常駐 1 根）
+  fireStationBeacons.acquire('fire', FIRE_STATION.x, FIRE_STATION.z, FIRE_STATION);
+  const waterCannon = createWaterCannonMesh({ THREE, scene }); // 水柱：1 個 InstancedMesh（無貼圖 / 光源 / 陰影）
+  // 永久防火：已解鎖時玩家正駕駛的車起火門檻提高、引信延長（explosions.js FIREPROOF_FIRE_AT / FIREPROOF_FUSE_MULT）
+  explosions.setFireproof((v) => firefighter.fireproof && state.mode === 'drive' && v === state.vehicle);
+  // 互斥旗標：state.firefighter（getter）；otherMissionBusy / 搶劫守門讀 state.racing → 包裝既有 racing getter 併入（不改 otherMissionBusy 原文）
+  Object.defineProperty(state, 'firefighter', { get: () => firefighter.active, enumerable: true, configurable: true });
+  const racingGetFire = Object.getOwnPropertyDescriptor(state, 'racing').get;
+  Object.defineProperty(state, 'racing', { get: () => racingGetFire() || firefighter.active, enumerable: true, configurable: true });
+  // vigHooks.active（委託 / 外送 / 垃圾車 / 打工 extraBusy、噴漆廠入口）/ vigHooks.end（BUSTED / WASTED → 任務失敗）
+  const vigActiveFire = vigHooks.active;
+  vigHooks.active = () => vigActiveFire() || firefighter.active;
+  const vigEndFire = vigHooks.end;
+  vigHooks.end = (kind) => {
+    vigEndFire(kind);
+    firefighter.end(kind);
+    fireBar.set(null);
+  };
+  const fireMk = [];
+  const fireMarkers = () => {
+    fireMk.length = 0;
+    return firefighter.markers(fireMk);
+  };
+  const fireBusy = () => otherMissionBusy() || vigilante.active || rampage.active || stunts.active || !!state.respawn || !!state.spraying;
+  const fireNozzle = { x: 0, y: 0, z: 0, dx: 0, dz: 1 };
+  const fireCtx = {
+    player: { x: 0, z: 0 },
+    inTruck: false,
+    wrecked: false,
+    spraying: false,
+    nozzle: fireNozzle,
+    world: fireWorld,
+    earn: (n) => economy.add(n, 'firefighter'),
+    toast: (text, seconds) => hud.toast(text, seconds),
+    routeLength: (a, b) => {
+      const r = findRoute(graph, a, b);
+      return r ? r.lengthM : null;
+    },
+    save: () => autosave.flush('firefighter'), // 第 12 關防火獎勵入檔
+  };
+  // 水砲輸入：鍵盤 Mouse0（射擊鍵）或備援 KeyX；觸控 tb-spray（駕駛消防車且出勤中才顯示，虛擬 KeyX）；手把 X（gamepad.js getSprayMode：駕駛消防車時 X 由喇叭改送 KeyX）
+  registerTouchButton({ id: 'tb-spray', label: '噴水', code: FIRE_SPRAY_KEY, mode: 'hold', slot: 'top1', showWhen: 'drive', hidden: true }); // 借喇叭位置（顯示時隱藏 tb-horn）
+  let fireSprayShown = false;
+  const setFireSprayButton = (on) => {
+    fireSprayShown = on;
+    setTouchButtonVisible('tb-spray', on);
+    setTouchButtonVisible('tb-horn', !on);
+  };
+  const fireStartCtx = { inTruck: false, busy: false, stalled: false, overturned: false, world: fireWorld, toast: fireCtx.toast };
+  const toggleFirefighter = () => {
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    if (!v) return;
+    if (firefighter.active) {
+      firefighter.end('quit', fireCtx);
+      return;
+    }
+    fireStartCtx.inTruck = isFireTruck(v);
+    fireStartCtx.busy = fireBusy();
+    fireStartCtx.stalled = dmg.healthOf(v) === 0;
+    fireStartCtx.overturned = !!v.fallen || v.isOverturned();
+    if (fireStartCtx.inTruck && firefighter.start(fireStartCtx)) fireCar = v;
+  };
+  const fireInter = { text: '', priority: SIDEJOB_PRIORITY, dist: 0, act: toggleFirefighter };
+  // 駕駛消防車：未開始 → 開始提示（其他任務中回 null）；進行中 → 收工提示
+  const firefighterInteractable = (v) => {
+    if (!v || state.respawn || !isFireTruck(v)) return null;
+    fireInter.text = firefighter.active ? FIRE_PROMPT_QUIT : fireBusy() ? null : FIRE_PROMPT_START;
+    return fireInter.text ? fireInter : null;
+  };
+  // 每幀（updatePackages 之後）：手機 / BUSTED・WASTED / 噴漆 → 不推進（計時停、水柱關）；spraying = 駕駛消防車按住射擊鍵（任務外也能噴水）
+  const updateFirefighter = (dt, skip, attackDown) => {
+    fireStationBeacons.update(dt);
+    const p = playerPos();
+    const v = state.mode === 'drive' ? state.vehicle : null;
+    const inTruck = isFireTruck(v);
+    const frozen = skip || !!state.respawn || !!state.spraying;
+    fireCtx.spraying = !frozen && inTruck && !!attackDown;
+    if (inTruck) nozzleOf(v, fireNozzle);
+    waterCannon.update(dt, fireCtx.spraying, fireNozzle);
+    const sprayBtn = inTruck && firefighter.active;
+    if (sprayBtn !== fireSprayShown) setFireSprayButton(sprayBtn);
+    if (frozen) {
+      firefighter.hold(dt); // 任務計時凍結 → 起火車引信同步延後（explosions 照 simDt 走）
+      return;
+    }
+    fireTrucks.update(dt, p);
+    if (firefighter.active) {
+      if (inTruck) fireCar = v;
+      fireCtx.player.x = p.x;
+      fireCtx.player.z = p.z;
+      fireCtx.inTruck = inTruck;
+      fireCtx.wrecked = !!fireCar && dmg.healthOf(fireCar) === 0;
+    }
+    const f = firefighter.update(dt, fireCtx);
+    if (!f.active) fireCar = null;
+    fireBar.set(f.text, f.urgent);
+    if (!f.active && fireSprayShown) setFireSprayButton(false);
+  };
+  // 開新局 / 回主選單：無聲結束（起火車熄火交還、任務條收起、水柱關）
+  const cancelFirefighter = () => {
+    firefighter.cancel();
+    fireWorld.dispose();
+    fireCar = null;
+    fireBar.set(null);
+    waterCannon.update(0, false, null);
+    setFireSprayButton(false);
+  };
+
   // ---------- 畫質 / 設定 ----------
   const markMaterialsDirty = () => {
     scene.traverse((o) => {
@@ -3148,6 +3278,7 @@ async function init() {
     updateRampage(dt, phoneOpen);
     updateStunts(realDt);
     updatePackages(dt);
+    updateFirefighter(dt, phoneOpen, state.mode === 'drive' && (snap.down.attack || input.down(FIRE_SPRAY_KEY)));
     weapons.update(dt, aim);
     updateWeaponPose(aim.aiming);
 
@@ -3194,6 +3325,7 @@ async function init() {
       if (!inter) inter = vigilanteInteractable(v) || nearestInteractable(v.pos, false);
       // 駕駛計程車 / 救護車：開始 / 收工降為後備（只在附近沒有委託 / 打卡等既有互動時出現；其他車回 null）
       if (!inter) inter = sideJobInteractable(v);
+      if (!inter) inter = firefighterInteractable(v); // P18：駕駛消防車開始 / 收工（同副任務後備）
       setPrompts(vehiclePrompt, inter);
       if (snap.pressed.enterExit) {
         if (flipped) v.upright();
@@ -3502,6 +3634,7 @@ async function init() {
     cancelRace();
     cancelSideJobs();
     gangs.cancel();
+    cancelFirefighter(); // P18：先於 clearExplosions（fireWorld.remove 要看得到起火狀態才熄火修復；之後 clear 不會留下低耐久起火車）
     clearExplosions();
     cancelStreetEvents();
     cancelRobbery(!continued);
@@ -3515,6 +3648,7 @@ async function init() {
     safehouses.restore(save.safehouse); // Phase 14：最後使用的安全屋（新局 defaultSave 無此欄 → null）；placePlayer 據此決定出生點
     placePlayer(save);
     ambulances.ensure(true); // 醫院旁救護車（停放點附近且完好就沿用；棄置遠處的收回重生）
+    fireTrucks.ensure(true); // P18：消防隊前庭的消防車（同救護車規則）
     // 存檔 v2 各模組還原（新局 = defaultSave 的預設值）；進行中的委託由 missions.restore 作廢
     weapons.restore(save.weapons);
     missions.restore(save.missions);
@@ -3522,6 +3656,7 @@ async function init() {
     rampage.restore(save.rampage); // Phase 15：舊存檔無 rampage → 全部未完成
     stunts.restore(save.stunts); // Phase 16：舊存檔無 stunts → 全部未完成
     packages.restore(save.packages); // Phase 17：舊存檔無 packages → 0 收集
+    firefighter.restore(save.firefighter); // P18：舊存檔無 firefighter → 未解鎖防火
     syncGarbageTruck(0); // 讀檔作廢進行中的垃圾車 → 車體隱藏
     checkins.restore(save.collect);
     food.restore(save.collect);
@@ -3585,6 +3720,7 @@ async function init() {
     cancelRace();
     cancelSideJobs();
     gangs.cancel();
+    cancelFirefighter(); // P18：先於 clearExplosions（fireWorld.remove 要看得到起火狀態才熄火修復；之後 clear 不會留下低耐久起火車）
     clearExplosions();
     cancelStreetEvents();
     cancelRobbery();
@@ -3701,6 +3837,8 @@ async function init() {
       stunts, stuntHud, stuntRamps, stuntColliders,
       // Phase 17：隱藏包裹（packages.collect('pkg-01') 除錯收集；packages.list[i].x / y / z 是點位；packages.resupply() 立即補給）
       packages, packageMesh,
+      // P18：消防車任務（firefighter.start() 除錯開始；firefighter.slots 看起火車火勢；fireTrucks.vehicle = 消防隊停放的消防車）
+      firefighter, fireWorld, fireTrucks, waterCannon, fireStationBeacons,
       // 最近的骨架行人 → { id, dist, hp, state }（沒有回 null）
       nearestPed() {
         let best = null;

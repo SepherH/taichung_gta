@@ -1691,6 +1691,49 @@ body.touch .rob-bar {
   color: #ffd0d8;
 }
 
+/* 消防車任務條（P18，src/missions/firefighter.js；taxi.js createSideJobBar({ prefix: 'fire' })）：同 .ems-bar 膠囊樣式與位置
+   （與其他任務互斥，共用位置）；橘紅框；剩 ≤ 15 s 轉紅（.fire-urgent） */
+.fire-bar {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  z-index: 55;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: rgba(12, 16, 32, 0.72);
+  border: 1px solid rgba(255, 109, 0, 0.9);
+  color: #fff;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif;
+  font-size: calc(clamp(13px, 1vw + 0.5vh, 16px) * var(--tg-ui-scale, 1));
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+}
+
+.fire-bar[hidden] {
+  display: none !important;
+}
+
+.fire-bar.fire-urgent {
+  border-color: rgba(255, 23, 68, 0.95);
+  color: #ffd0d8;
+}
+
+/* P18 水砲鈕（touch.js tb-spray，hold、虛擬 KeyX）：出勤中駕駛消防車才顯示，借喇叭的 top1 位置（顯示時喇叭隱藏）；水藍配色與喇叭區分 */
+.tbtn#tb-spray {
+  border-color: #7df0ff;
+  color: #eaf6ff;
+  background: rgba(30, 136, 229, 0.6);
+}
+
+.tbtn#tb-spray.active {
+  background: rgba(100, 190, 255, 0.85);
+}
+
 /* 暴走任務（Phase 15，src/missions/rampage.js createRampageHud）：上方中央任務條（與其他任務互斥，共用位置；紅框）、
    畫面邊緣紅色脈動（inset box-shadow，只動 opacity）；剩 ≤ 10 s 轉急迫（.rampage-urgent 脈動加快）；prefers-reduced-motion 時關閉脈動 */
 .rampage-bar {

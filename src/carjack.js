@@ -16,6 +16,7 @@ const FALLBACK_SIZE = {
   suv: { length: 4.9, width: 2.0 },
   scooter: { length: 1.9, width: 0.7, twoWheeler: true },
   bus: { length: 12.2, width: 2.5 },
+  fire_truck: { length: 7.6, width: 2.5 },
 };
 const DOOR_FORWARD = 0.1; // 車門中心在車身中點前方 length × 此比例（駕駛座略偏前）
 

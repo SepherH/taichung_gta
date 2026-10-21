@@ -115,7 +115,7 @@ const q = {};
 const vehGlbPresent = vManifest.vehicles.length > 0 && vManifest.vehicles.every((e) => fs.existsSync(path.join(PUBLIC, 'models/vehicles', e.file)));
 if (!vehGlbPresent) console.log('SKIP  vehicle-model 真 glb 檢查（工作區缺 public/models/vehicles/*.glb）');
 else {
-  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2, garbage_truck: 4, police: 4 };
+  const want = { sedan: 4, taxi: 4, suv: 4, bus: 4, scooter: 2, fire_truck: 4, garbage_truck: 4, police: 4 };
   let nodesOk = true;
   let specOk = true;
   const det = [];

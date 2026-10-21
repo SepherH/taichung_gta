@@ -29,6 +29,7 @@ export const MARKER_COLORS = {
   stunt: '#ffc400', // 特技跳台（Phase 16，src/stunts.js markers()；小地圖畫黃色坡道圖示（hud.js RAMP_KINDS），不貼邊）
   'stunt-done': '#8d8d8d', // 已完成的特技跳台（同圖示、灰色並淡化：hud.js / big-map.js FADED_KINDS）
   package: '#d4a017', // 已收集的隱藏包裹（Phase 17，src/collect/packages.js markers()；只進大地圖、淡化小點（big-map.js FADED_KINDS）；未收集者不標示）
+  fire: '#ff3d00', // 起火車（P18 消防車任務，src/missions/firefighter.js markers()；會被推動，小地圖超出半徑時貼邊由 hud.js EDGE_KINDS）
 };
 // 無 kind 的標記（可駕駛車輛）與未知 kind 的後備色
 export const CAR_MARKER_COLOR = '#4fc3ff';

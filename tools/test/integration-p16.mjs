@@ -86,7 +86,7 @@ check('cancelStunts 定義：stunts.cancel + HUD 收起', /const cancelStunts = 
 
 const section = (() => {
   const i = mainSrc.indexOf('// ---------- 特技跳台（Phase 16，§38）');
-  const j = mainSrc.indexOf('\n  // ---------- 畫質 / 設定', i);
+  const j = mainSrc.indexOf('\n  // ---------- ', i + 1); // 下一個區段標頭（P18 起為消防車段，再後為畫質段）
   return i > 0 && j > i ? mainSrc.slice(i, j) : '';
 })();
 check('抽出特技跳台段（stepWorld 之後、畫質段之前；不在暴走段抽取範圍內）', section.length > 500 && mainSrc.indexOf('const stepWorld = worldStep.step;') < mainSrc.indexOf('// ---------- 特技跳台（Phase 16，§38）') && mainSrc.indexOf('// ---------- 特技跳台（Phase 16，§38）') > mainSrc.indexOf('\n  // 車流停車判斷用'));

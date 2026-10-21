@@ -12,7 +12,8 @@
 //   步行 ↔ 駕駛切換視同模式切換：切換當下按住的扳機 / 鍵同樣鎖到放開（駕駛踏板不受影響）；扳機當按鍵有遲滯（按下 0.5、放開 0.4）
 //
 // 按鍵配置（standard mapping 索引）：
-//   0 A：Space（跳 / 手煞車）　1 B：KeyE（互動）　2 X：步行 KeyR（裝填）/ 駕駛 KeyH（喇叭）　3 Y：KeyF（上下車）
+//   0 A：Space（跳 / 手煞車）　1 B：KeyE（互動）　2 X：步行 KeyR（裝填）/ 駕駛 KeyH（喇叭）；駕駛且 opts.getSprayMode() 為真（P18 消防車）→ KeyX（水砲，按住）
+//   3 Y：KeyF（上下車）
 //   4 LB：KeyQ（步行 = 武器循環、駕駛 = 換台，沿用 CONTEXT_ACTIONS）　5 RB：KeyV（鏡頭）
 //   6 LT：步行 Mouse2（瞄準）/ 駕駛 煞車倒車類比　7 RT：步行 Mouse0（攻擊）/ 駕駛 油門類比
 //   8 Back：KeyM（大地圖）　9 Start：Escape（暫停）　10 L3：ShiftLeft（衝刺，按住）　11 R3：KeyC（回頭看，按住）
@@ -56,6 +57,7 @@ const GAME_CODES = {
 const MENU_CODES = { [PAD.A]: 'Enter', [PAD.B]: 'Escape', [PAD.START]: 'Escape', [PAD.BACK]: 'KeyM' };
 const KEY_NAMES = { Enter: 'Enter', Escape: 'Escape', KeyM: 'm', ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight' };
 const BUTTON_COUNT = 16;
+const SPRAY_CODE = 'KeyX'; // P18 水砲（= missions/firefighter.js SPRAY_KEY；本檔不 import 任務模組）
 
 function clamp(v, a, b) {
   return v < a ? a : v > b ? b : v;
@@ -185,7 +187,7 @@ export function createGamepad(input, opts = {}) {
   };
 
   const codeFor = (i, drive) => {
-    if (i === PAD.X) return drive ? 'KeyH' : 'KeyR';
+    if (i === PAD.X) return drive ? (typeof opts.getSprayMode === 'function' && opts.getSprayMode() ? SPRAY_CODE : 'KeyH') : 'KeyR';
     if (i === PAD.RT) return drive ? null : 'Mouse0'; // 駕駛 = 油門類比
     if (i === PAD.LT) return drive ? null : 'Mouse2'; // 駕駛 = 煞車倒車類比
     if (i === PAD.LEFT || i === PAD.RIGHT) {

@@ -16,6 +16,8 @@
 //   top1、top2、top3（右上小鈕，由右往左）/ tl1–tl4（左上小鈕：暫停、地圖、圖鑑、手機，由左往右，排在小地圖右側；
 //   直向駕駛時圖鑑隱藏，手機鈕補到 tl3 的位置、電台鈕移到右半手煞鈕下方，見 style.css slot-tl4）/
 //   view（視角鈕 tb-view：橫向右上第三格、直向步行左上小鈕列下方、直向駕駛右半電台鈕下方，見 style.css slot-view）
+//   P18 消防車水砲 tb-spray（main.js 註冊，hold、虛擬 KeyX = 水砲備援鍵）：不用 attack slot（駕駛時攻擊鈕隱藏）→ 借 top1，
+//     出勤中駕駛消防車時顯示並隱藏喇叭 tb-horn（同手把 X：消防車上喇叭改水砲），其餘時間還原；配色見 style.css #tb-spray
 //   駕駛模式（body.touch-drive）時 sec2 / sec3 由 style.css 移到踏板上方一列，不與踏板重疊
 // 攻擊鈕：id 為 ATTACK_ID 或 label 在 ATTACK_LABELS 內的按鈕一律改放 attack slot
 // 已移除的舊按鈕 id（DEPRECATED_IDS：翻正、靈敏度、舊揮拳、油門 / 煞車鈕）再註冊會被忽略（回傳 null），由 F 扶起與設定頁滑桿取代

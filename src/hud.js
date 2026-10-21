@@ -36,6 +36,7 @@
 //   markers kind 'race-start'（街頭競速起點）畫橘色旗幟（FLAG_KINDS），不貼邊；'race-cp'（下一個檢查點）超出半徑時貼邊
 //   markers kind 'rampage'（Phase 15 暴走點）畫紅色骷髏（SKULL_KINDS），不貼邊
 //   markers kind 'stunt' / 'stunt-done'（Phase 16 特技跳台）畫坡道三角圖示（RAMP_KINDS），不貼邊；已完成（FADED_KINDS）灰色淡化
+//   markers kind 'fire'（P18 消防車任務起火車，marker-colors 橘紅）超出半徑時貼邊（EDGE_KINDS）；任務條為 .fire-bar（taxi.js createSideJobBar）
 // V2 幫派：state.gangZones（gangs.js GANG_ZONES：[{ poly（扁平 [x, z, …]）, bbox, color }]）→ 小地圖底圖上畫半透明地盤色塊 + 外框（只畫與視野相交者）
 // 小地圖預先把真實 OSM 道路 / 建築輪廓 / 公園水域畫到離屏畫布，每幀依玩家位置取樣
 import { BOUNDS, surfaceRoads, surfaceFootways, buildings, namedBuildings, parks, water } from './citymodel.js';
@@ -69,7 +70,7 @@ const PROMPT_SEP = '　'; // setPrompts 並列兩則提示的分隔（全形空�
 // 小地圖標記顏色（契約 §17 kind）：色碼來自 map/marker-colors.js（與大地圖同源）；無 kind = 可駕駛車輛
 export const MARKER_COLORS = { car: CAR_MARKER_COLOR, ...BASE_MARKER_COLORS };
 // 超出小地圖半徑時貼邊顯示方向的 kind
-const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event', 'race-cp', 'taxi-fare', 'taxi-dest', 'ems-patient', 'ems-hospital']);
+const EDGE_KINDS = new Set(['mission-start', 'mission-dest', 'dest', 'event-start', 'event-dest', 'event-truck', 'job-car', 'fugitive', 'street-event', 'race-cp', 'taxi-fare', 'taxi-dest', 'ems-patient', 'ems-hospital', 'fire']);
 export const ROUTE_COLOR = '#3ff6ff'; // 導航路線：亮青色
 export const ROUTE_WIDTH = 3; // 螢幕 px
 const MARKER_PX = 4; // 標記半徑（螢幕 px）

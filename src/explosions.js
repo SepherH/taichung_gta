@@ -14,6 +14,13 @@
 //   stateOf(vehicle) → 'ok' | 'smoke' | 'fire' | 'wreck'；fuseOf(vehicle) → 剩餘秒數 | null；isWreck(vehicle)；
 //   nearestFire(x, z) → 最近起火車 / 冒煙殘骸的水平距離（m；無 = Infinity，燃燒聲用）
 //   cancel(vehicle)：熄滅該車的火（不爆炸；殘骸不受影響）；forget(vehicle)：丟掉該車狀態（回收時）
+//   P18 消防車任務（src/missions/firefighter.js）：
+//     setFuse(vehicle, sec) → 是否成功：起火中的車把剩餘引信改成 sec 秒（延長給玩家滅火時間；之後受損照常以 FUSE_ACCEL 縮短）
+//     extinguish(vehicle) → 是否熄滅：水砲滅火——起火中 → 熄火（不爆炸、火焰 / 黑煙停止），標記 vehicle.doused = true：
+//       只在 vehicle.fireTarget（仍是任務起火車）期間有效——再受損不會重新起火 / 縮短引信（殘骸不受影響）；
+//       任務交還後（整合層清 fireTarget / doused）回到一般車規則（受損照常起火 / 爆炸）；耐久由整合層修到冒煙門檻下（dmg.repair）
+//     setFireproof(fn | null)：永久獎勵「防火」——fn(vehicle) 為真的車起火門檻改為 FIREPROOF_FIRE_AT、點燃時引信 × FIREPROOF_FUSE_MULT
+//       （整合層傳 v => 已解鎖 && v === 玩家正駕駛的車；null = 關閉）；已起火的車不受影響，熄火判斷（修好）仍以 FIRE_AT 為準
 //   殘骸以 vehicle.burnt 為準：clear / forget 丟掉狀態後，場上的燒焦殘骸再受損也不會重新起火 / 爆炸
 //   clear()：回主選單 / 新局——熄滅所有火、終止爆炸與閃光、清空粒子與殘骸冒煙（殘骸車本身照一般回收）
 //   stats() → { explosions, maxExplosions, lights, maxLights, particles: { fire, smoke }, caps: { fire, smoke }, burning, wrecks }
@@ -41,6 +48,8 @@
 
 export const SMOKE_AT = 0.7; // 損壞比 ≥ 此值冒煙
 export const FIRE_AT = 0.85; // 損壞比 ≥ 此值起火
+export const FIREPROOF_FIRE_AT = 0.97; // P18 防火獎勵：玩家車輛起火門檻（setFireproof）
+export const FIREPROOF_FUSE_MULT = 2; // P18 防火獎勵：玩家車輛點燃時引信倍率
 export const FUSE_MIN = 4; // 起火 → 爆炸（秒）
 export const FUSE_MAX = 6;
 export const FUSE_ACCEL = 0.02; // 起火中每 1 點傷害縮短引信秒數（手槍 34 → 0.68 s）
@@ -99,8 +108,8 @@ export function shakeTrauma(dist, radius = BLAST_RADIUS, power = BLAST_POWER) {
 }
 
 // 損壞比 → 階段 0 ok / 1 smoke / 2 fire
-export function fireStage(ratio) {
-  if (ratio >= FIRE_AT) return 2;
+export function fireStage(ratio, fireAt = FIRE_AT) {
+  if (ratio >= fireAt) return 2;
   if (ratio >= SMOKE_AT) return 1;
   return 0;
 }
@@ -540,9 +549,20 @@ export function createExplosions({ THREE = null, scene = null, bus = null, comba
   }
   const hp = { x: 0, y: 0, z: 0 };
 
+  let fireproof = null; // P18 setFireproof：fn(v) → 真 = 防火（門檻 FIREPROOF_FIRE_AT、引信 × FIREPROOF_FUSE_MULT）
+  const isFireproof = (v) => {
+    if (!fireproof) return false;
+    try {
+      return !!fireproof(v);
+    } catch (err) {
+      return false;
+    }
+  };
+
   function ignite(e, overflow) {
     e.stage = 2;
     e.fuse = Math.max(FUSE_FLOOR, FUSE_MIN + rng() * (FUSE_MAX - FUSE_MIN) - Math.max(0, overflow) * FUSE_ACCEL);
+    if (isFireproof(e.v)) e.fuse *= FIREPROOF_FUSE_MULT;
     e.flameAcc = 0;
     e.smokeAcc = 0;
     const v = e.v;
@@ -552,7 +572,7 @@ export function createExplosions({ THREE = null, scene = null, bus = null, comba
 
   // 受損後的狀態判斷；requested = 這次要求的傷害（耐久已歸零時實扣為 0，但仍用來加速引信）
   function onDamage(v, delta, requested) {
-    if (disposed || !v || v.burnt) return; // 燒焦殘骸（含 clear / forget 後已無狀態者）不再起火
+    if (disposed || !v || v.burnt || (v.doused && v.fireTarget)) return; // 燒焦殘骸（含 clear / forget 後已無狀態者）/ 任務中水砲熄滅的起火車不再起火
     const ratio = ratioOf(v);
     let e = entries.get(v);
     if (e && e.stage === 3) return;
@@ -560,7 +580,8 @@ export function createExplosions({ THREE = null, scene = null, bus = null, comba
       e.fuse = Math.max(0, e.fuse - Math.max(0, requested) * FUSE_ACCEL);
       return;
     }
-    const st = fireStage(ratio);
+    const fireAt = isFireproof(v) ? FIREPROOF_FIRE_AT : FIRE_AT;
+    const st = fireStage(ratio, fireAt);
     if (st === 0) return;
     e = entryOf(v, true);
     if (st === 2) {
@@ -568,7 +589,7 @@ export function createExplosions({ THREE = null, scene = null, bus = null, comba
       const maxH = maxHealthOf(v);
       const after = healthOf(v) ?? 0;
       const before = after + Math.max(0, delta);
-      const toFire = Math.max(0, before - maxH * (1 - FIRE_AT));
+      const toFire = Math.max(0, before - maxH * (1 - fireAt));
       ignite(e, Math.max(0, requested) - toFire);
     } else {
       e.stage = 1;
@@ -805,6 +826,31 @@ export function createExplosions({ THREE = null, scene = null, bus = null, comba
     forget(v) {
       const e = entries.get(v);
       if (e) dropEntry(e);
+    },
+    // P18：起火中的車剩餘引信改為 sec 秒（非起火 / 非正數 → false）
+    setFuse(v, sec) {
+      const e = entries.get(v);
+      if (!e || e.stage !== 2 || !(sec > 0)) return false;
+      e.fuse = sec;
+      return true;
+    },
+    // P18：水砲滅火（起火中 → 熄火，不爆炸；vehicle.doused 且仍為 fireTarget 期間不再起火）；非起火中 → false（殘骸不受影響）
+    extinguish(v) {
+      const e = entries.get(v);
+      if (!e || e.stage !== 2) return false;
+      e.stage = 1;
+      e.fuse = 0;
+      e.flameAcc = 0;
+      e.smokeAcc = 0;
+      v.doused = true;
+      return true;
+    },
+    // P18：防火獎勵判定函式（null = 關閉）
+    setFireproof(fn) {
+      fireproof = typeof fn === 'function' ? fn : null;
+    },
+    get fireproofActive() {
+      return !!fireproof;
     },
     // 起火狀態轉手（搶車換成新 Vehicle）：to 原有的狀態以 from 的覆蓋；restore?(to) 在「不觸發起火判斷」下執行
     //   （整合層用來把耐久扣到與 from 相同，不會重新點燃 / 重抽引信 / 加速）；回傳是否搬了狀態
